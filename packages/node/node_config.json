@@ -1,0 +1,11 @@
+{
+  "serverAddress": "localhost",
+  "serverPort": 8101,
+  "name": "Node-KevinPC",
+  "cache_dir": "C:\\Users\\cuper\\OneDrive\\Bureaublad\\Encorr\\cache",
+  "temp_dir": "C:\\Users\\cuper\\OneDrive\\Bureaublad\\Encorr\\temp",
+  "handbrakecli_path": "C:\\Users\\cuper\\AppData\\Local\\Microsoft\\WinGet\\Links\\HandBrakeCLI.exe",
+  "ffmpeg_dir": "C:\\ffmpeg\\ffmpeg-2024-06-03-git-77ad449911-essentials_build\\bin",
+  "reconnectInterval": 5000,
+  "heartbeatInterval": 30000
+}

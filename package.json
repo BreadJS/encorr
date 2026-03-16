@@ -1,0 +1,39 @@
+{
+  "name": "encorr",
+  "version": "0.1.0",
+  "description": "A user-friendly video transcoding application",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm:watch:shared\" \"npm:dev:server:start\" \"npm:dev:web:start\"",
+    "dev:node": "concurrently \"npm:watch:shared\" \"npm:dev:node:start\"",
+    "dev:server": "concurrently \"npm:watch:shared\" \"npm:dev:server:start\"",
+    "dev:web": "concurrently \"npm:watch:shared\" \"npm:dev:web:start\"",
+    "watch:shared": "tsc --build --watch packages/shared",
+    "dev:server:start": "tsx watch packages/server/src/index.ts",
+    "dev:web:start": "cd packages/web && vite",
+    "dev:node:start": "tsx watch packages/node/src/cli/index.ts start",
+    "build": "tsc --build && cd packages/web && vite build",
+    "build:shared": "tsc --build packages/shared",
+    "build:server": "tsc --build packages/shared packages/server",
+    "build:node": "tsc --build packages/shared packages/node",
+    "clean": "rm -rf packages/*/dist packages/*/node_modules",
+    "lint": "eslint . --ext .ts,.tsx",
+    "typecheck": "tsc --noEmit",
+    "node": "tsx packages/node/src/cli/index.ts",
+    "node:status": "tsx packages/node/src/cli/index.ts status"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@typescript-eslint/eslint-plugin": "^6.19.0",
+    "@typescript-eslint/parser": "^6.19.0",
+    "concurrently": "^8.2.2",
+    "eslint": "^8.56.0",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

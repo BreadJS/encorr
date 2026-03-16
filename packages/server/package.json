@@ -1,0 +1,33 @@
+{
+  "name": "@encorr/server",
+  "version": "0.1.0",
+  "description": "Encorr server - Web GUI + Backend API + WebSocket server",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc && tsc-alias",
+    "dev": "tsx watch src/index.ts",
+    "dev:web": "tsx watch src/index.ts --web",
+    "start": "node dist/index.js",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@encorr/shared": "file:../shared",
+    "@fastify/cors": "^9.0.1",
+    "@fastify/static": "^7.0.1",
+    "@fastify/websocket": "^10.0.1",
+    "better-sqlite3": "^9.4.3",
+    "fastify": "^4.26.2",
+    "winston": "^3.11.0",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.9",
+    "@types/node": "^20.11.0",
+    "@types/uuid": "^9.0.8",
+    "@types/ws": "^8.5.10",
+    "tsc-alias": "^1.8.8",
+    "tsx": "^4.7.2",
+    "typescript": "^5.3.3"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "gpus": [
+    {
+      "name": "AMD Radeon(TM) Graphics",
+      "vendor": "Advanced Micro Devices, Inc.",
+      "memory": 67108864
+    },
+    {
+      "name": "NVIDIA GeForce RTX 3070",
+      "vendor": "NVIDIA",
+      "memory": 8589934592,
+      "memoryFree": 1824522240,
+      "memoryUsed": 6584008704,
+      "driver_version": "572.70",
+      "utilizationGpu": 7,
+      "utilizationMemory": 3,
+      "temperatureGpu": 55,
+      "powerDraw": 50.65,
+      "powerLimit": 240,
+      "clockCore": 1770,
+      "clockMemory": 6801
+    }
+  ],
+  "timestamp": 1773594620362,
+  "version": "1.0"
+}

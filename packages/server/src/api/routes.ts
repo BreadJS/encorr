@@ -1,0 +1,1117 @@
+import { FastifyInstance } from 'fastify';
+import type { EncorrDatabase } from '../database';
+import type { EncorrWebSocketServer } from '../websocket/server';
+import type { Logger } from 'winston';
+import type {
+  CreateNodeRequest,
+  CreateMappingRequest,
+  UpdateMappingRequest,
+  CreateJobRequest,
+  CreatePresetRequest,
+  UpdateSettingsRequest,
+} from '@encorr/shared';
+import { loadConfig } from '../config';
+
+// ============================================================================
+// Plugin Options
+// ============================================================================
+
+interface RoutesOptions {
+  db: EncorrDatabase;
+  wsServer: EncorrWebSocketServer;
+  logger: Logger;
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+function sendSuccess<T>(data: T, message?: string) {
+  return { success: true, data, message };
+}
+
+function sendError(error: string, statusCode = 400) {
+  return { success: false, error };
+}
+
+// ============================================================================
+// API Routes
+// ============================================================================
+
+export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions) {
+  const { db, wsServer, logger } = options;
+
+  // ========================================================================
+  // Config (for frontend)
+  // ========================================================================
+
+  fastify.get('/config', async (request, reply) => {
+    const config = loadConfig();
+    return sendSuccess({
+      backendPort: config.backendPort,
+      frontendPort: config.frontendPort,
+      host: config.host,
+    });
+  });
+
+  // ========================================================================
+  // Nodes
+  // ========================================================================
+
+  fastify.get('/nodes', async (request, reply) => {
+    const nodes = db.getAllNodes();
+    const connectedNodes = wsServer.getConnectedNodeIds();
+
+    const nodesWithStatus = nodes.map(node => ({
+      ...node,
+      connected: connectedNodes.includes(node.id),
+    }));
+
+    return sendSuccess(nodesWithStatus);
+  });
+
+  fastify.get('/nodes/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const node = db.getNodeById(id);
+
+    if (!node) {
+      reply.status(404);
+      return sendError('Node not found');
+    }
+
+    const connected = wsServer.isNodeConnected(id);
+
+    return sendSuccess({ ...node, connected });
+  });
+
+  fastify.delete('/nodes/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const node = db.getNodeById(id);
+
+    if (!node) {
+      reply.status(404);
+      return sendError('Node not found');
+    }
+
+    db.deleteNode(id);
+
+    logger.info(`Node ${id} deleted`);
+
+    return sendSuccess(null, 'Node deleted');
+  });
+
+  fastify.put('/nodes/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const data = request.body as { max_workers?: { cpu: number; gpus?: number[]; gpu?: number }; config?: any };
+
+    logger.info(`Updating node ${id}:`, data);
+
+    const node = db.getNodeById(id);
+    if (!node) {
+      reply.status(404);
+      return sendError('Node not found');
+    }
+
+    if (data.max_workers) {
+      // Support both old format (gpu) and new format (gpus array)
+      const maxWorkers = data.max_workers.gpus !== undefined
+        ? { cpu: data.max_workers.cpu, gpus: data.max_workers.gpus }
+        : { cpu: data.max_workers.cpu, gpus: [data.max_workers.gpu || 0] };
+      db.updateNodeMaxWorkers(id, maxWorkers);
+      logger.info(`Updated max_workers for node ${id}:`, maxWorkers);
+
+      // Trigger immediate job assignment since worker availability changed
+      wsServer.assignJobsNow();
+    }
+    if (data.config) {
+      db.updateNodeConfig(id, data.config);
+    }
+
+    const updatedNode = db.getNodeById(id);
+    return sendSuccess(updatedNode, 'Node updated');
+  });
+
+  // ========================================================================
+  // Folder Mappings
+  // ========================================================================
+
+  fastify.get('/mappings', async (request, reply) => {
+    const mappings = db.getAllFolderMappings();
+
+    const mappingsWithDetails = mappings.map(mapping => {
+      const node = db.getNodeById(mapping.node_id);
+      return {
+        ...mapping,
+        node_name: node?.name,
+      };
+    });
+
+    return sendSuccess(mappingsWithDetails);
+  });
+
+  fastify.post('/mappings', async (request, reply) => {
+    const data = request.body as CreateMappingRequest;
+
+    // Validate node exists
+    const node = db.getNodeById(data.node_id);
+    if (!node) {
+      reply.status(400);
+      return sendError('Node not found');
+    }
+
+    const mapping = db.createFolderMapping({
+      node_id: data.node_id,
+      server_path: data.server_path,
+      node_path: data.node_path,
+      watch: data.watch,
+    });
+
+    logger.info(`Folder mapping created: ${mapping.id}`);
+
+    return sendSuccess(mapping);
+  });
+
+  fastify.get('/mappings/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const mapping = db.getFolderMappingById(id);
+
+    if (!mapping) {
+      reply.status(404);
+      return sendError('Mapping not found');
+    }
+
+    const node = db.getNodeById(mapping.node_id);
+
+    return sendSuccess({
+      ...mapping,
+      node_name: node?.name,
+    });
+  });
+
+  fastify.put('/mappings/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const data = request.body as UpdateMappingRequest;
+
+    const mapping = db.getFolderMappingById(id);
+    if (!mapping) {
+      reply.status(404);
+      return sendError('Mapping not found');
+    }
+
+    db.updateFolderMapping(id, data);
+
+    const updated = db.getFolderMappingById(id);
+    return sendSuccess(updated);
+  });
+
+  fastify.delete('/mappings/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const mapping = db.getFolderMappingById(id);
+
+    if (!mapping) {
+      reply.status(404);
+      return sendError('Mapping not found');
+    }
+
+    db.deleteFolderMapping(id);
+
+    logger.info(`Folder mapping ${id} deleted`);
+
+    return sendSuccess(null, 'Mapping deleted');
+  });
+
+  // ========================================================================
+  // Libraries
+  // ========================================================================
+
+  // Get all libraries
+  fastify.get('/libraries', async (request, reply) => {
+    const libraries = db.getAllLibraries();
+
+    // Include file count for each library
+    const librariesWithCounts = libraries.map(lib => ({
+      ...lib,
+      file_count: db.getLibraryFiles(lib.id).length,
+    }));
+
+    return sendSuccess(librariesWithCounts);
+  });
+
+  // Get a single library
+  fastify.get('/libraries/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const library = db.getLibraryById(id);
+
+    if (!library) {
+      reply.status(404);
+      return sendError('Library not found');
+    }
+
+    const files = db.getLibraryFiles(id);
+
+    return sendSuccess({
+      ...library,
+      files,
+    });
+  });
+
+  // Create a library
+  fastify.post('/libraries', async (request, reply) => {
+    const { name, path } = request.body as { name: string; path: string };
+
+    if (!name || !path) {
+      return sendError('Name and path are required');
+    }
+
+    const library = db.createLibrary({ name, path });
+
+    logger.info(`Library created: ${library.id} (${name}) at ${path}`);
+    db.logActivity({
+      level: 'info',
+      category: 'system',
+      message: `Library "${name}" created`,
+      metadata: { library_id: library.id, path },
+    });
+
+    return sendSuccess(library);
+  });
+
+  // Delete a library
+  fastify.delete('/libraries/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const library = db.getLibraryById(id);
+
+    if (!library) {
+      reply.status(404);
+      return sendError('Library not found');
+    }
+
+    db.deleteLibrary(id);
+
+    logger.info(`Library deleted: ${id} (${library.name})`);
+    db.logActivity({
+      level: 'info',
+      category: 'system',
+      message: `Library "${library.name}" deleted`,
+      metadata: { library_id: id },
+    });
+
+    return sendSuccess({ deleted: true });
+  });
+
+  // Import files from a library path
+  fastify.post('/libraries/:id/import', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const { recursive = true } = request.body as { recursive?: boolean };
+
+    const library = db.getLibraryById(id);
+    if (!library) {
+      reply.status(404);
+      return sendError('Library not found');
+    }
+
+    const { readdirSync, statSync } = require('fs');
+    const { join } = require('path');
+
+    // Video file extensions to support (comprehensive list)
+    const videoExtensions = new Set([
+      '.mp4', '.mpg', '.mpeg', '.mp2', '.m2v', '.m4v', '.mv2',
+      '.avi', '.divx', '.xvid', '.mkv', '.webm', '.flv', '.f4v',
+      '.swf', '.vob', '.ogv', '.ogg', '.drc', '.gif', '.gifv',
+      '.mng', '.mov', '.qt', '.yuv', '.rm', '.rmvb', '.asf',
+      '.amv', '.m1v', '.m2v', '.ts', '.m2ts', '.mts', '.mt2s',
+      '.3gp', '.3g2', '.f4p', '.f4a', '.f4b', '.wmv', '.mxf',
+      '.nsv', '.wtv', '.bik', '.smk', '.mka', '.m3u', '.m3u8',
+      '.vro', '.flc', '.fli', '.dvr-ms', '.wtv', '.wmv',
+    ]);
+
+    let importedCount = 0;
+    let skippedCount = 0;
+
+    function scanDirectory(dirPath: string, baseDir: string) {
+      try {
+        const entries = readdirSync(dirPath, { withFileTypes: true });
+
+        for (const entry of entries) {
+          const fullPath = join(dirPath, entry.name);
+
+          if (entry.isDirectory()) {
+            if (recursive) {
+              scanDirectory(fullPath, baseDir);
+            }
+          } else if (entry.isFile()) {
+            const ext = '.' + entry.name.split('.').pop()?.toLowerCase();
+
+            if (videoExtensions.has(ext)) {
+              try {
+                const stats = statSync(fullPath);
+
+                db.upsertLibraryFile({
+                  library_id: id,
+                  filename: entry.name,
+                  filepath: fullPath,
+                  filesize: stats.size,
+                  format: ext.substring(1), // Remove the dot
+                });
+
+                importedCount++;
+              } catch (err) {
+                skippedCount++;
+                logger.warn(`Failed to import file ${entry.name}:`, err);
+              }
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn(`Failed to scan directory ${dirPath}:`, err);
+      }
+    }
+
+    scanDirectory(library.path, library.path);
+
+    logger.info(`Library import completed: ${importedCount} imported, ${skippedCount} skipped`);
+    db.logActivity({
+      level: 'info',
+      category: 'file',
+      message: `Library "${library.name}" import completed: ${importedCount} files`,
+      metadata: { library_id: id, imported_count: importedCount, skipped_count: skippedCount },
+    });
+
+    return sendSuccess({
+      imported: importedCount,
+      skipped: skippedCount,
+      message: `Imported ${importedCount} file${importedCount !== 1 ? 's' : ''}`,
+    });
+  });
+
+  // Get library files
+  fastify.get('/libraries/:id/files', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const { status } = request.query as { status?: string };
+
+    const library = db.getLibraryById(id);
+    if (!library) {
+      reply.status(404);
+      return sendError('Library not found');
+    }
+
+    let files = db.getLibraryFiles(id);
+
+    if (status) {
+      files = files.filter(f => f.status === status);
+    }
+
+    return sendSuccess(files);
+  });
+
+  // Update library file status
+  fastify.put('/library-files/:id/status', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const { status, job_id, error_message } = request.body as {
+      status: string;
+      job_id?: string;
+      error_message?: string;
+    };
+
+    const file = db.getLibraryFileById(id);
+    if (!file) {
+      reply.status(404);
+      return sendError('File not found');
+    }
+
+    db.updateLibraryFileStatus(id, status as any, job_id, error_message);
+
+    return sendSuccess({ updated: true });
+  });
+
+  // Update library file progress
+  fastify.put('/library-files/:id/progress', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const { progress } = request.body as { progress: number };
+
+    if (typeof progress !== 'number' || progress < 0 || progress > 100) {
+      return sendError('Progress must be between 0 and 100');
+    }
+
+    const file = db.getLibraryFileById(id);
+    if (!file) {
+      reply.status(404);
+      return sendError('File not found');
+    }
+
+    db.updateLibraryFileProgress(id, progress);
+
+    return sendSuccess({ updated: true });
+  });
+
+  // Delete library file
+  fastify.delete('/library-files/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+
+    const file = db.getLibraryFileById(id);
+    if (!file) {
+      reply.status(404);
+      return sendError('File not found');
+    }
+
+    db.deleteLibraryFile(id);
+
+    return sendSuccess({ deleted: true });
+  });
+
+  // Get all library files with pagination
+  fastify.get('/library-files', async (request, reply) => {
+    const { page = '1', per_page = '20', status, library_id } = request.query as {
+      page?: string;
+      per_page?: string;
+      status?: string;
+      library_id?: string;
+    };
+
+    const pageNum = parseInt(page, 10) || 1;
+    const perPageNum = parseInt(per_page, 10) || 20;
+
+    if (perPageNum > 1000) {
+      reply.status(400);
+      return sendError('Maximum per page is 1000');
+    }
+
+    // Get all library files from all libraries
+    let allFiles: any[] = [];
+    const libraries = db.getAllLibraries();
+
+    for (const lib of libraries) {
+      if (library_id && lib.id !== library_id) continue;
+
+      const libFiles = db.getLibraryFiles(lib.id);
+      allFiles = allFiles.concat(libFiles.map((f: any) => ({ ...f, library_name: lib.name, library_path: lib.path })));
+    }
+
+    // Filter by status if specified
+    if (status) {
+      allFiles = allFiles.filter((f: any) => f.status === status);
+    }
+
+    // Sort by created_at (newest first)
+    allFiles.sort((a: any, b: any) => b.created_at - a.created_at);
+
+    // Get total count
+    const total = allFiles.length;
+
+    // Paginate
+    const startIndex = (pageNum - 1) * perPageNum;
+    const endIndex = startIndex + perPageNum;
+    const paginatedFiles = allFiles.slice(startIndex, endIndex);
+
+    return sendSuccess({
+      items: paginatedFiles,
+      total,
+      page: pageNum,
+      per_page: perPageNum,
+      total_pages: Math.ceil(total / perPageNum),
+    });
+  });
+
+  // Browse directory
+  fastify.post('/filesystem/browse', async (request, reply) => {
+    const { path = '.' } = request.body as { path?: string };
+
+    try {
+      const { readdirSync, statSync, existsSync } = require('fs');
+      const { resolve, sep } = require('path');
+      const { platform } = require('os');
+
+      const targetPath = resolve(path);
+
+      if (!existsSync(targetPath)) {
+        reply.status(404);
+        return sendError('Path does not exist');
+      }
+
+      const stats = statSync(targetPath);
+
+      if (!stats.isDirectory()) {
+        reply.status(400);
+        return sendError('Path is not a directory');
+      }
+
+      const entries = readdirSync(targetPath, { withFileTypes: true });
+      const items: { name: string; path: string; type: 'directory' }[] = [];
+
+      // Only include directories, not files
+      for (const entry of entries) {
+        try {
+          const entryPath = resolve(targetPath, entry.name);
+          const entryStats = statSync(entryPath);
+
+          if (entryStats.isDirectory()) {
+            items.push({
+              name: entry.name,
+              path: entryPath,
+              type: 'directory',
+            });
+          }
+        } catch (err) {
+          // Skip entries we can't read
+          continue;
+        }
+      }
+
+      // Sort alphabetically
+      items.sort((a, b) => a.name.localeCompare(b.name));
+
+      // Get parent directory path (only if not at root)
+      const parentPath = resolve(targetPath, '..');
+
+      return sendSuccess({
+        platform: platform(),
+        current_path: targetPath,
+        // Only show parent if it's different from current path (we're not at root)
+        parent_path: parentPath !== targetPath ? parentPath : null,
+        items,
+      });
+    } catch (error: any) {
+      logger.error('Error browsing directory:', error);
+      reply.status(500);
+      return sendError(error.message || 'Failed to browse directory');
+    }
+  });
+
+  // Validate path
+  fastify.post('/filesystem/validate', async (request, reply) => {
+    const { path } = request.body as { path: string };
+
+    if (!path) {
+      return sendError('Path is required');
+    }
+
+    try {
+      const { existsSync, statSync } = require('fs');
+      const { resolve } = require('path');
+
+      const targetPath = resolve(path);
+
+      if (!existsSync(targetPath)) {
+        return sendSuccess({
+          valid: false,
+          error: 'Path does not exist',
+        });
+      }
+
+      const stats = statSync(targetPath);
+
+      if (!stats.isDirectory()) {
+        return sendSuccess({
+          valid: false,
+          error: 'Path is not a directory',
+        });
+      }
+
+      return sendSuccess({
+        valid: true,
+        path: targetPath,
+      });
+    } catch (error: any) {
+      return sendSuccess({
+        valid: false,
+        error: error.message || 'Failed to validate path',
+      });
+    }
+  });
+
+  // Get available drives (Windows only)
+  fastify.get('/filesystem/drives', async (request, reply) => {
+    try {
+      const { existsSync, statSync } = require('fs');
+      const { platform } = require('os');
+
+      // Only return drives on Windows
+      if (platform() !== 'win32') {
+        return sendSuccess({
+          platform: platform(),
+          drives: [],
+        });
+      }
+
+      // Check common Windows drive letters (C-Z)
+      const drives: { letter: string; path: string; label?: string }[] = [];
+      const driveLetters = 'CDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+
+      for (const letter of driveLetters) {
+        const drivePath = `${letter}:\\`;
+        try {
+          if (existsSync(drivePath)) {
+            const stats = statSync(drivePath);
+            drives.push({
+              letter: `${letter}:`,
+              path: drivePath,
+            });
+          }
+        } catch (err) {
+          // Drive doesn't exist or is inaccessible
+          continue;
+        }
+      }
+
+      return sendSuccess({
+        platform: platform(),
+        drives,
+      });
+    } catch (error: any) {
+      logger.error('Error getting drives:', error);
+      return sendSuccess({
+        platform: require('os').platform(),
+        drives: [],
+      });
+    }
+  });
+
+  // ========================================================================
+  // Files
+  // ========================================================================
+
+  fastify.get('/files', async (request, reply) => {
+    const { status, limit, offset } = request.query as {
+      status?: string;
+      limit?: string;
+      offset?: string;
+    };
+
+    const options: any = {};
+    if (status) options.status = status;
+    if (limit) options.limit = parseInt(limit, 10);
+    if (offset) options.offset = parseInt(offset, 10);
+
+    const files = db.getAllFiles(options);
+    const total = db.getFileCount(options);
+
+    return sendSuccess({
+      items: files,
+      total,
+      page: offset ? Math.floor(parseInt(offset, 10) / (parseInt(limit || '50', 10))) + 1 : 1,
+      per_page: parseInt(limit || '50', 10),
+      total_pages: Math.ceil(total / parseInt(limit || '50', 10)),
+    });
+  });
+
+  fastify.get('/files/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const file = db.getFileById(id);
+
+    if (!file) {
+      reply.status(404);
+      return sendError('File not found');
+    }
+
+    const mapping = db.getFolderMappingById(file.folder_mapping_id);
+    const node = mapping ? db.getNodeById(mapping.node_id) : null;
+    const jobs = db.getJobsByFile(id);
+
+    return sendSuccess({
+      ...file,
+      folder_mapping: mapping,
+      node_name: node?.name,
+      jobs,
+    });
+  });
+
+  // NOTE: Scanning endpoint disabled - nodes no longer handle scanning
+  // TODO: Implement server-side scanning using local ffprobe
+  fastify.post('/files/scan', async (request, reply) => {
+    return sendError(
+      'Scanning is currently disabled. Nodes no longer handle directory scanning. ' +
+      'File scanning will be implemented server-side in a future update.',
+      501
+    );
+  });
+
+  // ========================================================================
+  // Jobs
+  // ========================================================================
+
+  fastify.get('/jobs', async (request, reply) => {
+    const { status, limit, offset } = request.query as {
+      status?: string;
+      limit?: string;
+      offset?: string;
+    };
+
+    const options: any = {};
+    if (status) options.status = status;
+    if (limit) options.limit = parseInt(limit, 10);
+    if (offset) options.offset = parseInt(offset, 10);
+
+    const jobs = db.getAllJobs(options);
+
+    // Enrich with file and preset info
+    const enrichedJobs = jobs.map(job => {
+      const file = db.getFileById(job.file_id);
+      const preset = db.getPresetById(job.preset_id);
+      const node = job.node_id ? db.getNodeById(job.node_id) : null;
+
+      // Check if this is a library file and get metadata
+      let metadata = null;
+      if (file?.folder_mapping_id) {
+        const mapping = db.getFolderMappingById(file.folder_mapping_id);
+        if (mapping?.server_path?.startsWith('library:')) {
+          // Construct the full filepath
+          const fullPath = mapping.node_path && !mapping.node_path.includes('.mkv') && !mapping.node_path.includes('.mp4')
+            ? `${mapping.node_path}/${file.relative_path}`
+            : mapping.node_path || file.relative_path;
+
+          const libFile = db.getLibraryFileByFilepath(fullPath);
+          if (libFile?.metadata) {
+            metadata = libFile.metadata;
+          }
+        }
+      }
+
+      // Get codec info from metadata or file
+      const codec = metadata?.video_codec || file?.original_codec || '';
+      const resolution = metadata?.width && metadata?.height
+        ? `${metadata.width}x${metadata.height}`
+        : (file?.resolution || '');
+
+      return {
+        ...job,
+        file_name: file?.relative_path,
+        file_size: file?.original_size,
+        preset_name: preset?.name,
+        node_name: node?.name,
+        // Include metadata fields for display
+        original_codec: codec,
+        resolution: resolution,
+        container: metadata?.container || file?.original_format || '',
+        duration: metadata?.duration || file?.duration || 0,
+        // Target codec from preset config
+        target_codec: preset?.config?.video_encoder || '',
+        // Include full metadata for detailed view
+        metadata: metadata,
+      };
+    });
+
+    return sendSuccess(enrichedJobs);
+  });
+
+  fastify.get('/jobs/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const job = db.getJobById(id);
+
+    if (!job) {
+      reply.status(404);
+      return sendError('Job not found');
+    }
+
+    const file = db.getFileById(job.file_id);
+    const preset = db.getPresetById(job.preset_id);
+    const node = job.node_id ? db.getNodeById(job.node_id) : null;
+
+    // Check if this is a library file and get metadata
+    let metadata = null;
+    if (file?.folder_mapping_id) {
+      const mapping = db.getFolderMappingById(file.folder_mapping_id);
+      if (mapping?.server_path?.startsWith('library:')) {
+        // Construct the full filepath
+        const fullPath = mapping.node_path && !mapping.node_path.includes('.mkv') && !mapping.node_path.includes('.mp4')
+          ? `${mapping.node_path}/${file.relative_path}`
+          : mapping.node_path || file.relative_path;
+
+        const libFile = db.getLibraryFileByFilepath(fullPath);
+        if (libFile?.metadata) {
+          metadata = libFile.metadata;
+        }
+      }
+    }
+
+    // Enrich the file object with metadata
+    const enrichedFile = file ? {
+      ...file,
+      metadata: metadata || (file as any).metadata,
+    } : null;
+
+    return sendSuccess({
+      ...job,
+      file: enrichedFile,
+      preset,
+      node,
+      original_codec: metadata?.video_codec || file?.original_codec || '',
+      resolution: metadata?.width && metadata?.height
+        ? `${metadata.width}x${metadata.height}`
+        : (file?.resolution || ''),
+      container: metadata?.container || file?.original_format || '',
+      target_codec: preset?.config?.video_encoder || '',
+    });
+  });
+
+  fastify.post('/jobs', async (request, reply) => {
+    const data = request.body as CreateJobRequest;
+
+    // Validate preset exists
+    const preset = db.getPresetById(data.preset_id);
+    if (!preset) {
+      reply.status(400);
+      return sendError('Preset not found');
+    }
+
+    const jobs = [];
+
+    for (const file_id of data.file_ids) {
+      // First try to get file from files table
+      let file = db.getFileById(file_id);
+
+      if (file) {
+        // Regular file from folder mapping
+        const job = db.createJob({
+          file_id,
+          preset_id: data.preset_id,
+        });
+        jobs.push(job);
+        logger.info(`Job ${job.id} created for file ${file_id}`);
+      } else {
+        // Try library file
+        const libFile = db.getLibraryFileById(file_id);
+        if (libFile) {
+          // Library file - create job with special handling
+          const job = db.createJobForLibraryFile(file_id, data.preset_id);
+          if (job) {
+            jobs.push(job);
+            logger.info(`Job ${job.id} created for library file ${file_id}`);
+          } else {
+            logger.warn(`Could not create job for library file ${file_id}`);
+          }
+        } else {
+          logger.warn(`File ${file_id} not found in either files or library_files table, skipping`);
+        }
+      }
+    }
+
+    // Trigger immediate job assignment
+    wsServer.assignJobsNow();
+
+    return sendSuccess(jobs);
+  });
+
+  // Get worker availability for UI warnings
+  fastify.get('/workers/availability', async (request, reply) => {
+    const availability = wsServer.getWorkerAvailability();
+    return sendSuccess(availability);
+  });
+
+  fastify.delete('/jobs/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const job = db.getJobById(id);
+
+    if (!job) {
+      reply.status(404);
+      return sendError('Job not found');
+    }
+
+    // Cancel if running
+    if (job.status === 'assigned' || job.status === 'processing') {
+      wsServer.cancelJob(id, 'Cancelled by user');
+    } else {
+      db.deleteJob(id);
+    }
+
+    logger.info(`Job ${id} deleted`);
+
+    return sendSuccess(null, 'Job deleted');
+  });
+
+  // ========================================================================
+  // Presets
+  // ========================================================================
+
+  fastify.get('/presets', async (request, reply) => {
+    const presets = db.getAllPresets();
+    return sendSuccess(presets);
+  });
+
+  fastify.get('/presets/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const preset = db.getPresetById(id);
+
+    if (!preset) {
+      reply.status(404);
+      return sendError('Preset not found');
+    }
+
+    return sendSuccess(preset);
+  });
+
+  fastify.post('/presets', async (request, reply) => {
+    const data = request.body as CreatePresetRequest;
+
+    // Check if name already exists
+    const existing = db.getPresetByName(data.name);
+    if (existing) {
+      reply.status(400);
+      return sendError('Preset name already exists');
+    }
+
+    const preset = db.createPreset({
+      name: data.name,
+      description: data.description,
+      config: data.config,
+    });
+
+    logger.info(`Preset ${preset.id} created: ${data.name}`);
+
+    return sendSuccess(preset);
+  });
+
+  fastify.put('/presets/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const data = request.body as CreatePresetRequest;
+
+    const preset = db.getPresetById(id);
+    if (!preset) {
+      reply.status(404);
+      return sendError('Preset not found');
+    }
+
+    if (preset.is_builtin) {
+      reply.status(400);
+      return sendError('Cannot modify built-in presets');
+    }
+
+    db.updatePreset(id, {
+      name: data.name,
+      description: data.description,
+      config: data.config,
+    });
+
+    const updated = db.getPresetById(id);
+    return sendSuccess(updated);
+  });
+
+  fastify.delete('/presets/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const preset = db.getPresetById(id);
+
+    if (!preset) {
+      reply.status(404);
+      return sendError('Preset not found');
+    }
+
+    if (preset.is_builtin) {
+      reply.status(400);
+      return sendError('Cannot delete built-in presets');
+    }
+
+    db.deletePreset(id);
+
+    logger.info(`Preset ${id} deleted`);
+
+    return sendSuccess(null, 'Preset deleted');
+  });
+
+  // ========================================================================
+  // Settings
+  // ========================================================================
+
+  fastify.get('/settings', async (request, reply) => {
+    const settings = db.getAllSettings();
+
+    // Group by prefix
+    const grouped: Record<string, any> = {};
+    for (const [key, value] of Object.entries(settings)) {
+      const parts = key.split('_');
+      if (parts.length > 1) {
+        const group = parts[0];
+        const subKey = parts.slice(1).join('_');
+        if (!grouped[group]) grouped[group] = {};
+        grouped[group][subKey] = value;
+      } else {
+        grouped[key] = value;
+      }
+    }
+
+    return sendSuccess(grouped);
+  });
+
+  fastify.put('/settings', async (request, reply) => {
+    const data = request.body as UpdateSettingsRequest;
+
+    if (data.port !== undefined) {
+      db.setSetting('port', data.port.toString());
+    }
+    if (data.cacheDirectory !== undefined) {
+      db.setSetting('cacheDirectory', data.cacheDirectory);
+    }
+    if (data.autoScan?.enabled !== undefined) {
+      db.setSetting('autoScan_enabled', data.autoScan.enabled.toString());
+    }
+    if (data.autoScan?.intervalMinutes !== undefined) {
+      db.setSetting('autoScan_intervalMinutes', data.autoScan.intervalMinutes.toString());
+    }
+    if (data.jobLimits?.maxConcurrent !== undefined) {
+      db.setSetting('jobLimits_maxConcurrent', data.jobLimits.maxConcurrent.toString());
+    }
+    if (data.jobLimits?.maxRetries !== undefined) {
+      db.setSetting('jobLimits_maxRetries', data.jobLimits.maxRetries.toString());
+    }
+    if (data.fileRetention?.deleteOriginal !== undefined) {
+      db.setSetting('fileRetention_deleteOriginal', data.fileRetention.deleteOriginal.toString());
+    }
+    if (data.fileRetention?.keepBackup !== undefined) {
+      db.setSetting('fileRetention_keepBackup', data.fileRetention.keepBackup.toString());
+    }
+
+    logger.info('Settings updated');
+
+    return sendSuccess(null, 'Settings updated');
+  });
+
+  // ========================================================================
+  // Statistics & Logs
+  // ========================================================================
+
+  fastify.get('/stats', async (request, reply) => {
+    const stats = db.getDashboardStats();
+    return sendSuccess(stats);
+  });
+
+  fastify.get('/logs', async (request, reply) => {
+    const { level, category, limit } = request.query as {
+      level?: string;
+      category?: string;
+      limit?: string;
+    };
+
+    const options: any = {};
+    if (level) options.level = level;
+    if (category) options.category = category;
+    if (limit) options.limit = parseInt(limit, 10);
+
+    const logs = db.getLogs(options);
+
+    return sendSuccess(logs);
+  });
+
+  // ========================================================================
+  // Server Control
+  // ========================================================================
+
+  fastify.post('/server/shutdown', async (request, reply) => {
+    logger.info('Shutdown requested via API');
+
+    // Give some time for response
+    setTimeout(() => {
+      process.exit(0);
+    }, 100);
+
+    return sendSuccess(null, 'Server shutting down');
+  });
+
+  fastify.post('/server/restart', async (request, reply) => {
+    logger.info('Restart requested via API');
+
+    // Give some time for response
+    setTimeout(() => {
+      process.exit(1); // Exit code 1 can be used to trigger restart
+    }, 100);
+
+    return sendSuccess(null, 'Server restarting');
+  });
+}

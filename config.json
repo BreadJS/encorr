@@ -1,0 +1,19 @@
+{
+  "backendPort": 8101,
+  "frontendPort": 8100,
+  "host": "0.0.0.0",
+  "database": ".encorr/server/encorr.db",
+  "cacheDirectory": ".encorr/cache",
+  "autoScan": {
+    "enabled": true,
+    "intervalMinutes": 60
+  },
+  "jobLimits": {
+    "maxConcurrent": 0,
+    "maxRetries": 2
+  },
+  "fileRetention": {
+    "deleteOriginal": false,
+    "keepBackup": true
+  }
+}
