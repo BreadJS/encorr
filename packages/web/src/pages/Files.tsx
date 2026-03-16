@@ -3,12 +3,9 @@ import { api, formatBytes } from '@/utils/api';
 import { Card, CardContent } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { StatusBadge } from '@/components/ui/Badge';
-import { PresetDropdown } from '@/components/ui/PresetDropdown';
-import { getPresetsForDropdown } from '@/data/presets';
-import { RefreshCw, ChevronLeft, ChevronRight, Film, Folder, FolderOpen, Check, Search, Filter, Play, X, Scan, Database } from 'lucide-react';
+import { TranscodeDialog } from '@/components/ui/TranscodeDialog';
+import { RefreshCw, ChevronLeft, ChevronRight, Film, Folder, FolderOpen, Check, Search, Filter, Play, Scan, Database } from 'lucide-react';
 import { useState, useMemo } from 'react';
-
-const PRESET_OPTIONS = getPresetsForDropdown();
 
 // Helper function to format duration as HH:MM:SS
 function formatDuration(seconds: number): string {
@@ -30,8 +27,8 @@ export function Files() {
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
-  const [bulkPreset, setBulkPreset] = useState<string | null>(null);
-  const [showBulkOptions, setShowBulkOptions] = useState(false);
+  const [showTranscodeDialog, setShowTranscodeDialog] = useState(false);
+  const [transcodeDialogMode, setTranscodeDialogMode] = useState<'all' | 'selected'>('selected');
   const [currentPage, setCurrentPage] = useState(1);
   const [perPage] = useState(25);
 
@@ -80,6 +77,7 @@ export function Files() {
       queryClient.invalidateQueries({ queryKey: ['jobs'] });
       queryClient.invalidateQueries({ queryKey: ['libraries'] });
       setSelectedFiles(new Set());
+      setShowTranscodeDialog(false);
     },
   });
 
@@ -133,22 +131,6 @@ export function Files() {
     },
   });
 
-  // Queue all mutation - only transcodes analyzed files
-  const queueAllMutation = useMutation({
-    mutationFn: (presetId: string) => {
-      // Get all analyzed file IDs
-      const analyzedFileIds = files
-        .filter((f: any) => f.status === 'analyzed')
-        .map((f: any) => f.id);
-      return api.createJob({ file_ids: analyzedFileIds, preset_id: presetId });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['files'] });
-      queryClient.invalidateQueries({ queryKey: ['jobs'] });
-      queryClient.invalidateQueries({ queryKey: ['libraries'] });
-    },
-  });
-
   // Apply client-side search filter
   const filteredFiles = useMemo(() => {
     if (!searchQuery) return files;
@@ -178,18 +160,25 @@ export function Files() {
     }
   };
 
-  const handleBulkQueue = () => {
-    if (bulkPreset && selectedFiles.size > 0) {
-      // Only queue files that have been analyzed
+  const handleTranscodeConfirm = (presetId: string) => {
+    if (transcodeDialogMode === 'all') {
+      // Transcode all analyzed files
+      const analyzedFileIds = files
+        .filter((f: any) => f.status === 'analyzed')
+        .map((f: any) => f.id);
+      queueMutation.mutate({ fileIds: analyzedFileIds, presetId });
+    } else {
+      // Transcode selected analyzed files
       const analyzedFileIds = files
         .filter((f: any) => selectedFiles.has(f.id) && f.status === 'analyzed')
         .map((f: any) => f.id);
-
-      if (analyzedFileIds.length > 0) {
-        queueMutation.mutate({ fileIds: analyzedFileIds, presetId: bulkPreset });
-        setShowBulkOptions(false);
-      }
+      queueMutation.mutate({ fileIds: analyzedFileIds, presetId });
     }
+  };
+
+  const handleOpenTranscodeDialog = (mode: 'all' | 'selected') => {
+    setTranscodeDialogMode(mode);
+    setShowTranscodeDialog(true);
   };
 
   const getCodecBadgeColor = (codec?: string) => {
@@ -239,41 +228,14 @@ export function Files() {
           </Button>
 
           {/* Transcode All / Transcode Selected Button */}
-          <div className="relative group">
-            <Button
-              onClick={() => {
-                if (selectedFiles.size > 0) {
-                  setShowBulkOptions(true);
-                }
-                // If no files selected, do nothing for now (Transcode All placeholder)
-              }}
-              style={{ backgroundColor: '#9C27B0', color: '#ffffff' }}
-              className="flex items-center gap-2"
-            >
-              <Database className="h-4 w-4" />
-              {selectedFiles.size > 0 ? `Transcode Selected (${selectedFiles.size})` : `Transcode All (${files.filter((f: any) => f.status === 'analyzed').length})`}
-            </Button>
-            {/* Preset Dropdown */}
-            <div className="absolute right-0 top-full mt-1 w-64 rounded-lg shadow-xl opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity z-50">
-              <div style={{ backgroundColor: '#252326', border: '1px solid #39363a' }}>
-                <div className="p-2">
-                  <div className="text-xs text-gray-500 uppercase px-2 py-1">Select Preset for all analyzed files</div>
-                  {PRESET_OPTIONS.filter(p => p.is_builtin).map((preset) => (
-                    <button
-                      key={preset.id}
-                      onClick={() => queueAllMutation.mutate(preset.id)}
-                      disabled={queueAllMutation.isPending}
-                      className="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-white/5 rounded transition-colors flex items-center gap-2 disabled:opacity-50"
-                    >
-                      <Film className="h-3 w-3 text-gray-400" />
-                      <span>{preset.name}</span>
-                      <span className="text-xs text-gray-500 ml-auto">{preset.description}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
+          <Button
+            onClick={() => handleOpenTranscodeDialog(selectedFiles.size > 0 ? 'selected' : 'all')}
+            style={{ backgroundColor: '#9C27B0', color: '#ffffff' }}
+            className="flex items-center gap-2"
+          >
+            <Database className="h-4 w-4" />
+            {selectedFiles.size > 0 ? `Transcode Selected (${selectedFiles.size})` : `Transcode All (${files.filter((f: any) => f.status === 'analyzed').length})`}
+          </Button>
 
           <Button
             onClick={() => refetch()}
@@ -286,53 +248,7 @@ export function Files() {
         </div>
       </div>
 
-      {/* Bulk Transcode Options Panel */}
-      {showBulkOptions && selectedFiles.size > 0 && (
-        <Card style={{ backgroundColor: '#1a181a', border: '1px solid #39363a' }}>
-          <CardContent className="p-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-4">
-                <div>
-                  <span className="text-white">Transcode selected files with preset:</span>
-                  <div className="text-xs text-gray-500 mt-1">
-                    {(() => {
-                      const analyzedCount = files.filter((f: any) => selectedFiles.has(f.id) && f.status === 'analyzed').length;
-                      const pendingCount = files.filter((f: any) => selectedFiles.has(f.id) && f.status === 'pending').length;
-                      return `${analyzedCount} ready to transcode${pendingCount > 0 ? `, ${pendingCount} need analysis first` : ''}`;
-                    })()}
-                  </div>
-                </div>
-                <div className="w-64">
-                  <PresetDropdown
-                    value={bulkPreset}
-                    onChange={setBulkPreset}
-                    presets={PRESET_OPTIONS.filter(p => p.is_builtin)}
-                    userPresets={PRESET_OPTIONS.filter(p => !p.is_builtin)}
-                    placeholder="Select preset..."
-                  />
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <Button
-                  onClick={handleBulkQueue}
-                  disabled={!bulkPreset}
-                  style={{ backgroundColor: '#74c69d', color: '#1a1a1a' }}
-                  className="disabled:opacity-50"
-                >
-                  <Play className="h-4 w-4 mr-2" />
-                  Start Transcoding
-                </Button>
-                <Button
-                  onClick={() => setShowBulkOptions(false)}
-                  style={{ backgroundColor: '#38363a', color: '#ffffff' }}
-                >
-                  <X className="h-4 w-4" />
-                </Button>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      )}
+      {/* Bulk Transcode Options Panel - REMOVED, now using modal dialog */}
 
       <div className="flex gap-4 overflow-hidden">
         {/* Sidebar - Folder Navigation */}
@@ -656,6 +572,17 @@ export function Files() {
           </Card>
         </div>
       </div>
+
+      {/* Transcode Dialog */}
+      <TranscodeDialog
+        isOpen={showTranscodeDialog}
+        onClose={() => setShowTranscodeDialog(false)}
+        onConfirm={handleTranscodeConfirm}
+        isPending={queueMutation.isPending}
+        mode={transcodeDialogMode}
+        files={files}
+        selectedFiles={selectedFiles}
+      />
     </div>
   );
 }
