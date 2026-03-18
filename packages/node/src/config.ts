@@ -1,6 +1,9 @@
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
-import type { NodeConfig } from '@encorr/shared';
+import type { NodeConfig, FFmpegEncoderInfo, FFmpegDecoderInfo, HwaccelInfo } from '@encorr/shared';
+
+// Re-export FFmpeg types for convenience
+export type { FFmpegEncoderInfo, FFmpegDecoderInfo, HwaccelInfo };
 
 const CONFIG_FILE = 'node_config.json';
 
@@ -14,7 +17,6 @@ const DEFAULT_CONFIG: NodeConfigFile = {
   name: `Node-${require('os').hostname()}`,
   cache_dir: join(process.cwd(), 'cache'),
   temp_dir: join(process.cwd(), 'temp'),
-  handbrakecli_path: getDefaultHandBrakeCLIPath(),
   ffmpeg_dir: getDefaultFFmpegDir(),
   reconnectInterval: 5000,
   heartbeatInterval: 30000,
@@ -22,53 +24,6 @@ const DEFAULT_CONFIG: NodeConfigFile = {
     return `ws://localhost:8101/ws`;
   },
 };
-
-function getDefaultHandBrakeCLIPath(): string {
-  const platform = process.platform;
-
-  if (platform === 'win32') {
-    // Windows: Check common HandBrakeCLI install locations
-    const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
-    const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
-
-    const possiblePaths = [
-      join(programFiles, 'HandBrake', 'HandBrakeCLI.exe'),
-      join(programFilesX86, 'HandBrake', 'HandBrakeCLI.exe'),
-      'C:\\Program Files\\HandBrake\\HandBrakeCLI.exe',
-      'C:\\Program Files (x86)\\HandBrake\\HandBrakeCLI.exe',
-      'C:\\HandBrake\\HandBrakeCLI.exe',
-    ];
-
-    for (const path of possiblePaths) {
-      if (existsSync(path)) {
-        return path;
-      }
-    }
-    // Return default if not found
-    return join(programFiles, 'HandBrake', 'HandBrakeCLI.exe');
-  } else if (platform === 'darwin') {
-    // macOS: HandBrakeCLI is in the app bundle
-    const path = '/Applications/HandBrake.app/Contents/MacOS/HandBrakeCLI';
-    if (existsSync(path)) {
-      return path;
-    }
-    return path;
-  } else {
-    // Linux: Standard locations
-    const possiblePaths = [
-      '/usr/local/bin/HandBrakeCLI',
-      '/usr/bin/HandBrakeCLI',
-      '/opt/homebrew/bin/HandBrakeCLI',
-    ];
-
-    for (const path of possiblePaths) {
-      if (existsSync(path)) {
-        return path;
-      }
-    }
-    return '/usr/bin/HandBrakeCLI';
-  }
-}
 
 function getDefaultFFmpegDir(): string {
   const platform = process.platform;
@@ -194,7 +149,6 @@ export function saveConfig(config: NodeConfigFile): void {
     name: config.name,
     cache_dir: config.cache_dir,
     temp_dir: config.temp_dir,
-    handbrakecli_path: config.handbrakecli_path,
     ffmpeg_dir: config.ffmpeg_dir,
     reconnectInterval: config.reconnectInterval,
     heartbeatInterval: config.heartbeatInterval,

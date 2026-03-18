@@ -184,6 +184,33 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+  createSmartJob: (data: { file_ids: string[]; mode: 'auto' | 'gpu' | 'cpu' }) =>
+    request<{
+      success: boolean;
+      jobs: Array<{
+        fileId: string;
+        jobId: string;
+        fileName: string;
+        presetId: string;
+        presetName: string;
+        reason: string;
+        expectedCompression: string;
+        originalSize: number;
+        estimatedSize: number;
+        mode: 'auto' | 'gpu' | 'cpu';
+      }>;
+      summary: {
+        total: number;
+        gpu: number;
+        cpu: number;
+        totalOriginalSize: number;
+        estimatedOutputSize: number;
+        estimatedSpaceSaved: number;
+      };
+    }>('/jobs/smart', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
   deleteJob: (id: string) => request<any>(`/jobs/${id}`, { method: 'DELETE' }),
 
   // Presets

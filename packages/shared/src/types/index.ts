@@ -28,6 +28,10 @@ export interface ActiveJobInfo {
   current_action?: string;
   fps?: number;
   eta?: string;
+  ratio?: string;
+  gpu?: number | null;
+  preset_name?: string;
+  status?: string;
 }
 
 export interface NodeCapabilities {
@@ -43,11 +47,42 @@ export interface SystemInfo {
   cpu_cores: number;
   ram_total: number;
   gpus?: GPUInfo[];
-  handbrake_version?: string;
-  handbrake_path: string;
   ffmpeg_version?: string;
   ffmpeg_path?: string;
   ffprobe_path?: string;
+  ffmpeg_encoders?: FFmpegEncoderInfo[];
+  ffmpeg_decoders?: FFmpegDecoderInfo[];
+  ffmpeg_hwaccels?: HwaccelInfo[];
+}
+
+// ============================================================================
+// FFmpeg Hardware Types (for cross-package compatibility)
+// ============================================================================
+
+export type EncoderType = 'cpu' | 'gpu';
+export type GPUVendor = 'nvidia' | 'intel' | 'amd';
+export type VideoCodec = 'h264' | 'h265' | 'mpeg2';
+
+export interface FFmpegEncoderInfo {
+  type: EncoderType;
+  gpu_type?: GPUVendor;
+  encoder_name: string;
+  codec: VideoCodec;
+  available: boolean;
+}
+
+export interface FFmpegDecoderInfo {
+  type: EncoderType;
+  gpu_type?: GPUVendor;
+  decoder_name: string;
+  codec: VideoCodec;
+  available: boolean;
+}
+
+export interface HwaccelInfo {
+  name: string;
+  available: boolean;
+  gpu_type?: GPUVendor;
 }
 
 export interface GPUInfo {
@@ -137,6 +172,7 @@ export interface VideoMetadata {
   fps: number;
   bitrate: number;
   size: number;
+  bit_depth?: number; // Bit depth (8 for SDR, 10 for HDR)
 }
 
 // ============================================================================
@@ -165,6 +201,7 @@ export interface JobProgress {
   current_action: string;
   eta_seconds?: number;
   fps?: number;
+  ratio?: string;
 }
 
 // ============================================================================
@@ -176,41 +213,44 @@ export interface Preset {
   name: string;
   description: string | null;
   is_builtin: boolean;
-  config: HandBrakeConfig;
+  config: FFmpegConfig;
   created_at: number;
 }
 
-export interface HandBrakeConfig {
+export interface FFmpegConfig {
   // Video settings
-  video_encoder: string;
-  quality_mode: 'vbr' | 'cq' | 'constant';
-  quality: number; // CRF value
-  preset: string; // speed preset
-  tune?: string;
+  video_codec: 'h264' | 'h265';
+  encoding_type: EncoderType;
+  gpu_type?: GPUVendor;
+  quality_mode: 'crf' | 'cq' | 'qp';
+  quality: number; // CRF/CQ/QP value
+  preset: string; // speed preset (slow, medium, fast, etc.)
 
   // Output settings
   container: string;
   max_width?: number;
   max_height?: number;
-  crop_mode?: 'auto' | 'none';
 
   // Audio settings
   audio_encoder: string;
   audio_bitrate: number;
-  audio_channels?: 'auto' | 'stereo' | '5.1' | '7.1';
-  audio_mixdown?: 'none' | 'stereo' | '5.1';
 
   // Subtitle settings
   subtitles: 'all' | 'first' | 'none';
 
   // Filter settings
   deinterlace?: boolean;
-  denoise?: 'none' | 'weak' | 'medium' | 'strong';
-  deblock?: boolean;
 
   // Advanced
   extra_args?: string[];
+
+  // Source codec detection for GPU pipeline
+  source_codec?: 'h264' | 'h265';  // Source video codec for explicit decoder selection
+  use_explicit_decoder?: boolean;   // Use explicit hardware decoder (e.g., hevc_cuvid) for true GPU pipeline
 }
+
+// Legacy alias for backward compatibility
+export type HandBrakeConfig = FFmpegConfig;
 
 // ============================================================================
 // Settings
@@ -238,12 +278,6 @@ export interface Settings {
   fileRetention: {
     deleteOriginal: boolean;
     keepBackup: boolean;
-  };
-
-  // HandBrake detection
-  handbrake: {
-    autoDetect: boolean;
-    defaultPaths: string[];
   };
 }
 
@@ -304,7 +338,6 @@ export interface NodeConfig {
   name: string;
   cache_dir: string;
   temp_dir: string;
-  handbrakecli_path: string;
   ffmpeg_dir: string;
   reconnectInterval: number;
   heartbeatInterval: number;
@@ -355,7 +388,7 @@ export interface CreateJobRequest {
 export interface CreatePresetRequest {
   name: string;
   description?: string;
-  config: HandBrakeConfig;
+  config: FFmpegConfig;
 }
 
 export interface UpdateSettingsRequest {
@@ -374,3 +407,20 @@ export interface UpdateSettingsRequest {
     keepBackup?: boolean;
   };
 }
+
+// ============================================================================
+// Optimizer Types (re-exported from optimizer.ts)
+// ============================================================================
+
+export type {
+  FileAnalysis,
+  OptimizationResult,
+  TranscodeMode,
+  CpuUsageLevel,
+  GpuUtilizationLevel,
+  SpeedLevel,
+  SmartTranscodeRequest,
+  SmartTranscodeResult,
+  SmartTranscodeJobResult,
+  TranscodeUserSettings,
+} from './optimizer';

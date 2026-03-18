@@ -54,8 +54,8 @@ export function Jobs() {
       name: p.name,
       description: p.description,
       is_builtin: true,
-      format: p.config.format.replace('av_', '') as any,
-      encoder: p.config.video_encoder,
+      codec: p.config.video_codec,
+      type: p.config.encoding_type,
       quality: p.config.quality,
     }));
 
@@ -67,8 +67,8 @@ export function Jobs() {
         name: p.name,
         description: p.description || '',
         is_builtin: false,
-        format: p.config?.format?.replace('av_', '') || 'mp4',
-        encoder: p.config?.video_encoder || 'x264',
+        codec: p.config?.video_codec || 'h264',
+        type: p.config?.encoding_type || 'cpu',
         quality: p.config?.quality || 22,
       }));
 
@@ -255,18 +255,36 @@ export function Jobs() {
 
   return (
     <div className="space-y-6">
-      {/* Warning banner for no CPU workers */}
-      {workerAvailability && !workerAvailability.hasCpuWorkers && queue.length > 0 && (
-        <div className="bg-amber-900/30 border border-amber-600/50 rounded-lg p-4 flex items-center gap-3">
-          <AlertTriangle className="h-5 w-5 text-amber-500 flex-shrink-0" />
-          <div>
-            <p className="text-amber-200 font-medium">No CPU Workers Available</p>
-            <p className="text-amber-300/80 text-sm">
-              There are queued jobs but no nodes have CPU workers configured.
-              Configure CPU workers on your nodes to process jobs.
-            </p>
-          </div>
-        </div>
+      {/* Warning banners for worker availability */}
+      {workerAvailability && queue.length > 0 && (
+        <>
+          {/* Check for analyze jobs that need CPU workers */}
+          {!workerAvailability.hasCpuWorkers && queue.some((job: any) => job.preset_id === 'builtin-analyze') && (
+            <div className="bg-amber-900/30 border border-amber-600/50 rounded-lg p-4 flex items-center gap-3">
+              <AlertTriangle className="h-5 w-5 text-amber-500 flex-shrink-0" />
+              <div>
+                <p className="text-amber-200 font-medium">No CPU Workers Available</p>
+                <p className="text-amber-300/80 text-sm">
+                  Analyze jobs require CPU processing but no nodes are available.
+                  Make sure your nodes are online.
+                </p>
+              </div>
+            </div>
+          )}
+          {/* Check for transcode jobs with no workers at all */}
+          {!workerAvailability.hasCpuWorkers && !workerAvailability.hasGpuWorkers && queue.some((job: any) => job.preset_id !== 'builtin-analyze') && (
+            <div className="bg-amber-900/30 border border-amber-600/50 rounded-lg p-4 flex items-center gap-3">
+              <AlertTriangle className="h-5 w-5 text-amber-500 flex-shrink-0" />
+              <div>
+                <p className="text-amber-200 font-medium">No Workers Available</p>
+                <p className="text-amber-300/80 text-sm">
+                  There are queued jobs but no nodes are online to process them.
+                  Make sure your nodes are running and connected.
+                </p>
+              </div>
+            </div>
+          )}
+        </>
       )}
 
       <div className="flex items-center justify-between">
@@ -1003,7 +1021,7 @@ export function Jobs() {
                                       </td>
                                       <td className="px-4 py-3">
                                         <span className={`text-xs font-medium ${job.gpu !== null ? 'text-green-400' : 'text-blue-400'}`}>
-                                          {job.gpu !== null ? `GPU ${job.gpu}` : 'CPU'}
+                                          {job.gpu !== null ? `GPU ${job.gpu + 1}` : 'CPU'}
                                         </span>
                                       </td>
                                       <td className="px-4 py-3">

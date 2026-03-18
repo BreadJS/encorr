@@ -9,8 +9,12 @@ import type {
   CreateJobRequest,
   CreatePresetRequest,
   UpdateSettingsRequest,
+  SmartTranscodeRequest,
+  SmartTranscodeResult,
+  TranscodeMode,
 } from '@encorr/shared';
 import { loadConfig } from '../config';
+import { presetOptimizer } from '../services/preset-optimizer';
 
 // ============================================================================
 // Plugin Options
@@ -32,6 +36,13 @@ function sendSuccess<T>(data: T, message?: string) {
 
 function sendError(error: string, statusCode = 400) {
   return { success: false, error };
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
 }
 
 // ============================================================================
@@ -784,7 +795,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
         container: metadata?.container || file?.original_format || '',
         duration: metadata?.duration || file?.duration || 0,
         // Target codec from preset config
-        target_codec: preset?.config?.video_encoder || '',
+        target_codec: preset?.config?.video_codec || '',
         // Include full metadata for detailed view
         metadata: metadata,
       };
@@ -839,16 +850,23 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
         ? `${metadata.width}x${metadata.height}`
         : (file?.resolution || ''),
       container: metadata?.container || file?.original_format || '',
-      target_codec: preset?.config?.video_encoder || '',
+      target_codec: preset?.config?.video_codec || '',
     });
   });
 
   fastify.post('/jobs', async (request, reply) => {
     const data = request.body as CreateJobRequest;
 
+    logger.info(`Creating jobs with preset_id: ${data.preset_id}`);
+
+    // List all available presets for debugging
+    const allPresets = db.getAllPresets();
+    logger.info(`Available presets: ${allPresets.map(p => `${p.id} (${p.name})`).join(', ')}`);
+
     // Validate preset exists
     const preset = db.getPresetById(data.preset_id);
     if (!preset) {
+      logger.error(`Preset '${data.preset_id}' not found. Available presets:`, allPresets.map(p => p.id));
       reply.status(400);
       return sendError('Preset not found');
     }
@@ -889,6 +907,202 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     wsServer.assignJobsNow();
 
     return sendSuccess(jobs);
+  });
+
+  // Smart transcoding endpoint - automatically selects optimal presets
+  fastify.post('/jobs/smart', async (request, reply) => {
+    const data = request.body as SmartTranscodeRequest;
+    const { file_ids, mode = 'auto' } = data;
+
+    logger.info(`[SMART_TRANSCODE] Creating smart transcoding jobs for ${file_ids.length} files with mode: ${mode}`);
+
+    // Get all available presets
+    const presets = db.getAllPresets();
+    if (presets.length === 0) {
+      reply.status(500);
+      return sendError('No presets available');
+    }
+
+    // Get all online nodes for hardware capability detection
+    const allNodes = db.getAllNodes();
+    const onlineNodes = allNodes.filter(node => node.status === 'online');
+
+    if (onlineNodes.length === 0) {
+      reply.status(400);
+      return sendError('No online nodes available for transcoding');
+    }
+
+    // Process each file and create jobs
+    const jobResults: any[] = [];
+    let totalOriginalSize = 0;
+    let totalEstimatedSize = 0;
+
+    for (const file_id of file_ids) {
+      // Try to get file from library_files table first
+      let libFile = db.getLibraryFileById(file_id);
+      let metadata = libFile?.metadata;
+      let fileName = libFile?.filename || 'Unknown';
+      let fileSize = libFile?.filesize || 0;
+
+      if (!libFile) {
+        // Try regular files table
+        const videoFile = db.getFileById(file_id);
+        if (videoFile) {
+          // Get metadata from folder mapping if available
+          const mapping = db.getFolderMappingById(videoFile.folder_mapping_id);
+          if (mapping?.server_path?.startsWith('library:')) {
+            const fullPath = mapping.node_path && !mapping.node_path.includes('.mkv') && !mapping.node_path.includes('.mp4')
+              ? `${mapping.node_path}/${videoFile.relative_path}`
+              : mapping.node_path || videoFile.relative_path;
+
+            const foundLibFile = db.getLibraryFileByFilepath(fullPath);
+            if (foundLibFile?.metadata) {
+              metadata = foundLibFile.metadata;
+            }
+            if (foundLibFile) {
+              fileSize = foundLibFile.filesize || 0;
+            }
+          }
+          fileName = videoFile.relative_path || 'Unknown';
+          fileSize = fileSize || videoFile.original_size || 0;
+
+          // Create job for regular file using createJob
+          if (metadata) {
+            const analysis = presetOptimizer.analyzeFile(metadata, fileSize);
+            const recommendation = presetOptimizer.recommendForFile(analysis, onlineNodes, presets, mode);
+
+            logger.info(`[SMART_TRANSCODE] File ${file_id}: ${recommendation.reason}`);
+
+            const job = db.createJob({
+              file_id,
+              preset_id: recommendation.recommendedPresetId,
+            });
+
+            // Parse expected compression to estimate size
+            const compressionMatch = recommendation.expectedCompression.match(/(\d+)%/);
+            const compressionPercent = compressionMatch ? parseInt(compressionMatch[1], 10) : 50;
+            const originalSize = fileSize;
+            const estimatedSize = Math.round(originalSize * (1 - compressionPercent / 100));
+
+            totalOriginalSize += originalSize;
+            totalEstimatedSize += estimatedSize;
+
+            jobResults.push({
+              fileId: file_id,
+              jobId: job.id,
+              fileName,
+              presetId: recommendation.recommendedPresetId,
+              presetName: db.getPresetById(recommendation.recommendedPresetId)?.name || 'Unknown',
+              reason: recommendation.reason,
+              expectedCompression: recommendation.expectedCompression,
+              originalSize,
+              estimatedSize,
+              mode,
+            });
+            continue;
+          }
+        }
+      }
+
+      if (!libFile && !db.getFileById(file_id)) {
+        logger.warn(`[SMART_TRANSCODE] File ${file_id} not found, skipping`);
+        continue;
+      }
+
+      // For library files, use createJobForLibraryFile
+      if (libFile) {
+        let job;
+        let presetId: string;
+        let reason: string;
+        let expectedCompression: string;
+
+        if (metadata) {
+          const analysis = presetOptimizer.analyzeFile(metadata, fileSize);
+          const recommendation = presetOptimizer.recommendForFile(analysis, onlineNodes, presets, mode);
+
+          logger.info(`[SMART_TRANSCODE] Library file ${file_id}: ${recommendation.reason}`);
+
+          presetId = recommendation.recommendedPresetId;
+          reason = recommendation.reason;
+          expectedCompression = recommendation.expectedCompression;
+
+          job = db.createJobForLibraryFile(file_id, presetId);
+        } else {
+          // No metadata available - use default preset based on mode
+          if (mode === 'gpu') {
+            const nvidiaPreset = presets.find(p =>
+              p.config.encoding_type === 'gpu' &&
+              p.config.gpu_type === 'nvidia' &&
+              p.config.video_codec === 'h265'
+            );
+            presetId = nvidiaPreset?.id || presets.find(p => p.config.encoding_type === 'gpu')?.id || presets[0].id;
+            reason = 'No metadata available - using NVIDIA GPU preset';
+          } else if (mode === 'cpu') {
+            const cpuPreset = presets.find(p =>
+              p.config.encoding_type === 'cpu' &&
+              p.config.video_codec === 'h265'
+            );
+            presetId = cpuPreset?.id || presets[0].id;
+            reason = 'No metadata available - using CPU H.265 preset';
+          } else {
+            const gpuPreset = presets.find(p =>
+              p.config.encoding_type === 'gpu' &&
+              p.config.gpu_type === 'nvidia'
+            );
+            presetId = gpuPreset?.id || presets.find(p => p.config.encoding_type === 'cpu')?.id || presets[0].id;
+            reason = 'No metadata available - using auto preset';
+          }
+          expectedCompression = 'Unknown (no metadata)';
+
+          job = db.createJobForLibraryFile(file_id, presetId);
+        }
+
+        if (!job) {
+          logger.warn(`[SMART_TRANSCODE] Failed to create job for library file ${file_id}`);
+          continue;
+        }
+
+        const preset = db.getPresetById(presetId);
+        const originalSize = fileSize;
+        const estimatedSize = Math.round(originalSize * 0.5); // Rough estimate when no metadata
+
+        totalOriginalSize += originalSize;
+        totalEstimatedSize += estimatedSize;
+
+        jobResults.push({
+          fileId: file_id,
+          jobId: job.id,
+          fileName,
+          presetId,
+          presetName: preset?.name || 'Unknown',
+          reason,
+          expectedCompression,
+          originalSize,
+          estimatedSize,
+          mode,
+        });
+      }
+    }
+
+    // Trigger immediate job assignment
+    wsServer.assignJobsNow();
+
+    const result: SmartTranscodeResult = {
+      success: true,
+      jobs: jobResults,
+      summary: {
+        total: jobResults.length,
+        gpu: jobResults.filter(j => presets.find(p => p.id === j.presetId)?.config.encoding_type === 'gpu').length,
+        cpu: jobResults.filter(j => presets.find(p => p.id === j.presetId)?.config.encoding_type === 'cpu').length,
+        totalOriginalSize,
+        estimatedOutputSize: totalEstimatedSize,
+        estimatedSpaceSaved: totalOriginalSize - totalEstimatedSize,
+      },
+    };
+
+    logger.info(`[SMART_TRANSCODE] Created ${result.jobs.length} jobs, estimated space saved: ${formatBytes(result.summary.estimatedSpaceSaved)}`);
+
+    return sendSuccess(result);
   });
 
   // Get worker availability for UI warnings

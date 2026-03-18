@@ -1,85 +1,139 @@
 import { z } from 'zod';
-import type { Settings, NodeConfig, HandBrakeConfig } from '../types';
+import type { Settings, NodeConfig, FFmpegConfig, FFmpegEncoderInfo } from '../types';
 
 // ============================================================================
 // Default Built-in Presets
 // ============================================================================
 
-export const BUILTIN_PRESETS: Record<string, HandBrakeConfig> = {
-  'high-quality-h265': {
-    video_encoder: 'x265',
-    quality_mode: 'cq',
+export const BUILTIN_PRESETS: Record<string, FFmpegConfig> = {
+  'high-quality-h265-cpu': {
+    video_codec: 'h265',
+    encoding_type: 'cpu',
+    quality_mode: 'crf',
     quality: 22,
     preset: 'medium',
-    tune: 'film',
-    container: 'mp4',
-    crop_mode: 'auto',
-    audio_encoder: 'aac',
-    audio_bitrate: 160,
-    audio_channels: 'auto',
-    audio_mixdown: 'none',
+    container: 'mkv',
+    audio_encoder: 'copy',
+    audio_bitrate: 0,
     subtitles: 'all',
     deinterlace: false,
-    denoise: 'none',
-    deblock: false,
   },
-  'maximum-compression': {
-    video_encoder: 'x265',
-    quality_mode: 'cq',
+  'maximum-compression-h265-cpu': {
+    video_codec: 'h265',
+    encoding_type: 'cpu',
+    quality_mode: 'crf',
     quality: 28,
     preset: 'slow',
-    container: 'mp4',
+    container: 'mkv',
     max_width: 1920,
     max_height: 1080,
-    crop_mode: 'auto',
-    audio_encoder: 'aac',
-    audio_bitrate: 128,
-    audio_channels: 'stereo',
-    audio_mixdown: 'stereo',
+    audio_encoder: 'copy',
+    audio_bitrate: 0, // Not used when copying
     subtitles: 'first',
     deinterlace: false,
-    denoise: 'weak',
-    deblock: false,
   },
-  'quick-convert': {
-    video_encoder: 'x264',
-    quality_mode: 'cq',
+  'fast-h264-cpu': {
+    video_codec: 'h264',
+    encoding_type: 'cpu',
+    quality_mode: 'crf',
     quality: 23,
     preset: 'fast',
-    container: 'mp4',
-    crop_mode: 'auto',
-    audio_encoder: 'aac',
-    audio_bitrate: 160,
-    audio_channels: 'auto',
-    audio_mixdown: 'none',
+    container: 'mkv',
+    audio_encoder: 'copy',
+    audio_bitrate: 0,
     subtitles: 'all',
     deinterlace: false,
-    denoise: 'none',
-    deblock: false,
   },
-  'mkv-to-mp4': {
-    video_encoder: 'copy', // No re-encode
+  'nvidia-h264-gpu': {
+    video_codec: 'h264',
+    encoding_type: 'gpu',
+    gpu_type: 'nvidia',
     quality_mode: 'cq',
-    quality: 0,
+    quality: 22,
     preset: 'fast',
-    container: 'mp4',
-    crop_mode: 'none',
-    audio_encoder: 'aac',
-    audio_bitrate: 160,
-    audio_channels: 'auto',
-    audio_mixdown: 'none',
+    container: 'mkv',
+    audio_encoder: 'copy',
+    audio_bitrate: 0,
     subtitles: 'all',
     deinterlace: false,
-    denoise: 'none',
-    deblock: false,
+  },
+  'nvidia-h265-gpu': {
+    video_codec: 'h265',
+    encoding_type: 'gpu',
+    gpu_type: 'nvidia',
+    quality_mode: 'cq',
+    quality: 24,
+    preset: 'fast',
+    container: 'mkv',
+    audio_encoder: 'copy',
+    audio_bitrate: 0,
+    subtitles: 'all',
+    deinterlace: false,
+  },
+  'intel-h264-gpu': {
+    video_codec: 'h264',
+    encoding_type: 'gpu',
+    gpu_type: 'intel',
+    quality_mode: 'crf',
+    quality: 22,
+    preset: 'medium',
+    container: 'mkv',
+    audio_encoder: 'copy',
+    audio_bitrate: 0,
+    subtitles: 'all',
+    deinterlace: false,
+  },
+  'intel-h265-gpu': {
+    video_codec: 'h265',
+    encoding_type: 'gpu',
+    gpu_type: 'intel',
+    quality_mode: 'crf',
+    quality: 24,
+    preset: 'medium',
+    container: 'mkv',
+    audio_encoder: 'copy',
+    audio_bitrate: 0,
+    subtitles: 'all',
+    deinterlace: false,
+  },
+  'amd-h264-gpu': {
+    video_codec: 'h264',
+    encoding_type: 'gpu',
+    gpu_type: 'amd',
+    quality_mode: 'qp',
+    quality: 22,
+    preset: 'fast',
+    container: 'mkv',
+    audio_encoder: 'copy',
+    audio_bitrate: 0,
+    subtitles: 'all',
+    deinterlace: false,
+  },
+  'amd-h265-gpu': {
+    video_codec: 'h265',
+    encoding_type: 'gpu',
+    gpu_type: 'amd',
+    quality_mode: 'qp',
+    quality: 24,
+    preset: 'fast',
+    container: 'mkv',
+    audio_encoder: 'copy',
+    audio_bitrate: 0,
+    subtitles: 'all',
+    deinterlace: false,
   },
 };
 
 export const BUILTIN_PRESET_DESCRIPTIONS: Record<string, string> = {
-  'high-quality-h265': 'High Quality (H.265) - Best quality with H.265/HEVC encoding',
-  'maximum-compression': 'Maximum Compression - Smallest file size with 1080p cap',
-  'quick-convert': 'Quick Convert - Fast encoding with H.264, minimal quality loss',
-  'mkv-to-mp4': 'MKV to MP4 - Container only conversion, no quality loss',
+  'high-quality-h265-cpu': 'High Quality H.265 (CPU) - Best quality with H.265/HEVC CPU encoding',
+  'maximum-compression-h265-cpu': 'Maximum Compression H.265 (CPU) - Smallest file size with H.265 and 1080p cap',
+  'fast-h264-cpu': 'Fast H.264 (CPU) - Fast encoding with H.264, minimal quality loss',
+  'nvidia-h264-gpu': 'NVIDIA H.264 (GPU) - GPU-accelerated encoding with NVIDIA NVENC H.264',
+  'nvidia-h265-gpu': 'NVIDIA H.265 (GPU) - GPU-accelerated encoding with NVIDIA NVENC H.265',
+  'intel-h264-gpu': 'Intel Quick Sync H.264 (GPU) - GPU-accelerated encoding with Intel QSV H.264',
+  'intel-h265-gpu': 'Intel Quick Sync H.265 (GPU) - GPU-accelerated encoding with Intel QSV H.265',
+  'amd-h264-gpu': 'AMD AMF H.264 (GPU) - GPU-accelerated encoding with AMD AMF H.264',
+  'amd-h265-gpu': 'AMD AMF H.265 (GPU) - GPU-accelerated encoding with AMD AMF H.265',
 };
 
 // ============================================================================
@@ -102,16 +156,6 @@ export const DEFAULT_SETTINGS: Settings = {
     deleteOriginal: false,
     keepBackup: true,
   },
-  handbrake: {
-    autoDetect: true,
-    defaultPaths: [
-      'C:/Program Files/HandBrake/HandBrakeCLI.exe',
-      'C:/Program Files (x86)/HandBrake/HandBrakeCLI.exe',
-      '/usr/bin/HandBrakeCLI',
-      '/usr/local/bin/HandBrakeCLI',
-      '/opt/homebrew/bin/HandBrakeCLI',
-    ],
-  },
 };
 
 // ============================================================================
@@ -124,7 +168,6 @@ export const DEFAULT_NODE_CONFIG: NodeConfig = {
   name: '',
   cache_dir: './cache',
   temp_dir: './temp',
-  handbrakecli_path: '',
   ffmpeg_dir: '',
   reconnectInterval: 5000,
   heartbeatInterval: 30000,
@@ -134,24 +177,20 @@ export const DEFAULT_NODE_CONFIG: NodeConfig = {
 // Configuration Schemas
 // ============================================================================
 
-export const HandBrakeConfigSchema = z.object({
-  video_encoder: z.string(),
-  quality_mode: z.enum(['vbr', 'cq', 'constant']),
+export const FFmpegConfigSchema = z.object({
+  video_codec: z.enum(['h264', 'h265']),
+  encoding_type: z.enum(['cpu', 'gpu']),
+  gpu_type: z.enum(['nvidia', 'intel', 'amd']).optional(),
+  quality_mode: z.enum(['crf', 'cq', 'qp']),
   quality: z.number(),
   preset: z.string(),
-  tune: z.string().optional(),
   container: z.string(),
   max_width: z.number().int().positive().optional(),
   max_height: z.number().int().positive().optional(),
-  crop_mode: z.enum(['auto', 'none']).optional(),
   audio_encoder: z.string(),
   audio_bitrate: z.number().int().positive(),
-  audio_channels: z.enum(['auto', 'stereo', '5.1', '7.1']).optional(),
-  audio_mixdown: z.enum(['none', 'stereo', '5.1']).optional(),
   subtitles: z.enum(['all', 'first', 'none']),
   deinterlace: z.boolean().optional(),
-  denoise: z.enum(['none', 'weak', 'medium', 'strong']).optional(),
-  deblock: z.boolean().optional(),
   extra_args: z.array(z.string()).optional(),
 });
 
@@ -161,7 +200,6 @@ export const NodeConfigSchema = z.object({
   name: z.string().min(1),
   cache_dir: z.string(),
   temp_dir: z.string(),
-  handbrakecli_path: z.string(),
   ffmpeg_dir: z.string(),
   reconnectInterval: z.number().int().min(1000).default(5000),
   heartbeatInterval: z.number().int().min(5000).default(30000),
@@ -182,10 +220,6 @@ export const SettingsSchema = z.object({
   fileRetention: z.object({
     deleteOriginal: z.boolean().default(false),
     keepBackup: z.boolean().default(true),
-  }).default({}),
-  handbrake: z.object({
-    autoDetect: z.boolean().default(true),
-    defaultPaths: z.array(z.string()).default([]),
   }).default({}),
 });
 
@@ -211,9 +245,26 @@ export function normalizePath(path: string): string {
 // ============================================================================
 
 export const VIDEO_EXTENSIONS = [
+  // Common formats
   '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v',
   '.mpg', '.mpeg', '.m2ts', '.ts', '.mts', '.vob', '.ogv', '.3gp',
   '.rm', '.rmvb', '.asf', '.divx', '.xvid', '.f4v', '.mxf',
+  // Additional MPEG formats
+  '.mp2', '.m2v', '.m1v', '.mv2', '.mt2s',
+  // Mobile/portable formats
+  '.3g2', '.amv',
+  // Flash/F4V variants
+  '.f4p', '.f4a', '.f4b',
+  // QuickTime variants
+  '.qt', '.yuv',
+  // Windows TV/recording formats
+  '.wtv', '.dvr-ms', '.vro',
+  // Old game video formats
+  '.bik', '.smk',
+  // Nullsoft video
+  '.nsv',
+  // Ogg video (rare but valid)
+  '.drc',
 ] as const;
 
 export function isVideoFile(filename: string): boolean {
@@ -230,192 +281,65 @@ export const SUPPORTED_VIDEO_CODECS = ['h264', 'h265', 'hevc', 'mpeg2', 'mpeg4',
 export const SUPPORTED_AUDIO_CODECS = ['aac', 'ac3', 'dts', 'mp3', 'flac', 'vorbis', 'opus', 'eac3'] as const;
 
 // ============================================================================
-// HandBrake Command Builder
+// FFmpeg Encoder Configuration
 // ============================================================================
 
-export interface HandBrakeCommandOptions {
-  input: string;
-  output: string;
-  config: HandBrakeConfig;
-}
+// Re-export FFmpegEncoderInfo from types for convenience
+export type { FFmpegEncoderInfo } from '../types';
 
-export function buildHandBrakeCommand(options: HandBrakeCommandOptions): string[] {
-  const { input, output, config } = options;
-  const args: string[] = [];
-
-  // Input and output
-  args.push('-i', input, '-o', output);
-
-  // Container format
-  const containerMap: Record<string, string> = {
-    mp4: 'mp4',
-    mkv: 'mkv',
-    avi: 'mp4', // HandBrake doesn't support AVI output
-  };
-  args.push('-f', containerMap[config.container] || 'mp4');
-
-  // Video encoder
-  const encoderMap: Record<string, string> = {
-    copy: 'copy',
-    x264: 'x264',
-    x265: 'x265',
-    'h.264': 'x264',
-    'h.265': 'x265',
-    hevc: 'x265',
-  };
-  const encoder = encoderMap[config.video_encoder.toLowerCase()] || config.video_encoder;
-
-  if (encoder !== 'copy') {
-    args.push('-e', encoder);
-
-    // Quality mode
-    if (config.quality_mode === 'cq') {
-      args.push('-q', config.quality.toString());
-    } else if (config.quality_mode === 'vbr') {
-      args.push('-q', config.quality.toString());
-    } else if (config.quality_mode === 'constant') {
-      args.push('-Q', config.quality.toString());
-    }
-
-    // Preset
-    args.push('--preset', config.preset);
-
-    // Tune (optional)
-    if (config.tune) {
-      args.push('--tune', config.tune);
-    }
-
-    // Max resolution
-    if (config.max_width && config.max_height) {
-      args.push('-w', config.max_width.toString(), '-l', config.max_height.toString());
-    }
-
-    // Deblock filter
-    if (config.deblock) {
-      args.push('--deblock', '1:0:2:1');
-    }
-  } else {
-    // Direct copy
-    args.push('-e', 'copy');
-  }
-
-  // Audio settings
-  args.push('-E', config.audio_encoder);
-
-  if (config.audio_channels === 'stereo') {
-    args.push('--audio-channels', '2');
-  } else if (config.audio_channels === '5.1') {
-    args.push('--audio-channels', '6');
-  } else if (config.audio_channels === '7.1') {
-    args.push('--audio-channels', '8');
-  }
-
-  if (config.audio_mixdown && config.audio_mixdown !== 'none') {
-    args.push('--audio-mixdown', config.audio_mixdown);
-  }
-
-  if (config.audio_bitrate) {
-    args.push('-B', config.audio_bitrate.toString());
-  }
-
-  // Subtitle settings
-  if (config.subtitles === 'all') {
-    args.push('--all-subtitles');
-  } else if (config.subtitles === 'first') {
-    args.push('--first-subtitle');
-  } else if (config.subtitles === 'none') {
-    args.push('-N', 'none');
-  }
-
-  // Filters
-  if (config.deinterlace) {
-    args.push('--deinterlace', 'slow');
-  }
-
-  if (config.denoise && config.denoise !== 'none') {
-    const strength: Record<string, string> = {
-      weak: '0:1:1:1',
-      medium: '2:1:2:1',
-      strong: '3:2:2:3',
-    };
-    args.push('--denoise', strength[config.denoise] || 'weak');
-  }
-
-  // Extra arguments
-  if (config.extra_args && config.extra_args.length > 0) {
-    args.push(...config.extra_args);
-  }
-
-  return args;
-}
-
-// ============================================================================
-// CLI Progress Parsing
-// ============================================================================
-
-export interface HandBrakeProgress {
-  progress: number; // 0-100
-  current_action: string;
-  fps?: number;
-  avg_fps?: number;
-  eta_seconds?: number;
-  current_pass?: number;
-  total_passes?: number;
-}
-
-export function parseHandBrakeProgress(line: string): HandBrakeProgress | null {
-  // Example HandBrake output:
-  // Encoding: task 1 of 1, 23.45 % (150.23 fps, avg 145.67 fps, ETA 00h02m15s)
-  // Encoding: task 1 of 2, 45.67 % (123.45 fps, avg 120.34 fps, ETA 00h01m30s)
-  // Scanning title 1 of 1...
-  // Encoding movie...
-
-  const encodingMatch = line.match(/Encoding:\s+task\s+(\d+)\s+of\s+(\d+),\s+([\d.]+)\s+%/);
-
-  if (encodingMatch) {
-    const currentPass = parseInt(encodingMatch[1], 10);
-    const totalPasses = parseInt(encodingMatch[2], 10);
-    const progress = parseFloat(encodingMatch[3]);
-
-    // Extract FPS and ETA
-    const fpsMatch = line.match(/\(([\d.]+)\s+fps/);
-    const avgFpsMatch = line.match(/avg\s+([\d.]+)\s+fps/);
-    const etaMatch = line.match(/ETA\s+(\d+)h(\d+)m(\d+)s/);
-
-    let eta_seconds: number | undefined;
-    if (etaMatch) {
-      const hours = parseInt(etaMatch[1], 10);
-      const minutes = parseInt(etaMatch[2], 10);
-      const seconds = parseInt(etaMatch[3], 10);
-      eta_seconds = hours * 3600 + minutes * 60 + seconds;
-    }
-
-    return {
-      progress,
-      current_action: totalPasses > 1 ? `Encoding pass ${currentPass}/${totalPasses}` : 'Encoding',
-      fps: fpsMatch ? parseFloat(fpsMatch[1]) : undefined,
-      avg_fps: avgFpsMatch ? parseFloat(avgFpsMatch[1]) : undefined,
-      eta_seconds,
-      current_pass: currentPass,
-      total_passes: totalPasses,
-    };
-  }
-
-  // Scan in progress
-  if (line.includes('Scanning')) {
-    return {
-      progress: 0,
-      current_action: 'Scanning source file',
-    };
-  }
-
-  // Work started
-  if (line.includes('Encoding') && !line.includes('%')) {
-    return {
-      progress: 0,
-      current_action: 'Starting encode',
-    };
-  }
-
-  return null;
-}
+export const ENCODER_MAP: Record<string, FFmpegEncoderInfo> = {
+  'cpu-h264': {
+    type: 'cpu',
+    encoder_name: 'libx264',
+    codec: 'h264',
+    available: true,
+  },
+  'cpu-h265': {
+    type: 'cpu',
+    encoder_name: 'libx265',
+    codec: 'h265',
+    available: true,
+  },
+  'nvidia-h264': {
+    type: 'gpu',
+    gpu_type: 'nvidia',
+    encoder_name: 'h264_nvenc',
+    codec: 'h264',
+    available: true,
+  },
+  'nvidia-h265': {
+    type: 'gpu',
+    gpu_type: 'nvidia',
+    encoder_name: 'hevc_nvenc',
+    codec: 'h265',
+    available: true,
+  },
+  'intel-h264': {
+    type: 'gpu',
+    gpu_type: 'intel',
+    encoder_name: 'h264_qsv',
+    codec: 'h264',
+    available: true,
+  },
+  'intel-h265': {
+    type: 'gpu',
+    gpu_type: 'intel',
+    encoder_name: 'hevc_qsv',
+    codec: 'h265',
+    available: true,
+  },
+  'amd-h264': {
+    type: 'gpu',
+    gpu_type: 'amd',
+    encoder_name: 'h264_amf',
+    codec: 'h264',
+    available: true,
+  },
+  'amd-h265': {
+    type: 'gpu',
+    gpu_type: 'amd',
+    encoder_name: 'hevc_amf',
+    codec: 'h265',
+    available: true,
+  },
+};

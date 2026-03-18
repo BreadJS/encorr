@@ -28,7 +28,16 @@ const consoleFormat = winston.format.printf(({ level, message, timestamp, ...met
       coloredLevel = chalk.white(levelUpper);
   }
 
-  let msg = `${coloredLevel}: ${message}`;
+  // Format timestamp as HH:MM:SS
+  let time: string;
+  if (typeof timestamp === 'string') {
+    time = new Date(timestamp).toLocaleTimeString('en-US', { hour12: false });
+  } else if (timestamp instanceof Date) {
+    time = timestamp.toLocaleTimeString('en-US', { hour12: false });
+  } else {
+    time = new Date().toLocaleTimeString('en-US', { hour12: false });
+  }
+  let msg = `${chalk.gray(time)} ${coloredLevel}: ${message}`;
 
   if (Object.keys(meta).length > 0 && meta.constructor !== Object) {
     if (meta.stack) {
@@ -77,7 +86,10 @@ export function createLogger(options?: { silent?: boolean; level?: string }): wi
       // Console output
       new winston.transports.Console({
         silent: options?.silent,
-        format: consoleFormat,
+        format: winston.format.combine(
+          winston.format.timestamp(),
+          consoleFormat
+        ),
       }),
       // File output
       new winston.transports.File({

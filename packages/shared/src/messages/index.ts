@@ -6,7 +6,7 @@ import type {
   SystemInfo,
   VideoFile,
   VideoMetadata,
-  HandBrakeConfig,
+  FFmpegConfig,
   NodeConfig,
 } from '../types';
 
@@ -73,8 +73,28 @@ export const RegisterPayloadSchema = z.object({
     cpu: z.string(),
     cpu_cores: z.number().int().positive(),
     ram_total: z.number().int().positive(),
-    handbrake_version: z.string().optional(),
-    handbrake_path: z.string(),
+    ffmpeg_version: z.string().optional(),
+    ffmpeg_path: z.string().optional(),
+    ffprobe_path: z.string().optional(),
+    ffmpeg_encoders: z.array(z.object({
+      type: z.enum(['cpu', 'gpu']),
+      gpu_type: z.enum(['nvidia', 'intel', 'amd']).optional(),
+      encoder_name: z.string(),
+      codec: z.enum(['h264', 'h265', 'mpeg2']),
+      available: z.boolean(),
+    })).optional(),
+    ffmpeg_decoders: z.array(z.object({
+      type: z.enum(['cpu', 'gpu']),
+      gpu_type: z.enum(['nvidia', 'intel', 'amd']).optional(),
+      decoder_name: z.string(),
+      codec: z.enum(['h264', 'h265', 'mpeg2']),
+      available: z.boolean(),
+    })).optional(),
+    ffmpeg_hwaccels: z.array(z.object({
+      name: z.string(),
+      available: z.boolean(),
+      gpu_type: z.enum(['nvidia', 'intel', 'amd']).optional(),
+    })).optional(),
     gpus: z.array(z.object({
       name: z.string(),
       vendor: z.string(),
@@ -106,6 +126,11 @@ export const HeartbeatPayloadSchema = z.object({
   active_jobs: z.array(z.object({
     job_id: z.string(),
     progress: z.number().min(0).max(100),
+    fps: z.number().optional(),
+    eta: z.number().optional(),
+    ratio: z.string().optional(),
+    current_action: z.string().optional(),
+    gpu: z.number().optional(),
   })).default([]),
   system_load: z.object({
     cpu_percent: z.number().min(0).max(100),
@@ -134,7 +159,7 @@ export const JobAssignPayloadSchema = z.object({
     config: z.object({
       source_path: z.string(),
       dest_path: z.string(),
-      handbrake: z.custom<HandBrakeConfig>(),
+      ffmpeg: z.custom<FFmpegConfig>(),
     }),
   }),
 });
@@ -157,6 +182,7 @@ export const JobProgressPayloadSchema = z.object({
   current_action: z.string(),
   eta_seconds: z.number().int().optional(),
   fps: z.number().optional(),
+  ratio: z.string().optional(),
 });
 
 export type JobProgressPayload = z.infer<typeof JobProgressPayloadSchema>;

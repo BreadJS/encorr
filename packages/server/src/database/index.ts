@@ -112,6 +112,20 @@ export class EncorrDatabase {
       this.db.exec('ALTER TABLE nodes ADD COLUMN max_workers TEXT');
     }
 
+    // Migration: Add output_path column to jobs table
+    try {
+      const jobsTableInfo = this.db.pragma('table_info(jobs)') as Array<{ name: string }>;
+      const jobsColumns = new Set(jobsTableInfo.map(col => col.name));
+
+      if (!jobsColumns.has('output_path')) {
+        this.logger.info('Running migration: Add output_path to jobs table');
+        this.db.exec('ALTER TABLE jobs ADD COLUMN output_path TEXT');
+      }
+    } catch (error) {
+      // Table might not exist yet, ignore
+      this.logger.debug('Could not check jobs table for output_path column:', error);
+    }
+
     // Migration: Add 'analyzed' status to files table
     // We need to recreate the table to update the CHECK constraint
     try {
@@ -227,61 +241,179 @@ export class EncorrDatabase {
   }
 
   /**
-   * Seed built-in presets if they don't exist
+   * Seed built-in presets - use INSERT OR REPLACE to update existing presets
+   * This ensures that FFmpeg migration updates old HandBrake-style presets
    */
   private seedBuiltinPresets(): void {
     const builtinPresets = [
       {
-        id: 'builtin-high-quality',
-        name: 'High Quality H.265',
-        description: 'Best quality for archiving with good compression',
+        id: 'builtin-high-quality-h265-cpu',
+        name: 'High Quality H.265 (CPU)',
+        description: 'High quality with H.265/HEVC CPU encoding',
         config: {
-          video_encoder: 'x265',
-          quality_mode: 'cq',
-          quality: 20,
-          preset: 'slow',
-          tune: 'film',
+          video_codec: 'h265',
+          encoding_type: 'cpu',
+          quality_mode: 'crf',
+          quality: 22,
+          preset: 'medium',
           container: 'mkv',
-          audio_encoder: 'aac',
-          audio_bitrate: 160,
-          audio_channels: 'auto',
+          audio_encoder: 'copy',
+          audio_bitrate: 0, // Not used when copying
           subtitles: 'all',
         },
       },
       {
-        id: 'builtin-max-compression',
-        name: 'Maximum Compression',
-        description: 'Smallest file size, slower encoding',
+        id: 'builtin-max-compression-h265-cpu',
+        name: 'Maximum Compression H.265 (CPU)',
+        description: 'Smallest file size with H.265 and 1080p cap',
         config: {
-          video_encoder: 'x265',
-          quality_mode: 'cq',
+          video_codec: 'h265',
+          encoding_type: 'cpu',
+          quality_mode: 'crf',
           quality: 28,
           preset: 'slow',
           container: 'mkv',
           max_width: 1920,
           max_height: 1080,
-          audio_encoder: 'aac',
-          audio_bitrate: 128,
-          audio_channels: 'stereo',
+          audio_encoder: 'copy',
+          audio_bitrate: 0, // Not used when copying
           subtitles: 'first',
         },
       },
       {
-        id: 'builtin-fast-1080p',
-        name: 'Fast 1080p H.264',
-        description: 'Quick conversion with good quality',
+        id: 'builtin-fast-h264-cpu',
+        name: 'Fast H.264 (CPU)',
+        description: 'Fast encoding with H.264, minimal quality loss',
         config: {
-          video_encoder: 'x264',
-          quality_mode: 'cq',
+          video_codec: 'h264',
+          encoding_type: 'cpu',
+          quality_mode: 'crf',
           quality: 23,
           preset: 'fast',
-          container: 'mp4',
-          max_width: 1920,
-          max_height: 1080,
-          audio_encoder: 'aac',
-          audio_bitrate: 160,
-          audio_channels: 'auto',
+          container: 'mkv',
+          audio_encoder: 'copy',
+          audio_bitrate: 0, // Not used when copying
           subtitles: 'all',
+        },
+      },
+      {
+        id: 'builtin-nvidia-h264-gpu',
+        name: 'NVIDIA H.264 (GPU)',
+        description: 'GPU-accelerated encoding with NVIDIA NVENC H.264',
+        config: {
+          video_codec: 'h264',
+          encoding_type: 'gpu',
+          gpu_type: 'nvidia',
+          quality_mode: 'cq',
+          quality: 22,
+          preset: 'fast',
+          container: 'mkv',
+          audio_encoder: 'copy',
+          audio_bitrate: 0, // Not used when copying
+          subtitles: 'all',
+        },
+      },
+      {
+        id: 'builtin-nvidia-h265-gpu',
+        name: 'NVIDIA H.265 (GPU)',
+        description: 'GPU-accelerated encoding with NVIDIA NVENC H.265',
+        config: {
+          video_codec: 'h265',
+          encoding_type: 'gpu',
+          gpu_type: 'nvidia',
+          quality_mode: 'cq',
+          quality: 24,
+          preset: 'fast',
+          container: 'mkv',
+          audio_encoder: 'copy',
+          audio_bitrate: 0, // Not used when copying
+          subtitles: 'all',
+        },
+      },
+      {
+        id: 'builtin-intel-h264-gpu',
+        name: 'Intel Quick Sync H.264 (GPU)',
+        description: 'GPU-accelerated encoding with Intel QSV H.264',
+        config: {
+          video_codec: 'h264',
+          encoding_type: 'gpu',
+          gpu_type: 'intel',
+          quality_mode: 'crf',
+          quality: 22,
+          preset: 'medium',
+          container: 'mkv',
+          audio_encoder: 'copy',
+          audio_bitrate: 0, // Not used when copying
+          subtitles: 'all',
+        },
+      },
+      {
+        id: 'builtin-intel-h265-gpu',
+        name: 'Intel Quick Sync H.265 (GPU)',
+        description: 'GPU-accelerated encoding with Intel QSV H.265',
+        config: {
+          video_codec: 'h265',
+          encoding_type: 'gpu',
+          gpu_type: 'intel',
+          quality_mode: 'crf',
+          quality: 24,
+          preset: 'medium',
+          container: 'mkv',
+          audio_encoder: 'copy',
+          audio_bitrate: 0, // Not used when copying
+          subtitles: 'all',
+        },
+      },
+      {
+        id: 'builtin-amd-h264-gpu',
+        name: 'AMD AMF H.264 (GPU)',
+        description: 'GPU-accelerated encoding with AMD AMF H.264',
+        config: {
+          video_codec: 'h264',
+          encoding_type: 'gpu',
+          gpu_type: 'amd',
+          quality_mode: 'qp',
+          quality: 22,
+          preset: 'fast',
+          container: 'mkv',
+          audio_encoder: 'copy',
+          audio_bitrate: 0, // Not used when copying
+          subtitles: 'all',
+        },
+      },
+      {
+        id: 'builtin-amd-h265-gpu',
+        name: 'AMD AMF H.265 (GPU)',
+        description: 'GPU-accelerated encoding with AMD AMF H.265',
+        config: {
+          video_codec: 'h265',
+          encoding_type: 'gpu',
+          gpu_type: 'amd',
+          quality_mode: 'qp',
+          quality: 24,
+          preset: 'fast',
+          container: 'mkv',
+          audio_encoder: 'copy',
+          audio_bitrate: 0, // Not used when copying
+          subtitles: 'all',
+        },
+      },
+      {
+        id: 'builtin-mobile-h264-cpu',
+        name: 'Mobile Optimized H.264 (CPU)',
+        description: 'Optimized for mobile devices with 720p cap',
+        config: {
+          video_codec: 'h264',
+          encoding_type: 'cpu',
+          quality_mode: 'crf',
+          quality: 24,
+          preset: 'fast',
+          container: 'mkv',
+          max_width: 1280,
+          max_height: 720,
+          audio_encoder: 'copy',
+          audio_bitrate: 0, // Not used when copying
+          subtitles: 'first',
         },
       },
       {
@@ -297,22 +429,20 @@ export class EncorrDatabase {
     const now = Math.floor(Date.now() / 1000);
 
     for (const preset of builtinPresets) {
-      // Check if preset already exists (by ID or name since name is UNIQUE)
-      const existing = this.db.prepare('SELECT id FROM presets WHERE id = ? OR name = ?').get(preset.id, preset.name);
-      if (!existing) {
-        const stmt = this.db.prepare(`
-          INSERT INTO presets (id, name, description, is_builtin, config, created_at)
-          VALUES (?, ?, ?, 1, ?, ?)
-        `);
-        stmt.run(
-          preset.id,
-          preset.name,
-          preset.description,
-          JSON.stringify(preset.config),
-          now
-        );
-        this.logger.info(`Seeded built-in preset: ${preset.name}`);
-      }
+      // Use INSERT OR REPLACE to update existing presets
+      const stmt = this.db.prepare(`
+        INSERT OR REPLACE INTO presets (id, name, description, is_builtin, config, created_at)
+        VALUES (?, ?, ?, 1, ?, COALESCE((SELECT created_at FROM presets WHERE id = ?), ?))
+      `);
+      stmt.run(
+        preset.id,
+        preset.name,
+        preset.description,
+        JSON.stringify(preset.config),
+        preset.id,
+        now
+      );
+      this.logger.info(`Seeded built-in preset: ${preset.name}`);
     }
   }
 
@@ -1099,14 +1229,14 @@ export class EncorrDatabase {
     transcoded_size: number;
     duration_seconds: number;
     avg_fps?: number;
-  }): void {
+  }, outputPath?: string): void {
     const now = Math.floor(Date.now() / 1000);
     const stmt = this.db.prepare(`
       UPDATE jobs
-      SET status = 'completed', progress = 100, completed_at = ?, stats = ?
+      SET status = 'completed', progress = 100, completed_at = ?, stats = ?, output_path = ?
       WHERE id = ?
     `);
-    stmt.run(now, JSON.stringify(stats), jobId);
+    stmt.run(now, JSON.stringify(stats), outputPath || null, jobId);
   }
 
   completeAnalyzeJob(jobId: string, metadata: {

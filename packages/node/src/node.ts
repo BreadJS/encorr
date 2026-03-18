@@ -8,9 +8,30 @@ import { WebSocketClient } from './client/websocket';
 import { Transcoder } from './worker/transcoder';
 import { FileAnalyzer } from './worker/file-scanner';
 import { GPUMonitor } from './worker/gpu-monitor';
-import { getHandBrakeVersion, getFFmpegVersion, getFFprobeVersion } from './handbrake';
+import {
+  getFFmpegVersion,
+  getFFprobeVersion,
+  detectAvailableEncoders,
+  detectAvailableDecoders,
+  detectAvailableHwaccels
+} from './ffmpeg';
 import { createLogger } from './utils/logger';
 import { loadConfig, type NodeConfigFile } from './config';
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+function formatDuration(seconds: number): string {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+
+  if (hours > 0) {
+    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  }
+  return `${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+}
 
 // ============================================================================
 // Node Options
@@ -31,6 +52,10 @@ interface ActiveJob {
   config: any;
   progress: number;
   currentAction: string;
+  fps?: number;
+  ratio?: string;
+  eta?: number;
+  gpu?: number;
 }
 
 // ============================================================================
@@ -203,9 +228,14 @@ export class EncorrNode {
     const { job } = payload;
     const jobId = job.id;
     const config = job.config || {};
-    const presetConfig = config.handbrake || {};
+    const presetConfig = config.ffmpeg || {};
 
-    this.logger.info(`Job assigned: ${jobId}, action: ${presetConfig.action || 'transcode'}`);
+    this.logger.info(`[JOB_ASSIGN] Job assigned: ${jobId}`);
+    this.logger.info(`[JOB_ASSIGN]   full config: ${JSON.stringify(config, null, 2)}`);
+    this.logger.info(`[JOB_ASSIGN]   preset config: ${JSON.stringify(presetConfig, null, 2)}`);
+    this.logger.info(`[JOB_ASSIGN]   action: ${presetConfig.action || 'transcode'}`);
+    this.logger.info(`[JOB_ASSIGN]   source: ${config.source_path}`);
+    this.logger.info(`[JOB_ASSIGN]   dest: ${config.dest_path}`);
 
     // Server controls concurrency, so we accept all assigned jobs
 
@@ -221,6 +251,14 @@ export class EncorrNode {
     // Accept job
     this.wsClient.sendJobAccept(jobId, true);
 
+    // Determine GPU index from gpu_type (0-based internally, +1 for display)
+    let gpuIndex: number | undefined = undefined;
+    if (presetConfig.encoding_type === 'gpu' && presetConfig.gpu_type) {
+      if (presetConfig.gpu_type === 'nvidia') gpuIndex = 0;  // GPU 1 for display
+      else if (presetConfig.gpu_type === 'intel') gpuIndex = 1; // GPU 2 for display
+      else if (presetConfig.gpu_type === 'amd') gpuIndex = 2;   // GPU 3 for display
+    }
+
     // Check if this is an analyze job
     if (presetConfig.action === 'analyze') {
       // Add to active jobs for analyze
@@ -231,6 +269,7 @@ export class EncorrNode {
         config: presetConfig,
         progress: 0,
         currentAction: 'Analyzing...',
+        gpu: gpuIndex,
       });
 
       // Run analyze job
@@ -244,6 +283,7 @@ export class EncorrNode {
         config: presetConfig,
         progress: 0,
         currentAction: 'Starting...',
+        gpu: gpuIndex,
       });
 
       // Start transcoding
@@ -257,6 +297,11 @@ export class EncorrNode {
 
     const startTime = Date.now();
 
+    this.logger.info(`[JOB_START] Starting transcoding job ${jobId}`);
+    this.logger.info(`[JOB_START]   source: ${activeJob.sourcePath}`);
+    this.logger.info(`[JOB_START]   output: ${activeJob.destPath}`);
+    this.logger.info(`[JOB_START]   config: ${JSON.stringify(activeJob.config)}`);
+
     try {
       // Run transcoding
       const result = await this.transcoder.transcode(
@@ -265,24 +310,38 @@ export class EncorrNode {
           sourcePath: activeJob.sourcePath,
           destPath: activeJob.destPath,
           config: activeJob.config,
-          handbrakePath: this.systemInfo.handbrake_path,
+          ffmpegPath: this.systemInfo.ffmpeg_path || '',
           cacheDirectory: this.config.cache_dir,
           tempDirectory: this.config.temp_dir,
+          availableEncoders: this.systemInfo.ffmpeg_encoders,
         },
-        (progress, action, eta) => {
-          // Update progress
+        (progress, action, eta, fps, ratio) => {
+          // Update progress - ALWAYS update fps, eta, and ratio (including undefined)
+          // The transcoder now accumulates values, so we trust what it sends
           activeJob.progress = progress;
           activeJob.currentAction = action;
+          activeJob.fps = fps;  // Always update (undefined is valid - means no FPS data yet)
+          activeJob.eta = eta;  // Always update (undefined is valid - means no ETA data yet)
+          activeJob.ratio = ratio;  // Always update (undefined is valid - means no ratio data yet)
 
           // Send to server
-          this.wsClient.sendJobProgress(jobId, progress, action, eta);
+          this.wsClient.sendJobProgress(jobId, progress, action, eta, fps, ratio);
 
-          this.logger.debug(`Job ${jobId}: ${progress.toFixed(1)}% - ${action}`);
+          // Log progress updates (every 10% or on action change to reduce spam)
+          if (Math.floor(progress) % 10 === 0 || progress === 0) {
+            const etaFormatted = eta ? formatDuration(eta) : undefined;
+            this.logger.info(`[PROGRESS] Job ${jobId}: ${progress.toFixed(1)}% - ${action}${fps ? ` @ ${fps.toFixed(1)} fps` : ''}${ratio ? ` (Ratio: ${ratio})` : ''}${etaFormatted ? ` (ETA: ${etaFormatted})` : ''}`);
+          }
         }
       );
 
       if (result.success) {
-        this.logger.info(`Job ${jobId} completed successfully`);
+        this.logger.info(`[JOB_COMPLETE] Job ${jobId} completed successfully`);
+        this.logger.info(`[JOB_COMPLETE]   original: ${result.original_size} bytes`);
+        this.logger.info(`[JOB_COMPLETE]   transcoded: ${result.transcoded_size} bytes`);
+        this.logger.info(`[JOB_COMPLETE]   duration: ${result.duration_seconds.toFixed(1)}s`);
+        this.logger.info(`[JOB_COMPLETE]   avg_fps: ${result.avg_fps || 'N/A'}`);
+        this.logger.info(`[JOB_COMPLETE]   output_path: ${result.output_path}`);
 
         this.wsClient.sendJobComplete(jobId, {
           original_size: result.original_size,
@@ -291,13 +350,13 @@ export class EncorrNode {
           avg_fps: result.avg_fps,
         }, result.output_path);
       } else {
-        this.logger.error(`Job ${jobId} failed: ${result.error}`);
+        this.logger.error(`[JOB_ERROR] Job ${jobId} failed: ${result.error}`);
 
         this.wsClient.sendJobError(jobId, result.error || 'Unknown error', false);
       }
 
     } catch (error) {
-      this.logger.error(`Job ${jobId} error:`, error);
+      this.logger.error(`[JOB_ERROR] Job ${jobId} error:`, error);
 
       this.wsClient.sendJobError(
         jobId,
@@ -307,6 +366,7 @@ export class EncorrNode {
     } finally {
       // Remove from active jobs
       this.activeJobs.delete(jobId);
+      this.logger.info(`[JOB_CLEANUP] Job ${jobId} removed from active jobs`);
 
       // Send heartbeat
       this.sendHeartbeat();
@@ -375,10 +435,24 @@ export class EncorrNode {
   private sendHeartbeat(): void {
     const activeJobsArray = Array.from(this.activeJobs.values()).map(job => ({
       job_id: job.id,
+      file_name: job.sourcePath ? job.sourcePath.split(/[/\\]/).pop() || 'Unknown' : 'Unknown',
       progress: job.progress,
+      current_action: job.currentAction,
+      fps: job.fps,
+      ratio: job.ratio,
+      eta: job.eta,
+      gpu: job.gpu,
     }));
 
     const status = this.activeJobs.size > 0 ? 'busy' : 'idle';
+
+    // Log heartbeat details
+    this.logger.debug(`[HEARTBEAT] Sending: status=${status}, active_jobs_count=${activeJobsArray.length}`);
+    if (activeJobsArray.length > 0) {
+      activeJobsArray.forEach(job => {
+        this.logger.debug(`[HEARTBEAT]   job=${job.job_id}, progress=${job.progress?.toFixed(1)}%, action=${job.current_action}, fps=${job.fps}, eta=${job.eta}, ratio=${job.ratio}, gpu=${job.gpu}`);
+      });
+    }
 
     this.wsClient.sendHeartbeat(status, activeJobsArray);
   }
@@ -433,13 +507,6 @@ export class EncorrNode {
     // Get GPUs
     const gpus = await this.detectGPUs();
 
-    // Detect HandBrake
-    const handbrakePath = this.config.handbrakecli_path;
-    if (!existsSync(handbrakePath)) {
-      throw new Error(`HandBrakeCLI not found at: ${handbrakePath}. Please update handbrakecli_path in node_config.json`);
-    }
-    const handbrakeVersion = getHandBrakeVersion(handbrakePath);
-
     // Detect FFmpeg and FFprobe
     const ffmpegDir = this.config.ffmpeg_dir;
     const ffmpegExe = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
@@ -458,6 +525,16 @@ export class EncorrNode {
     const ffmpegVersion = getFFmpegVersion(ffmpegPath) || undefined;
     const ffprobeVersion = getFFprobeVersion(ffprobePath) || undefined;
 
+    // Detect available FFmpeg encoders, decoders, and hwaccels
+    const ffmpegEncoders = await detectAvailableEncoders(ffmpegPath);
+    const ffmpegDecoders = await detectAvailableDecoders(ffmpegPath);
+    const ffmpegHwaccels = await detectAvailableHwaccels(ffmpegPath);
+
+    // Log hardware detection results
+    this.logger.info(`[HW_DETECTION] Encoders: ${ffmpegEncoders.map(e => `${e.encoder_name} (${e.type}${e.gpu_type ? ':' + e.gpu_type : ''})`).join(', ') || 'none'}`);
+    this.logger.info(`[HW_DETECTION] Decoders: ${ffmpegDecoders.filter(d => d.type === 'gpu').map(d => `${d.decoder_name} (${d.gpu_type})`).join(', ') || 'none (CPU only)'}`);
+    this.logger.info(`[HW_DETECTION] Hwaccels: ${ffmpegHwaccels.filter(h => h.available).map(h => h.name).join(', ') || 'none'}`);
+
     return {
       os: osInfo.platform,
       os_version: osInfo.release,
@@ -465,11 +542,12 @@ export class EncorrNode {
       cpu_cores: cpu.cores,
       ram_total: mem.total,
       gpus: gpus.length > 0 ? gpus : undefined,
-      handbrake_version: handbrakeVersion || undefined,
-      handbrake_path: handbrakePath,
       ffmpeg_version: ffmpegVersion,
       ffmpeg_path: existsSync(ffmpegPath) ? ffmpegPath : '',
       ffprobe_path: existsSync(ffprobePath) ? ffprobePath : '',
+      ffmpeg_encoders: ffmpegEncoders.length > 0 ? ffmpegEncoders : undefined,
+      ffmpeg_decoders: ffmpegDecoders.length > 0 ? ffmpegDecoders : undefined,
+      ffmpeg_hwaccels: ffmpegHwaccels.length > 0 ? ffmpegHwaccels : undefined,
     };
   }
 
@@ -527,24 +605,34 @@ export class EncorrNode {
               }
             }
 
-            // Debug: Log every 10 seconds to avoid spam
-            if (Math.floor(Date.now() / 10000) % 2 === 0) {
-              this.logger.debug(`GPU data: ${JSON.stringify(gpuData)}`);
+            // Detailed GPU logging - log every 10 seconds
+            const shouldLog = Math.floor(Date.now() / 10000) % 2 === 0;
+            if (shouldLog) {
+              this.logger.debug(`[GPU] GPU usage data: ${JSON.stringify(gpuData)}`);
             }
           } else {
-            this.logger.warn('GPU monitor returned empty map');
+            // Only warn occasionally
+            if (Math.floor(Date.now() / 30000) % 2 === 0) {
+              this.logger.warn('[GPU] GPU monitor returned empty map');
+            }
           }
         } catch (error) {
-          this.logger.warn('Failed to get GPU usage:', error);
+          this.logger.warn('[GPU] Failed to get GPU usage:', error);
         }
       }
 
       // Send usage update via heartbeat with system_load and GPU data
+      // Include ALL job data (fps, eta, etc.) to preserve rich progress information
       this.wsClient.sendHeartbeat(
         this.activeJobs.size > 0 ? 'busy' : 'idle',
         Array.from(this.activeJobs.values()).map(job => ({
           job_id: job.id,
           progress: job.progress,
+          current_action: job.currentAction,
+          fps: job.fps,
+          eta: job.eta,
+          ratio: job.ratio,
+          gpu: job.gpu,
         })),
         cpuPercent,
         ramPercent,

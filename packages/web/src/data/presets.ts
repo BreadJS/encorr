@@ -1,32 +1,34 @@
-// Full HandBrake preset configuration
+// FFmpeg preset configuration
 export interface PresetConfig {
-  format: string;
-  video_encoder: string;
+  video_codec: 'h264' | 'h265';
+  encoding_type: 'cpu' | 'gpu';
+  gpu_type?: 'nvidia' | 'intel' | 'amd';
+  quality_mode: 'crf' | 'cq' | 'qp';
   quality: number;
-  quality_type: 'rf' | 'bitrate';
-  resolution: string;
-  width?: number;
-  height?: number;
-  framerate: string;
-  framerate_mode: string;
-  audio_encoder: string;
+  preset: 'ultrafast' | 'superfast' | 'veryfast' | 'faster' | 'fast' | 'medium' | 'slow' | 'slower';
+  container: 'mp4' | 'mkv';
+  audio_encoder: 'aac' | 'opus' | 'mp3';
   audio_bitrate: number;
-  audio_mixdown: string;
-  encoder_preset?: string;
-  encoder_tune?: string;
-  multipass?: boolean;
-  turbo?: boolean;
-  denoise?: 'none' | 'ultralight' | 'light' | 'medium' | 'strong';
-  sharpen?: 'none' | 'ultralight' | 'light' | 'medium' | 'strong';
+  subtitles: 'all' | 'first' | 'none';
+  max_width?: number;
+  max_height?: number;
   deinterlace?: boolean;
-  decomb?: boolean;
-  detelecine?: boolean;
-  deblock?: boolean;
-  grayscale?: boolean;
-  optimize_mp4?: boolean;
-  ipod_atom?: boolean;
-  markers?: boolean;
+  extra_args?: string[];
 }
+
+// Default configuration for new presets
+export const defaultConfig: PresetConfig = {
+  video_codec: 'h264',
+  encoding_type: 'cpu',
+  quality_mode: 'crf',
+  quality: 23,
+  preset: 'medium',
+  container: 'mkv',
+  audio_encoder: 'copy',
+  audio_bitrate: 0, // Not used when copying
+  subtitles: 'all',
+  deinterlace: false,
+};
 
 export interface Preset {
   id: string;
@@ -36,98 +38,214 @@ export interface Preset {
   config: PresetConfig;
 }
 
-// Default configuration that all built-in presets extend from
-export const defaultConfig: PresetConfig = {
-  format: 'av_mp4',
-  video_encoder: 'x265',
-  quality: 22,
-  quality_type: 'rf',
-  resolution: 'source',
-  width: undefined,
-  height: undefined,
-  framerate: 'source',
-  framerate_mode: 'vfr',
-  audio_encoder: 'av_aac',
-  audio_bitrate: 160,
-  audio_mixdown: 'stereo',
-  encoder_preset: 'medium',
-  multipass: false,
-  denoise: 'none',
-  sharpen: 'none',
-  deinterlace: false,
-  decomb: false,
-  detelecine: false,
-  deblock: false,
-  grayscale: false,
-  optimize_mp4: false,
-  ipod_atom: false,
-  markers: true,
-};
-
-// Built-in presets (cannot be deleted)
+// Built-in presets (cannot be deleted) - FFmpeg compatible
 export const BUILTIN_PRESETS: Preset[] = [
+  // CPU Presets
   {
-    id: 'builtin-high-quality',
-    name: 'High Quality H.265',
-    description: 'Best quality for archiving with good compression',
+    id: 'builtin-high-quality-h265-cpu',
+    name: 'High Quality H.265 (CPU)',
+    description: 'High quality with H.265/HEVC CPU encoding',
     is_builtin: true,
-    config: { ...defaultConfig, format: 'av_mkv', video_encoder: 'x265', quality: 20, encoder_preset: 'slow' },
+    config: {
+      video_codec: 'h265',
+      encoding_type: 'cpu',
+      quality_mode: 'crf',
+      quality: 22,
+      preset: 'medium',
+      container: 'mkv',
+      audio_encoder: 'copy',
+      audio_bitrate: 0, // Not used when copying
+      subtitles: 'all',
+    },
   },
   {
-    id: 'builtin-max-compression',
-    name: 'Maximum Compression',
-    description: 'Smallest file size, slower encoding',
+    id: 'builtin-max-compression-h265-cpu',
+    name: 'Maximum Compression H.265 (CPU)',
+    description: 'Smallest file size with H.265 and 1080p cap',
     is_builtin: true,
-    config: { ...defaultConfig, format: 'av_mkv', video_encoder: 'x265', quality: 28, resolution: '1080', encoder_preset: 'slow', multipass: true },
+    config: {
+      video_codec: 'h265',
+      encoding_type: 'cpu',
+      quality_mode: 'crf',
+      quality: 28,
+      preset: 'slow',
+      container: 'mkv',
+      max_width: 1920,
+      max_height: 1080,
+      audio_encoder: 'copy',
+      audio_bitrate: 0, // Not used when copying
+      subtitles: 'first',
+    },
   },
   {
-    id: 'builtin-fast-1080p',
-    name: 'Fast 1080p H.264',
-    description: 'Quick conversion with good quality',
+    id: 'builtin-fast-h264-cpu',
+    name: 'Fast H.264 (CPU)',
+    description: 'Fast encoding with H.264, minimal quality loss',
     is_builtin: true,
-    config: { ...defaultConfig, format: 'av_mp4', video_encoder: 'x264', quality: 23, resolution: '1080', encoder_preset: 'fast' },
+    config: {
+      video_codec: 'h264',
+      encoding_type: 'cpu',
+      quality_mode: 'crf',
+      quality: 23,
+      preset: 'fast',
+      container: 'mkv',
+      audio_encoder: 'copy',
+      audio_bitrate: 0, // Not used when copying
+      subtitles: 'all',
+    },
   },
   {
-    id: 'builtin-gpu-nvenc',
-    name: 'GPU Accelerated (NVENC)',
-    description: 'Fast encoding using NVIDIA GPU',
+    id: 'builtin-mobile-h264-cpu',
+    name: 'Mobile Optimized H.264 (CPU)',
+    description: 'Optimized for mobile devices with 720p cap',
     is_builtin: true,
-    config: { ...defaultConfig, format: 'av_mp4', video_encoder: 'nvenc_h265', quality: 24 },
+    config: {
+      video_codec: 'h264',
+      encoding_type: 'cpu',
+      quality_mode: 'crf',
+      quality: 24,
+      preset: 'fast',
+      container: 'mkv',
+      max_width: 1280,
+      max_height: 720,
+      audio_encoder: 'copy',
+      audio_bitrate: 0, // Not used when copying
+      subtitles: 'first',
+    },
+  },
+  // NVIDIA GPU Presets
+  {
+    id: 'builtin-nvidia-h264-gpu',
+    name: 'NVIDIA H.264 (GPU)',
+    description: 'GPU-accelerated encoding with NVIDIA NVENC H.264',
+    is_builtin: true,
+    config: {
+      video_codec: 'h264',
+      encoding_type: 'gpu',
+      gpu_type: 'nvidia',
+      quality_mode: 'cq',
+      quality: 22,
+      preset: 'fast',
+      container: 'mkv',
+      audio_encoder: 'copy',
+      audio_bitrate: 0, // Not used when copying
+      subtitles: 'all',
+    },
   },
   {
-    id: 'builtin-mkv-to-mp4',
-    name: 'MKV to MP4 (No Re-encode)',
-    description: 'Fast container change, passthru video/audio',
+    id: 'builtin-nvidia-h265-gpu',
+    name: 'NVIDIA H.265 (GPU)',
+    description: 'GPU-accelerated encoding with NVIDIA NVENC H.265',
     is_builtin: true,
-    config: { ...defaultConfig, format: 'av_mp4', video_encoder: 'copy', audio_encoder: 'copy' },
+    config: {
+      video_codec: 'h265',
+      encoding_type: 'gpu',
+      gpu_type: 'nvidia',
+      quality_mode: 'cq',
+      quality: 24,
+      preset: 'fast',
+      container: 'mkv',
+      audio_encoder: 'copy',
+      audio_bitrate: 0, // Not used when copying
+      subtitles: 'all',
+    },
+  },
+  // Intel GPU Presets
+  {
+    id: 'builtin-intel-h264-gpu',
+    name: 'Intel Quick Sync H.264 (GPU)',
+    description: 'GPU-accelerated encoding with Intel QSV H.264',
+    is_builtin: true,
+    config: {
+      video_codec: 'h264',
+      encoding_type: 'gpu',
+      gpu_type: 'intel',
+      quality_mode: 'crf',
+      quality: 22,
+      preset: 'medium',
+      container: 'mkv',
+      audio_encoder: 'copy',
+      audio_bitrate: 0, // Not used when copying
+      subtitles: 'all',
+    },
   },
   {
-    id: 'builtin-mobile',
-    name: 'Mobile/Tablet',
-    description: 'Optimized for mobile devices',
+    id: 'builtin-intel-h265-gpu',
+    name: 'Intel Quick Sync H.265 (GPU)',
+    description: 'GPU-accelerated encoding with Intel QSV H.265',
     is_builtin: true,
-    config: { ...defaultConfig, format: 'av_mp4', video_encoder: 'x264', quality: 24, resolution: '720', encoder_preset: 'fast', optimize_mp4: true },
+    config: {
+      video_codec: 'h265',
+      encoding_type: 'gpu',
+      gpu_type: 'intel',
+      quality_mode: 'crf',
+      quality: 24,
+      preset: 'medium',
+      container: 'mkv',
+      audio_encoder: 'copy',
+      audio_bitrate: 0, // Not used when copying
+      subtitles: 'all',
+    },
+  },
+  // AMD GPU Presets
+  {
+    id: 'builtin-amd-h264-gpu',
+    name: 'AMD AMF H.264 (GPU)',
+    description: 'GPU-accelerated encoding with AMD AMF H.264',
+    is_builtin: true,
+    config: {
+      video_codec: 'h264',
+      encoding_type: 'gpu',
+      gpu_type: 'amd',
+      quality_mode: 'qp',
+      quality: 22,
+      preset: 'fast',
+      container: 'mkv',
+      audio_encoder: 'copy',
+      audio_bitrate: 0, // Not used when copying
+      subtitles: 'all',
+    },
+  },
+  {
+    id: 'builtin-amd-h265-gpu',
+    name: 'AMD AMF H.265 (GPU)',
+    description: 'GPU-accelerated encoding with AMD AMF H.265',
+    is_builtin: true,
+    config: {
+      video_codec: 'h265',
+      encoding_type: 'gpu',
+      gpu_type: 'amd',
+      quality_mode: 'qp',
+      quality: 24,
+      preset: 'fast',
+      container: 'mkv',
+      audio_encoder: 'copy',
+      audio_bitrate: 0, // Not used when copying
+      subtitles: 'all',
+    },
+  },
+  // Analyze preset
+  {
+    id: 'builtin-analyze',
+    name: 'Analyze Only',
+    description: 'Extract file metadata without transcoding',
+    is_builtin: true,
+    config: {
+      video_codec: 'h264',
+      encoding_type: 'cpu',
+      quality_mode: 'crf',
+      quality: 23,
+      preset: 'medium',
+      container: 'mkv',
+      audio_encoder: 'copy',
+      audio_bitrate: 0, // Not used when copying
+      subtitles: 'all',
+    } as PresetConfig & { action: 'analyze' },
   },
 ];
 
 // User presets (custom presets created by users)
-// These would typically come from the API, but we have some examples here
-export const USER_PRESETS: Preset[] = [
-  {
-    id: 'user-custom-1',
-    name: 'My 4K Movies',
-    description: 'Personal 4K movie preset',
-    is_builtin: false,
-    config: { ...defaultConfig, format: 'av_mkv', video_encoder: 'x265', quality: 18, resolution: '2160', encoder_preset: 'slow' },
-  },
-  {
-    id: 'user-custom-2',
-    name: 'TV Shows Fast',
-    description: 'Quick TV show encoding',
-    is_builtin: false,
-    config: { ...defaultConfig, format: 'av_mp4', video_encoder: 'x264', quality: 22, resolution: '1080', encoder_preset: 'fast' },
-  },
-];
+export const USER_PRESETS: Preset[] = [];
 
 // Helper to get all presets (combined)
 export function getAllPresets(): Preset[] {
@@ -140,20 +258,22 @@ export interface PresetDropdownOption {
   name: string;
   description: string;
   is_builtin: boolean;
-  format: string;
-  encoder: string;
+  codec: string;
+  type: string;
+  gpu?: string;
   quality: number;
 }
 
 // Get presets formatted for dropdown components
 export function getPresetsForDropdown(): PresetDropdownOption[] {
-  return [...BUILTIN_PRESETS, ...USER_PRESETS].map(p => ({
+  return getAllPresets().map(p => ({
     id: p.id,
     name: p.name,
     description: p.description,
     is_builtin: p.is_builtin,
-    format: p.config.format.replace('av_', '') as any,
-    encoder: p.config.video_encoder,
+    codec: p.config.video_codec,
+    type: p.config.encoding_type,
+    gpu: p.config.gpu_type,
     quality: p.config.quality,
   }));
 }

@@ -6,7 +6,7 @@ import { join, dirname } from 'path';
 import { existsSync, mkdirSync } from 'fs';
 import chalk from 'chalk';
 import { EncorrNode } from '../node';
-import { findHandBrake, getHandBrakeVersion, getFFmpegVersion, getFFprobeVersion } from '../handbrake';
+import { getFFmpegVersion, getFFprobeVersion } from '../ffmpeg';
 import { loadConfig, saveConfig, createConfig, type NodeConfigFile } from '../config';
 
 // ============================================================================
@@ -32,7 +32,6 @@ program
   .option('-n, --name <name>', 'Node name')
   .option('-c, --cache <path>', 'Cache directory path')
   .option('-t, --temp <path>', 'Temp directory path')
-  .option('-h, --handbrake <path>', 'Path to HandBrakeCLI executable')
   .option('-f, --ffmpeg <path>', 'Path to FFmpeg directory (containing ffmpeg.exe and ffprobe.exe)')
   .action(async (options) => {
     try {
@@ -45,17 +44,7 @@ program
       if (options.name) config.name = options.name;
       if (options.cache) config.cache_dir = options.cache;
       if (options.temp) config.temp_dir = options.temp;
-      if (options.handbrake) config.handbrakecli_path = options.handbrake;
       if (options.ffmpeg) config.ffmpeg_dir = options.ffmpeg;
-
-      // Validate HandBrakeCLI
-      const handbrakePath = config.handbrakecli_path;
-      if (!existsSync(handbrakePath)) {
-        console.error(chalk.red(`Error: HandBrakeCLI not found at: ${handbrakePath}`));
-        console.log(chalk.yellow('Download from: https://handbrake.fr/downloads.php'));
-        console.log(chalk.gray('You can update handbrakecli_path in node_config.json'));
-        process.exit(1);
-      }
 
       // Validate FFmpeg directory
       const ffmpegDir = config.ffmpeg_dir;
@@ -85,8 +74,8 @@ program
       }
 
       // Get versions for display
-      const hbVersion = getHandBrakeVersion(handbrakePath);
       const ffVersion = getFFmpegVersion(ffmpegPath);
+      const ffprobeVersion = getFFprobeVersion(ffprobePath);
 
       // Create and start node
       console.log(chalk.blue.bold('\n╔══════════════════════════════════════════════════════════╗'));
@@ -97,8 +86,8 @@ program
       console.log(`Node Name:     ${chalk.cyan(config.name)}`);
       console.log(`Cache:         ${chalk.cyan(config.cache_dir)}`);
       console.log(`Temp:          ${chalk.cyan(config.temp_dir)}`);
-      console.log(`HandBrakeCLI:  ${chalk.cyan(handbrakePath)}${hbVersion ? chalk.gray(` (${hbVersion})`) : ''}`);
-      console.log(`FFmpeg Dir:    ${chalk.cyan(ffmpegDir)}${ffVersion ? chalk.gray(` (ffmpeg v${ffVersion})`) : ''}\n`);
+      console.log(`FFmpeg:        ${chalk.cyan(ffmpegPath)}${ffVersion ? chalk.gray(` (v${ffVersion})`) : ''}`);
+      console.log(`FFprobe:       ${chalk.cyan(ffprobePath)}${ffprobeVersion ? chalk.gray(` (v${ffprobeVersion})`) : ''}\n`);
 
       const node = new EncorrNode();
 
@@ -136,7 +125,7 @@ program
         console.log(chalk.green(`✓ Updated ${key} = ${value}`));
       } else {
         console.error(chalk.red(`✗ Unknown config key: ${key}`));
-        console.log(chalk.gray('Available keys: serverUrl, name, cache_dir, temp_dir, handbrakecli_path, ffmpeg_dir'));
+        console.log(chalk.gray('Available keys: serverUrl, name, cache_dir, temp_dir, ffmpeg_dir'));
         process.exit(1);
       }
     } else {
@@ -158,20 +147,8 @@ program
 
     console.log(chalk.blue.bold('\n=== Encorr Node Status ===\n'));
 
-    // Check HandBrakeCLI
-    console.log('Checking HandBrakeCLI...');
-    const handbrakePath = config.handbrakecli_path;
-
-    if (existsSync(handbrakePath)) {
-      const version = getHandBrakeVersion(handbrakePath);
-      console.log(chalk.green(`✓ Found at: ${handbrakePath}${version ? ` (v${version})` : ''}`));
-    } else {
-      console.log(chalk.red(`✗ Not found at: ${handbrakePath}`));
-      console.log(chalk.yellow('  Download from: https://handbrake.fr/downloads.php'));
-    }
-
     // Check FFmpeg
-    console.log('\nChecking FFmpeg/FFprobe...');
+    console.log('Checking FFmpeg/FFprobe...');
     const ffmpegDir = config.ffmpeg_dir;
     const ffmpegExe = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
     const ffprobeExe = process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe';
@@ -202,61 +179,6 @@ program
     console.log(`  CPUS:     ${require('os').cpus().length}`);
 
     console.log('');
-  });
-
-// ============================================================================
-// Test HandBrake Command
-// ============================================================================
-
-program
-  .command('test-handbrake')
-  .description('Test HandBrake installation')
-  .option('-p, --path <path>', 'Path to HandBrakeCLI')
-  .action(async (options) => {
-    const { spawn } = require('child_process');
-
-    console.log(chalk.blue.bold('\n=== Testing HandBrakeCLI ===\n'));
-
-    let handbrakePath = options.path;
-    if (!handbrakePath) {
-      const config = loadConfig();
-      handbrakePath = config.handbrakecli_path;
-    }
-
-    if (!handbrakePath || !existsSync(handbrakePath)) {
-      console.error(chalk.red('HandBrakeCLI not found'));
-      console.log(chalk.yellow('Use --path option or install from: https://handbrake.fr/downloads.php'));
-      process.exit(1);
-    }
-
-    console.log(chalk.cyan(`Testing: ${handbrakePath}\n`));
-
-    return new Promise<void>((resolve, reject) => {
-      const proc = spawn(handbrakePath, ['--version'], { shell: true });
-
-      proc.stdout.on('data', (data: Buffer) => {
-        console.log(data.toString());
-      });
-
-      proc.stderr.on('data', (data: Buffer) => {
-        console.error(data.toString());
-      });
-
-      proc.on('close', (code: number) => {
-        if (code === 0) {
-          console.log(chalk.green('\n✓ HandBrakeCLI is working correctly'));
-          resolve();
-        } else {
-          console.error(chalk.red(`\n✗ HandBrakeCLI exited with code ${code}`));
-          reject(new Error('HandBrakeCLI test failed'));
-        }
-      });
-
-      proc.on('error', (error: Error) => {
-        console.error(chalk.red('✗ Failed to run HandBrakeCLI:'), error.message);
-        reject(error);
-      });
-    });
   });
 
 // ============================================================================

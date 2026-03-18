@@ -197,7 +197,7 @@ export function TranscodeDialog({
                   <p className="text-xs text-gray-400 mt-1">{presetInfo.description}</p>
                   <div className="flex gap-2 mt-2">
                     <span className="text-xs px-2 py-0.5 rounded" style={{ backgroundColor: '#2a2a2a', color: '#ffffff' }}>
-                      {presetInfo.encoder}
+                      {presetInfo.codec}
                     </span>
                     <span className="text-xs px-2 py-0.5 rounded" style={{ backgroundColor: '#2a2a2a', color: '#ffffff' }}>
                       Quality: {presetInfo.quality}

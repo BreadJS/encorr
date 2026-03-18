@@ -144,14 +144,26 @@ CREATE TABLE IF NOT EXISTS presets (
 
 -- Insert built-in presets
 INSERT OR IGNORE INTO presets (id, name, description, is_builtin, config) VALUES
-    ('high-quality-h265', 'High Quality (H.265)', 'High quality with H.265/HEVC encoding', 1,
-     '{"video_encoder":"x265","quality_mode":"cq","quality":22,"preset":"medium","tune":"film","container":"mp4","crop_mode":"auto","audio_encoder":"aac","audio_bitrate":160,"audio_channels":"auto","subtitles":"all"}'),
-    ('maximum-compression', 'Maximum Compression', 'Smallest file size with 1080p cap', 1,
-     '{"video_encoder":"x265","quality_mode":"cq","quality":28,"preset":"slow","container":"mp4","max_width":1920,"max_height":1080,"crop_mode":"auto","audio_encoder":"aac","audio_bitrate":128,"audio_channels":"stereo","subtitles":"first"}'),
-    ('quick-convert', 'Quick Convert', 'Fast encoding with H.264, minimal quality loss', 1,
-     '{"video_encoder":"x264","quality_mode":"cq","quality":23,"preset":"fast","container":"mp4","crop_mode":"auto","audio_encoder":"aac","audio_bitrate":160,"audio_channels":"auto","subtitles":"all"}'),
-    ('mkv-to-mp4', 'MKV to MP4', 'Container only conversion, no quality loss', 1,
-     '{"video_encoder":"copy","quality_mode":"cq","quality":0,"preset":"fast","container":"mp4","crop_mode":"none","audio_encoder":"aac","audio_bitrate":160,"audio_channels":"auto","subtitles":"all"}');
+    ('builtin-high-quality-h265-cpu', 'High Quality H.265 (CPU)', 'High quality with H.265/HEVC CPU encoding', 1,
+     '{"video_codec":"h265","encoding_type":"cpu","quality_mode":"crf","quality":22,"preset":"medium","container":"mkv","audio_encoder":"copy","audio_bitrate":0,"subtitles":"all"}'),
+    ('builtin-max-compression-h265-cpu', 'Maximum Compression H.265 (CPU)', 'Smallest file size with H.265 and 1080p cap', 1,
+     '{"video_codec":"h265","encoding_type":"cpu","quality_mode":"crf","quality":28,"preset":"slow","container":"mkv","max_width":1920,"max_height":1080,"audio_encoder":"copy","audio_bitrate":0,"subtitles":"first"}'),
+    ('builtin-fast-h264-cpu', 'Fast H.264 (CPU)', 'Fast encoding with H.264, minimal quality loss', 1,
+     '{"video_codec":"h264","encoding_type":"cpu","quality_mode":"crf","quality":23,"preset":"fast","container":"mkv","audio_encoder":"copy","audio_bitrate":0,"subtitles":"all"}'),
+    ('builtin-nvidia-h264-gpu', 'NVIDIA H.264 (GPU)', 'GPU-accelerated encoding with NVIDIA NVENC H.264', 1,
+     '{"video_codec":"h264","encoding_type":"gpu","gpu_type":"nvidia","quality_mode":"cq","quality":22,"preset":"fast","container":"mkv","audio_encoder":"copy","audio_bitrate":0,"subtitles":"all"}'),
+    ('builtin-nvidia-h265-gpu', 'NVIDIA H.265 (GPU)', 'GPU-accelerated encoding with NVIDIA NVENC H.265', 1,
+     '{"video_codec":"h265","encoding_type":"gpu","gpu_type":"nvidia","quality_mode":"cq","quality":24,"preset":"fast","container":"mkv","audio_encoder":"copy","audio_bitrate":0,"subtitles":"all"}'),
+    ('builtin-intel-h264-gpu', 'Intel Quick Sync H.264 (GPU)', 'GPU-accelerated encoding with Intel QSV H.264', 1,
+     '{"video_codec":"h264","encoding_type":"gpu","gpu_type":"intel","quality_mode":"crf","quality":22,"preset":"medium","container":"mkv","audio_encoder":"copy","audio_bitrate":0,"subtitles":"all"}'),
+    ('builtin-intel-h265-gpu', 'Intel Quick Sync H.265 (GPU)', 'GPU-accelerated encoding with Intel QSV H.265', 1,
+     '{"video_codec":"h265","encoding_type":"gpu","gpu_type":"intel","quality_mode":"crf","quality":24,"preset":"medium","container":"mkv","audio_encoder":"copy","audio_bitrate":0,"subtitles":"all"}'),
+    ('builtin-amd-h264-gpu', 'AMD AMF H.264 (GPU)', 'GPU-accelerated encoding with AMD AMF H.264', 1,
+     '{"video_codec":"h264","encoding_type":"gpu","gpu_type":"amd","quality_mode":"qp","quality":22,"preset":"fast","container":"mkv","audio_encoder":"copy","audio_bitrate":0,"subtitles":"all"}'),
+    ('builtin-amd-h265-gpu', 'AMD AMF H.265 (GPU)', 'GPU-accelerated encoding with AMD AMF H.265', 1,
+     '{"video_codec":"h265","encoding_type":"gpu","gpu_type":"amd","quality_mode":"qp","quality":24,"preset":"fast","container":"mkv","audio_encoder":"copy","audio_bitrate":0,"subtitles":"all"}'),
+    ('builtin-mobile-h264-cpu', 'Mobile Optimized H.264 (CPU)', 'Optimized for mobile devices with 720p cap', 1,
+     '{"video_codec":"h264","encoding_type":"cpu","quality_mode":"crf","quality":24,"preset":"fast","container":"mkv","max_width":1280,"max_height":720,"audio_encoder":"copy","audio_bitrate":0,"subtitles":"first"}');
 
 -- ============================================================================
 -- Settings Table

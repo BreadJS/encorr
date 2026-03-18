@@ -55,14 +55,13 @@ function connectWebSocket(url: string, queryClient: ReturnType<typeof useQueryCl
         switch (message.type) {
           case 'WEB_NODES_UPDATE':
             console.log('[WebSocket] NODES_UPDATE received:', message.payload.nodes?.[0]?.system_info?.gpus);
-            // Force update the cache and trigger re-render
+            // Only update the data, don't invalidate to prevent API refetches
             queryClient.setQueryData(['nodes'], message.payload.nodes);
-            // Also invalidate to ensure fresh data
-            queryClient.invalidateQueries({ queryKey: ['nodes'] });
             break;
 
           case 'WEB_JOBS_UPDATE':
             queryClient.setQueryData(['jobs'], message.payload.jobs);
+            // Update library files status based on job data
             queryClient.invalidateQueries({ queryKey: ['library-files'] });
             break;
 

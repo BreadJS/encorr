@@ -443,23 +443,39 @@ export class EncorrWebSocketServer {
     const cpuUsage = payload.system_load?.cpu_percent || 0;
     const ramUsage = payload.system_load?.memory_percent || 0;
 
-    // Build active jobs info
+    // Get current node info for static GPU info and to preserve existing active_jobs data
+    const node = this.db.getAllNodes().find(n => n.id === connection.nodeId);
+    const existingActiveJobs = node?.active_jobs || [];
+
+    // Build active jobs info - preserve existing rich data (fps, eta, etc.) from DB
     const activeJobsInfo = payload.active_jobs?.map(job => {
       const dbJob = this.db.getJobById(job.job_id);
       const file = dbJob ? this.db.getFileById(dbJob.file_id) : null;
+
+      // Find existing job data to preserve fps, eta, and other fields set by JOB_PROGRESS
+      const existingJob = existingActiveJobs.find((j: any) => j.id === job.job_id);
+
       return {
         id: job.job_id,
         file_name: file?.relative_path,
         progress: job.progress,
-      };
+        // Always include GPU from the payload (node sets this correctly)
+        gpu: job.gpu,
+        // Preserve rich data from existing job if available
+        ...(existingJob && {
+          fps: existingJob.fps,
+          eta: existingJob.eta,
+          ratio: existingJob.ratio,
+          current_action: existingJob.current_action,
+          preset_name: existingJob.preset_name,
+          status: existingJob.status,
+        }),
+      } as any; // Use 'as any' since active_jobs is dynamically typed
     }) || [];
 
     // Process GPU data - rebuild GPU list from incoming live data
     // The node has already filtered out integrated GPUs, so we trust the incoming data
     let gpuUsage: number[] | undefined;
-
-    // Get current node info for static GPU info (name, vendor, memory, driver)
-    const node = this.db.getAllNodes().find(n => n.id === connection.nodeId);
 
     if (node && node.system_info.gpus) {
       // Filter out integrated GPUs from the existing database entry
@@ -597,6 +613,9 @@ export class EncorrWebSocketServer {
 
     const payload = message.payload as JobProgressPayload;
 
+    // Detailed logging for incoming progress
+    this.logger.debug(`[JOB_PROGRESS] Received from node ${connection.nodeId}: job_id=${payload.job_id}, progress=${payload.progress.toFixed(1)}%, action=${payload.current_action}, fps=${payload.fps}, eta=${payload.eta_seconds}s, ratio=${payload.ratio}`);
+
     this.db.updateJobProgress(
       payload.job_id,
       payload.progress,
@@ -608,17 +627,25 @@ export class EncorrWebSocketServer {
     if (node && node.active_jobs) {
       const updatedActiveJobs = node.active_jobs.map(job => {
         if (job.id === payload.job_id) {
-          return {
+          const updated = {
             ...job,
             progress: payload.progress,
             current_action: payload.current_action,
-            fps: payload.fps,
-            eta: payload.eta_seconds ? this.formatDuration(payload.eta_seconds) : undefined,
+            // Only update FPS if payload provides a value (preserve existing if undefined)
+            ...(payload.fps !== undefined && { fps: payload.fps }),
+            // Only update ETA if payload provides a value (preserve existing if undefined)
+            ...(payload.eta_seconds !== undefined && { eta: this.formatDuration(payload.eta_seconds) }),
+            // Only update ratio if payload provides a value (preserve existing if undefined)
+            ...(payload.ratio !== undefined && { ratio: payload.ratio }),
           };
+          this.logger.debug(`[JOB_PROGRESS] Updated job ${job.id} in active_jobs: fps=${updated.fps}, eta=${updated.eta}, ratio=${updated.ratio}, progress=${updated.progress}, action=${updated.current_action} (payload fps=${payload.fps}, eta=${payload.eta_seconds}, ratio=${payload.ratio})`);
+          return updated;
         }
         return job;
       });
       this.db.updateNodeUsage(connection.nodeId!, { active_jobs: updatedActiveJobs });
+    } else {
+      this.logger.warn(`[JOB_PROGRESS] Node ${connection.nodeId} not found or has no active_jobs`);
     }
 
     this.eventHandlers.jobProgress?.(
@@ -634,19 +661,14 @@ export class EncorrWebSocketServer {
     this.sendMessage(ws, createAckMessage(message.id!));
   }
 
-  // Helper to format duration
+  // Helper to format duration as HH:MM:SS
   private formatDuration(seconds: number): string {
     const hours = Math.floor(seconds / 3600);
     const minutes = Math.floor((seconds % 3600) / 60);
     const secs = Math.floor(seconds % 60);
 
-    if (hours > 0) {
-      return `${hours}h ${minutes}m`;
-    }
-    if (minutes > 0) {
-      return `${minutes}m ${secs}s`;
-    }
-    return `${secs}s`;
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    return `${pad(hours)}:${pad(minutes)}:${pad(secs)}`;
   }
 
   private handleJobComplete(ws: WebSocket, message: NodeToServerMessage): void {
@@ -667,12 +689,13 @@ export class EncorrWebSocketServer {
     } else if (payload.stats) {
       // Transcode job - update with stats
       this.logger.info(`Processing as transcode job with stats`);
+      this.logger.info(`Output file location: ${payload.output_path || 'not specified'}`);
       this.db.completeJob(payload.job_id, {
         original_size: payload.stats.original_size,
         transcoded_size: payload.stats.transcoded_size,
         duration_seconds: payload.stats.duration_seconds,
         avg_fps: payload.stats.avg_fps,
-      });
+      }, payload.output_path);
     } else {
       this.logger.warn(`Job complete has neither metadata nor stats! Keys: ${Object.keys(payload).join(', ')}`);
     }
@@ -926,7 +949,7 @@ export class EncorrWebSocketServer {
         resolution: resolution,
         container: metadata?.container || file?.original_format || '',
         duration: metadata?.duration || file?.duration || 0,
-        target_codec: preset?.config?.video_encoder || '',
+        target_codec: preset?.config?.video_codec || '',
         metadata: metadata,
       };
     });
@@ -941,6 +964,15 @@ export class EncorrWebSocketServer {
       ...node,
       connected: connectedNodeIds.includes(node.id),
     }));
+
+    // Log what we're about to broadcast (first node with active jobs as sample)
+    const sampleNode = nodesWithStatus.find(n => n.active_jobs && n.active_jobs.length > 0);
+    if (sampleNode) {
+      this.logger.debug(`[WEB_NODES_UPDATE] Broadcasting node ${sampleNode.name} with ${sampleNode.active_jobs?.length} active jobs`);
+      sampleNode.active_jobs?.forEach(job => {
+        this.logger.debug(`[WEB_NODES_UPDATE]   job ${job.id}: progress=${job.progress}%, action=${job.current_action}, fps=${job.fps}, eta=${job.eta}, ratio=${job.ratio}, gpu=${job.gpu}`);
+      });
+    }
 
     const message = createMessage(MessageType.WEB_NODES_UPDATE, { nodes: nodesWithStatus });
 
@@ -1051,7 +1083,7 @@ export class EncorrWebSocketServer {
             config: {
               source_path: jobData.source_path,
               dest_path: jobData.dest_path,
-              handbrake: jobData.config,
+              ffmpeg: jobData.config,
             },
           },
         },
@@ -1311,7 +1343,7 @@ export class EncorrWebSocketServer {
     for (const node of nodes) {
       const available = this.getAvailableWorkers(node);
       const hasGpuWorker = available.gpus.some((g: number) => g > 0);
-      if (hasGpuWorker && available.cpu > 0) { // Still need CPU for coordination
+      if (hasGpuWorker) { // GPU workers are independent of CPU workers
         return node;
       }
     }
@@ -1332,6 +1364,44 @@ export class EncorrWebSocketServer {
       return false;
     }
 
+    // Get file metadata to extract source codec
+    let sourceCodec: string | undefined;
+    let metadata: any = undefined;
+
+    // For library files, get metadata from library_files table
+    if (mapping.server_path?.startsWith('library:')) {
+      const fullPath = mapping.node_path && !mapping.node_path.includes('.mkv') && !mapping.node_path.includes('.mp4') && !mapping.node_path.includes('.avi')
+        ? `${mapping.node_path}/${file.relative_path}`
+        : mapping.node_path || file.relative_path;
+
+      const libFile = this.db.getLibraryFileByFilepath(fullPath);
+      if (libFile?.metadata) {
+        metadata = libFile.metadata;
+      }
+    }
+
+    // Extract source codec from metadata
+    if (metadata?.video_codec) {
+      const codecLower = metadata.video_codec.toLowerCase();
+      if (codecLower.includes('265') || codecLower.includes('hevc')) {
+        sourceCodec = 'h265';
+      } else if (codecLower.includes('264') || codecLower.includes('avc')) {
+        sourceCodec = 'h264';
+      } else if (codecLower.includes('mpeg2') || codecLower.includes('mpeg2video')) {
+        sourceCodec = 'mpeg2';
+      }
+    }
+
+    // Enhance preset config with source codec and explicit decoder flag for GPU
+    const enhancedConfig = { ...preset.config };
+
+    // For GPU encoding, add source codec and enable explicit decoder
+    if (enhancedConfig.encoding_type === 'gpu' && sourceCodec) {
+      enhancedConfig.source_codec = sourceCodec;
+      enhancedConfig.use_explicit_decoder = true;
+      this.logger.info(`[GPU_PIPELINE] Job ${job.id}: Enhanced config with source_codec=${sourceCodec}, use_explicit_decoder=true for true GPU pipeline`);
+    }
+
     // Determine source and destination paths
     let sourcePath: string;
     let destPath: string;
@@ -1339,14 +1409,14 @@ export class EncorrWebSocketServer {
     if (mapping.server_path?.startsWith('library:')) {
       if (mapping.node_path && (mapping.node_path.includes('.mkv') || mapping.node_path.includes('.mp4') || mapping.node_path.includes('.avi'))) {
         sourcePath = mapping.node_path;
-        destPath = mapping.node_path.replace(/\.[^.]+$/, '_enc.mp4');
+        destPath = mapping.node_path.replace(/\.[^.]+$/, '_enc.mkv');
       } else {
         sourcePath = `${mapping.node_path}/${file.relative_path}`;
-        destPath = `${mapping.node_path}/${file.relative_path.replace(/\.[^.]+$/, '_enc.mp4')}`;
+        destPath = `${mapping.node_path}/${file.relative_path.replace(/\.[^.]+$/, '_enc.mkv')}`;
       }
     } else {
       sourcePath = `${mapping.node_path}/${file.relative_path}`;
-      destPath = `${mapping.node_path}/${file.relative_path.replace(/\.[^.]+$/, '_enc.mp4')}`;
+      destPath = `${mapping.node_path}/${file.relative_path.replace(/\.[^.]+$/, '_enc.mkv')}`;
     }
 
     this.logger.debug(`Assigning job ${job.id} to node ${node.name} (${node.id})`);
@@ -1357,7 +1427,7 @@ export class EncorrWebSocketServer {
       preset_id: preset.id,
       source_path: sourcePath,
       dest_path: destPath,
-      config: preset.config,
+      config: enhancedConfig,
     }).catch(error => {
       this.logger.error(`Failed to assign job ${job.id}:`, error);
     });

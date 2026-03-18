@@ -4,8 +4,10 @@ import { Card, CardContent } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { StatusBadge } from '@/components/ui/Badge';
 import { TranscodeDialog } from '@/components/ui/TranscodeDialog';
-import { RefreshCw, ChevronLeft, ChevronRight, Film, Folder, FolderOpen, Check, Search, Filter, Play, Scan, Database } from 'lucide-react';
+import { SmartTranscodeDialog } from '@/components/ui/SmartTranscodeDialog';
+import { RefreshCw, ChevronLeft, ChevronRight, Film, Folder, FolderOpen, Check, Search, Filter, Play, Scan, Database, Sparkles } from 'lucide-react';
 import { useState, useMemo } from 'react';
+import type { TranscodeMode } from '@encorr/shared';
 
 // Helper function to format duration as HH:MM:SS
 function formatDuration(seconds: number): string {
@@ -29,6 +31,7 @@ export function Files() {
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const [showTranscodeDialog, setShowTranscodeDialog] = useState(false);
   const [transcodeDialogMode, setTranscodeDialogMode] = useState<'all' | 'selected'>('selected');
+  const [showSmartTranscodeDialog, setShowSmartTranscodeDialog] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   const [perPage] = useState(25);
 
@@ -128,6 +131,23 @@ export function Files() {
       queryClient.invalidateQueries({ queryKey: ['files'] });
       queryClient.invalidateQueries({ queryKey: ['jobs'] });
       queryClient.invalidateQueries({ queryKey: ['libraries'] });
+    },
+  });
+
+  // Smart transcode mutation
+  const smartTranscodeMutation = useMutation({
+    mutationFn: async (mode: TranscodeMode) => {
+      const fileIds = Array.from(selectedFiles);
+      return api.createSmartJob({ file_ids: fileIds, mode });
+    },
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ['files'] });
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
+      queryClient.invalidateQueries({ queryKey: ['libraries'] });
+      setSelectedFiles(new Set());
+      setShowSmartTranscodeDialog(false);
+      // Optionally show a success message with the summary
+      console.log('Smart transcode completed:', result.summary);
     },
   });
 
@@ -235,6 +255,18 @@ export function Files() {
           >
             <Database className="h-4 w-4" />
             {selectedFiles.size > 0 ? `Transcode Selected (${selectedFiles.size})` : `Transcode All (${files.filter((f: any) => f.status === 'analyzed').length})`}
+          </Button>
+
+          {/* Smart Transcode Button */}
+          <Button
+            onClick={() => setShowSmartTranscodeDialog(true)}
+            disabled={selectedFiles.size === 0}
+            style={{ backgroundColor: '#74c69d', color: '#ffffff' }}
+            className="flex items-center gap-2"
+            title="Smart Transcode - automatically optimize settings for your files"
+          >
+            <Sparkles className="h-4 w-4" />
+            Smart Transcode ({selectedFiles.size})
           </Button>
 
           <Button
@@ -488,12 +520,12 @@ export function Files() {
                               <div className="absolute left-0 top-full mt-1 w-48 rounded-lg shadow-xl opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity z-50">
                                 <div style={{ backgroundColor: '#252326', border: '1px solid #39363a' }}>
                                   <div className="p-1">
-                                    {['High Quality H.265', 'Fast 1080p H.264', 'Maximum Compression'].map((preset) => (
+                                    {['High Quality H.265 (CPU)', 'Fast H.264 (CPU)', 'Maximum Compression H.265 (CPU)'].map((preset) => (
                                       <button
                                         key={preset}
                                         onClick={() => {
-                                          const presetId = preset === 'High Quality H.265' ? 'builtin-high-quality' :
-                                            preset === 'Fast 1080p H.264' ? 'builtin-fast-1080p' : 'builtin-max-compression';
+                                          const presetId = preset === 'High Quality H.265 (CPU)' ? 'builtin-high-quality-h265-cpu' :
+                                            preset === 'Fast H.264 (CPU)' ? 'builtin-fast-h264-cpu' : 'builtin-max-compression-h265-cpu';
                                           transcodeSingleMutation.mutate({ fileId: file.id, presetId });
                                         }}
                                         className="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-white/5 rounded transition-colors"
@@ -582,6 +614,16 @@ export function Files() {
         mode={transcodeDialogMode}
         files={files}
         selectedFiles={selectedFiles}
+      />
+
+      {/* Smart Transcode Dialog */}
+      <SmartTranscodeDialog
+        open={showSmartTranscodeDialog}
+        onOpenChange={setShowSmartTranscodeDialog}
+        files={files.filter((f: any) => selectedFiles.has(f.id))}
+        onConfirm={async (mode) => {
+          await smartTranscodeMutation.mutateAsync(mode);
+        }}
       />
     </div>
   );

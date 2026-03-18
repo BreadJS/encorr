@@ -325,6 +325,9 @@ export class WebSocketClient extends EventEmitter {
       active_jobs: activeJobs,
     };
 
+    // Detailed logging for heartbeat
+    this.logger.debug(`[HEARTBEAT] Sending: status=${status}, active_jobs=${JSON.stringify(activeJobs)}, cpu=${cpuPercent}%, ram=${ramPercent}%`);
+
     // Add system_load if provided
     if (cpuPercent !== undefined || ramPercent !== undefined) {
       payload.system_load = {};
@@ -364,12 +367,16 @@ export class WebSocketClient extends EventEmitter {
     }));
   }
 
-  sendJobProgress(jobId: string, progress: number, currentAction: string, eta?: number): void {
+  sendJobProgress(jobId: string, progress: number, currentAction: string, eta?: number, fps?: number, ratio?: string): void {
+    // Detailed logging for job progress
+    this.logger.debug(`[JOB_PROGRESS] Sending: job_id=${jobId}, progress=${progress.toFixed(1)}%, action=${currentAction}, eta=${eta}s, fps=${fps}, ratio=${ratio}`);
     this.send(createMessage('JOB_PROGRESS', {
       job_id: jobId,
       progress,
       current_action: currentAction,
       eta_seconds: eta,
+      fps, // Include fps in the message
+      ratio, // Include ratio in the message
     }));
   }
 
