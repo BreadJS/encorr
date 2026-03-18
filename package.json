@@ -13,7 +13,7 @@
     "dev:web": "concurrently \"npm:watch:shared\" \"npm:dev:web:start\"",
     "watch:shared": "tsc --build --watch packages/shared",
     "dev:server:start": "tsx watch packages/server/src/index.ts",
-    "dev:web:start": "cd packages/web && vite",
+    "dev:web:start": "cd packages/web && vite --host 0.0.0.0",
     "dev:node:start": "tsx watch packages/node/src/cli/index.ts start",
     "build": "tsc --build && cd packages/web && vite build",
     "build:shared": "tsc --build packages/shared",
