@@ -19,6 +19,8 @@
     "build:shared": "tsc --build packages/shared",
     "build:server": "tsc --build packages/shared packages/server",
     "build:node": "tsc --build packages/shared packages/node",
+    "start": "node packages/server/dist/index.js",
+    "start:node": "node packages/node/dist/cli/index.js start",
     "clean": "rm -rf packages/*/dist packages/*/node_modules",
     "lint": "eslint . --ext .ts,.tsx",
     "typecheck": "tsc --noEmit",
