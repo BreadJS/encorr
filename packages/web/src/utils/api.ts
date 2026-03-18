@@ -2,24 +2,25 @@
 // Config
 // ============================================================================
 
-interface AppConfig {
-  backendPort: number;
-  frontendPort: number;
-  host: string;
+// Use current page's hostname for dynamic support (localhost, IP, domain)
+function getBackendUrl(): string {
+  const protocol = window.location.protocol;
+  const hostname = window.location.hostname;
+  return `${protocol}//${hostname}:8101`;
 }
 
-let API_BASE = 'http://localhost:8101';
-let BACKEND_URL = 'http://localhost:8101';
+let API_BASE = getBackendUrl();
+let BACKEND_URL = getBackendUrl();
 
 async function loadConfig(): Promise<void> {
   try {
     // Try to fetch config from the backend first
-    const response = await fetch('http://localhost:8101/config');
+    const response = await fetch(`${getBackendUrl()}/config`);
     if (response.ok) {
       const result = await response.json();
       if (result.success && result.data) {
-        const config: AppConfig = result.data;
-        BACKEND_URL = `http://localhost:${config.backendPort}`;
+        // Config loaded, use dynamic backend URL
+        BACKEND_URL = getBackendUrl();
         API_BASE = BACKEND_URL;
         return;
       }
@@ -29,7 +30,7 @@ async function loadConfig(): Promise<void> {
     console.warn('Failed to fetch config, using defaults');
   }
   // Fallback values
-  BACKEND_URL = 'http://localhost:8101';
+  BACKEND_URL = getBackendUrl();
   API_BASE = BACKEND_URL;
 }
 

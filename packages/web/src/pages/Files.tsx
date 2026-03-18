@@ -2,11 +2,11 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, formatBytes } from '@/utils/api';
 import { Card, CardContent } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
-import { StatusBadge } from '@/components/ui/Badge';
 import { TranscodeDialog } from '@/components/ui/TranscodeDialog';
 import { SmartTranscodeDialog } from '@/components/ui/SmartTranscodeDialog';
-import { RefreshCw, ChevronLeft, ChevronRight, Film, Folder, FolderOpen, Check, Search, Filter, Play, Scan, Database, Sparkles } from 'lucide-react';
+import { RefreshCw, ChevronLeft, ChevronRight, Film, Folder, FolderOpen, Check, Search, Filter, Play, Scan, Database, Sparkles, Clock, Zap, X, AlertTriangle } from 'lucide-react';
 import { useState, useMemo } from 'react';
+import { useWebSocket } from '@/hooks/useWebSocket';
 import type { TranscodeMode } from '@encorr/shared';
 
 // Helper function to format duration as HH:MM:SS
@@ -33,7 +33,10 @@ export function Files() {
   const [transcodeDialogMode, setTranscodeDialogMode] = useState<'all' | 'selected'>('selected');
   const [showSmartTranscodeDialog, setShowSmartTranscodeDialog] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
-  const [perPage] = useState(25);
+  const [perPage] = useState(50);
+
+  // Enable WebSocket for real-time updates
+  useWebSocket({ enabled: true });
 
   // Fetch libraries/folders from API
   const { data: libraries = [] } = useQuery({
@@ -42,14 +45,22 @@ export function Files() {
   });
 
   // Fetch files from API
+  // Note: status filter is applied on frontend, not sent to API
   const { data: filesData, isLoading, refetch } = useQuery({
-    queryKey: ['files', selectedFolder, selectedStatus, currentPage, perPage],
+    queryKey: ['files', selectedFolder, currentPage, perPage],
     queryFn: () => api.getAllLibraryFiles({
       page: currentPage,
       per_page: perPage,
-      status: selectedStatus !== 'all' ? selectedStatus : undefined,
       library_id: selectedFolder !== 'all' ? selectedFolder : undefined,
     }),
+    refetchInterval: 10000, // Refetch every 10s as fallback to WebSocket
+  });
+
+  // Fetch all jobs to correlate with library files
+  const { data: jobs = [] } = useQuery({
+    queryKey: ['jobs'],
+    queryFn: () => api.getJobs(),
+    refetchInterval: 5000, // Refetch jobs every 5s for active jobs
   });
 
   // Build folders list from libraries + "All Files"
@@ -70,6 +81,57 @@ export function Files() {
   const files = filesData?.items || [];
   const totalPages = filesData?.total_pages || 1;
   const totalFiles = filesData?.total || 0;
+
+  // Combine library files with job information for unified view
+  const filesWithJobStatus = useMemo(() => {
+    return files.map((file: any) => {
+      // Find the job associated with this file (via file_id)
+      const job = jobs.find((j: any) => j.file_id === file.id);
+
+      // Determine display status and progress
+      let displayStatus = file.status;
+      let displayProgress = file.progress || 0;
+
+      if (job) {
+        if (job.status === 'assigned' || job.status === 'processing') {
+          displayStatus = 'processing';
+          displayProgress = job.progress || 0;
+        } else if (job.status === 'completed') {
+          displayStatus = 'completed';
+          displayProgress = 100;
+        } else if (job.status === 'failed') {
+          displayStatus = 'failed';
+        }
+      } else if (file.status === 'analyzed' || file.status === 'imported') {
+        displayStatus = 'ready';
+      }
+
+      return {
+        ...file,
+        displayStatus,
+        displayProgress,
+        job,
+      };
+    });
+  }, [files, jobs]);
+
+  // Count files by status for filter tabs
+  const statusCounts = useMemo(() => {
+    const counts = {
+      all: filesWithJobStatus.length,
+      ready: 0,
+      processing: 0,
+      completed: 0,
+      failed: 0,
+    };
+    filesWithJobStatus.forEach((file: any) => {
+      if (file.displayStatus === 'ready') counts.ready++;
+      else if (file.displayStatus === 'processing') counts.processing++;
+      else if (file.displayStatus === 'completed') counts.completed++;
+      else if (file.displayStatus === 'failed') counts.failed++;
+    });
+    return counts;
+  }, [filesWithJobStatus]);
 
   // Queue mutation
   const queueMutation = useMutation({
@@ -151,14 +213,25 @@ export function Files() {
     },
   });
 
-  // Apply client-side search filter
+  // Apply client-side search filter and status filter
   const filteredFiles = useMemo(() => {
-    if (!searchQuery) return files;
-    return files.filter((file: any) =>
-      file.filename?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      file.library_name?.toLowerCase().includes(searchQuery.toLowerCase())
-    );
-  }, [files, searchQuery]);
+    let result = filesWithJobStatus;
+
+    // Apply status filter
+    if (selectedStatus !== 'all') {
+      result = result.filter((file: any) => file.displayStatus === selectedStatus);
+    }
+
+    // Apply search filter
+    if (searchQuery) {
+      result = result.filter((file: any) =>
+        file.filename?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        file.library_name?.toLowerCase().includes(searchQuery.toLowerCase())
+      );
+    }
+
+    return result;
+  }, [filesWithJobStatus, selectedStatus, searchQuery]);
 
   const handleToggleFile = (fileId: string) => {
     setSelectedFiles(prev => {
@@ -182,17 +255,17 @@ export function Files() {
 
   const handleTranscodeConfirm = (presetId: string) => {
     if (transcodeDialogMode === 'all') {
-      // Transcode all analyzed files
-      const analyzedFileIds = files
-        .filter((f: any) => f.status === 'analyzed')
+      // Transcode all ready files (analyzed or imported)
+      const readyFileIds = filesWithJobStatus
+        .filter((f: any) => f.displayStatus === 'ready')
         .map((f: any) => f.id);
-      queueMutation.mutate({ fileIds: analyzedFileIds, presetId });
+      queueMutation.mutate({ fileIds: readyFileIds, presetId });
     } else {
-      // Transcode selected analyzed files
-      const analyzedFileIds = files
-        .filter((f: any) => selectedFiles.has(f.id) && f.status === 'analyzed')
+      // Transcode selected ready files
+      const readyFileIds = filesWithJobStatus
+        .filter((f: any) => selectedFiles.has(f.id) && f.displayStatus === 'ready')
         .map((f: any) => f.id);
-      queueMutation.mutate({ fileIds: analyzedFileIds, presetId });
+      queueMutation.mutate({ fileIds: readyFileIds, presetId });
     }
   };
 
@@ -218,13 +291,67 @@ export function Files() {
     return '#38363a';
   };
 
+  const getStatusDisplay = (file: any) => {
+    const status = file.displayStatus;
+
+    if (status === 'processing') {
+      return (
+        <div className="flex items-center gap-2">
+          <span className="relative flex h-3 w-3">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
+            <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span>
+          </span>
+          <span className="text-blue-400 text-xs">
+            {file.displayProgress > 0 ? `${file.displayProgress.toFixed(1)}%` : 'Processing...'}
+          </span>
+        </div>
+      );
+    }
+
+    if (status === 'completed') {
+      return (
+        <div className="flex items-center gap-2">
+          <Check className="h-3.5 w-3.5 text-green-400 flex-shrink-0" />
+          <span className="text-green-400 text-xs">Completed</span>
+        </div>
+      );
+    }
+
+    if (status === 'failed') {
+      return (
+        <div className="flex items-center gap-2">
+          <X className="h-3.5 w-3.5 text-red-400 flex-shrink-0" />
+          <span className="text-red-400 text-xs">Failed</span>
+        </div>
+      );
+    }
+
+    // ready (analyzed/imported)
+    return (
+      <div className="flex items-center gap-2">
+        <Check className="h-3.5 w-3.5 text-gray-400 flex-shrink-0" />
+        <span className="text-gray-400 text-xs">Transcodeable</span>
+      </div>
+    );
+  };
+
+  const formatETA = (seconds: number) => {
+    if (!seconds || seconds <= 0 || seconds > 86400) return 'Calc...';
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    if (hours > 0) {
+      return `${hours}h ${minutes}m`;
+    }
+    return `${minutes}m`;
+  };
+
   return (
     <div className="space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold text-white">Files</h1>
-          <p className="text-gray-400">Browse and queue video files for transcoding</p>
+          <h1 className="text-3xl font-bold text-white">Library</h1>
+          <p className="text-gray-400">All files with real-time job status</p>
         </div>
         <div className="flex items-center gap-2">
           {selectedFiles.size > 0 && (
@@ -254,7 +381,7 @@ export function Files() {
             className="flex items-center gap-2"
           >
             <Database className="h-4 w-4" />
-            {selectedFiles.size > 0 ? `Transcode Selected (${selectedFiles.size})` : `Transcode All (${files.filter((f: any) => f.status === 'analyzed').length})`}
+            {selectedFiles.size > 0 ? `Transcode Selected (${selectedFiles.size})` : `Transcode All (${filesWithJobStatus.filter((f: any) => f.displayStatus === 'ready').length})`}
           </Button>
 
           {/* Smart Transcode Button */}
@@ -277,6 +404,73 @@ export function Files() {
           >
             <RefreshCw className={`h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />
           </Button>
+        </div>
+      </div>
+
+      {/* Status Filter Tabs */}
+      <div className="flex items-center gap-2 border-b border-[#39363a] pb-2">
+        <button
+          onClick={() => { setSelectedStatus('all'); setCurrentPage(1); }}
+          className={`px-4 py-2 rounded-t-lg text-sm font-medium transition-colors ${
+            selectedStatus === 'all'
+              ? 'bg-[#252326] text-white'
+              : 'text-gray-400 hover:text-white hover:bg-[#252326]/50'
+          }`}
+        >
+          All ({statusCounts.all})
+        </button>
+        <button
+          onClick={() => { setSelectedStatus('ready'); setCurrentPage(1); }}
+          className={`px-4 py-2 rounded-t-lg text-sm font-medium transition-colors ${
+            selectedStatus === 'ready'
+              ? 'bg-[#252326] text-white'
+              : 'text-gray-400 hover:text-white hover:bg-[#252326]/50'
+          }`}
+        >
+          Transcodeable ({statusCounts.ready})
+        </button>
+        <button
+          onClick={() => { setSelectedStatus('processing'); setCurrentPage(1); }}
+          className={`px-4 py-2 rounded-t-lg text-sm font-medium transition-colors ${
+            selectedStatus === 'processing'
+              ? 'bg-[#252326] text-white'
+              : 'text-gray-400 hover:text-white hover:bg-[#252326]/50'
+          }`}
+        >
+          Processing ({statusCounts.processing})
+        </button>
+        <button
+          onClick={() => { setSelectedStatus('completed'); setCurrentPage(1); }}
+          className={`px-4 py-2 rounded-t-lg text-sm font-medium transition-colors ${
+            selectedStatus === 'completed'
+              ? 'bg-[#252326] text-white'
+              : 'text-gray-400 hover:text-white hover:bg-[#252326]/50'
+          }`}
+        >
+          Completed ({statusCounts.completed})
+        </button>
+        <button
+          onClick={() => { setSelectedStatus('failed'); setCurrentPage(1); }}
+          className={`px-4 py-2 rounded-t-lg text-sm font-medium transition-colors ${
+            selectedStatus === 'failed'
+              ? 'bg-[#252326] text-white'
+              : 'text-gray-400 hover:text-white hover:bg-[#252326]/50'
+          }`}
+        >
+          Failed ({statusCounts.failed})
+        </button>
+
+        <div className="ml-auto flex items-center gap-2">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+            <input
+              type="text"
+              placeholder="Search files..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-10 pr-4 py-2 bg-[#1a181b] border border-[#39363a] rounded-lg text-white text-sm placeholder:text-gray-500 focus:outline-none focus:border-[#74c69d] w-64"
+            />
+          </div>
         </div>
       </div>
 
@@ -444,6 +638,29 @@ export function Files() {
                             <span className="flex-shrink-0">•</span>
                             <span className="flex-shrink-0">{formatDuration(file.duration)}</span>
                           </div>
+                          {/* Job info for processing files */}
+                          {(file.displayStatus === 'processing' || file.displayStatus === 'failed') && file.job && (
+                            <div className="mt-1 text-xs flex items-center gap-2">
+                              {file.displayStatus === 'processing' && file.job.fps && (
+                                <span className="text-blue-400">
+                                  <Zap className="h-3 w-3 inline mr-1" />
+                                  {file.job.fps} fps
+                                </span>
+                              )}
+                              {file.displayStatus === 'processing' && file.job.eta && (
+                                <span className="text-gray-400">
+                                  <Clock className="h-3 w-3 inline mr-1" />
+                                  {formatETA(file.job.eta)}
+                                </span>
+                              )}
+                              {file.displayStatus === 'failed' && file.job.error && (
+                                <span className="text-red-400 truncate" title={file.job.error}>
+                                  <AlertTriangle className="h-3 w-3 inline mr-1" />
+                                  {file.job.error}
+                                </span>
+                              )}
+                            </div>
+                          )}
                         </div>
 
                         {/* Format */}
@@ -480,12 +697,12 @@ export function Files() {
 
                         {/* Status */}
                         <div className="w-24 flex-shrink-0">
-                          <StatusBadge status={file.status} />
-                          {file.status === 'processing' && (
+                          {getStatusDisplay(file)}
+                          {file.displayStatus === 'processing' && file.displayProgress > 0 && (
                             <div className="mt-1 w-full h-1 bg-gray-700 rounded-full overflow-hidden">
                               <div
                                 className="h-full transition-all"
-                                style={{ width: `${file.progress || 0}%`, backgroundColor: '#74c69d' }}
+                                style={{ width: `${file.displayProgress}%`, backgroundColor: '#74c69d' }}
                               />
                             </div>
                           )}
@@ -537,12 +754,23 @@ export function Files() {
                                 </div>
                               </div>
                             </div>
-                          ) : file.status === 'queued' ? (
-                            <span className="text-xs text-gray-500">...</span>
-                          ) : file.status === 'processing' ? (
-                            <span className="text-xs text-gray-500">{file.progress}%</span>
-                          ) : file.status === 'completed' ? (
+                          ) : file.displayStatus === 'processing' ? (
+                            // Processing - show progress
+                            <span className="text-xs text-blue-400">{file.displayProgress.toFixed(1)}%</span>
+                          ) : file.displayStatus === 'completed' ? (
+                            // Completed - show check
                             <Check className="h-4 w-4 text-[#74c69d]" />
+                          ) : file.displayStatus === 'failed' ? (
+                            // Failed - show retry button
+                            <button
+                              onClick={() => analyzeSingleMutation.mutate(file.id)}
+                              disabled={analyzeSingleMutation.isPending}
+                              className="px-2 py-1 text-xs rounded transition-colors"
+                              style={{ backgroundColor: '#dc2626', color: '#ffffff' }}
+                              title="Retry analysis"
+                            >
+                              <RefreshCw className="h-3 w-3" />
+                            </button>
                           ) : null}
                         </div>
                       </div>

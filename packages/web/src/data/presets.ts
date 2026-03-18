@@ -7,7 +7,7 @@ export interface PresetConfig {
   quality: number;
   preset: 'ultrafast' | 'superfast' | 'veryfast' | 'faster' | 'fast' | 'medium' | 'slow' | 'slower';
   container: 'mp4' | 'mkv';
-  audio_encoder: 'aac' | 'opus' | 'mp3';
+  audio_encoder: 'aac' | 'opus' | 'mp3' | 'copy';
   audio_bitrate: number;
   subtitles: 'all' | 'first' | 'none';
   max_width?: number;
