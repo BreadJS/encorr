@@ -909,12 +909,12 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     return sendSuccess(jobs);
   });
 
-  // Smart transcoding endpoint - automatically selects optimal presets
+  // Smart transcoding endpoint - automatically selects optimal presets or uses user-selected preset
   fastify.post('/jobs/smart', async (request, reply) => {
     const data = request.body as SmartTranscodeRequest;
-    const { file_ids, mode = 'auto' } = data;
+    const { file_ids, mode = 'auto', preset_id: userPresetId } = data;
 
-    logger.info(`[SMART_TRANSCODE] Creating smart transcoding jobs for ${file_ids.length} files with mode: ${mode}`);
+    logger.info(`[SMART_TRANSCODE] Creating smart transcoding jobs for ${file_ids.length} files with mode: ${mode}${userPresetId ? `, preset: ${userPresetId}` : ''}`);
 
     // Get all available presets
     const presets = db.getAllPresets();
@@ -968,18 +968,36 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
 
           // Create job for regular file using createJob
           if (metadata) {
-            const analysis = presetOptimizer.analyzeFile(metadata, fileSize);
-            const recommendation = presetOptimizer.recommendForFile(analysis, onlineNodes, presets, mode);
+            let presetId: string;
+            let reason: string;
+            let expectedCompression: string;
 
-            logger.info(`[SMART_TRANSCODE] File ${file_id}: ${recommendation.reason}`);
+            if (userPresetId) {
+              // User explicitly selected a preset
+              presetId = userPresetId;
+              const preset = db.getPresetById(presetId);
+              reason = `User selected preset: ${preset?.name || presetId}`;
+              expectedCompression = 'Unknown (user preset)';
+              logger.info(`[SMART_TRANSCODE] File ${file_id}: ${reason}`);
+            } else {
+              // Auto-select optimal preset
+              const analysis = presetOptimizer.analyzeFile(metadata, fileSize);
+              const recommendation = presetOptimizer.recommendForFile(analysis, onlineNodes, presets, mode);
+
+              logger.info(`[SMART_TRANSCODE] File ${file_id}: ${recommendation.reason}`);
+
+              presetId = recommendation.recommendedPresetId;
+              reason = recommendation.reason;
+              expectedCompression = recommendation.expectedCompression;
+            }
 
             const job = db.createJob({
               file_id,
-              preset_id: recommendation.recommendedPresetId,
+              preset_id: presetId,
             });
 
             // Parse expected compression to estimate size
-            const compressionMatch = recommendation.expectedCompression.match(/(\d+)%/);
+            const compressionMatch = expectedCompression.match(/(\d+)%/);
             const compressionPercent = compressionMatch ? parseInt(compressionMatch[1], 10) : 50;
             const originalSize = fileSize;
             const estimatedSize = Math.round(originalSize * (1 - compressionPercent / 100));
@@ -991,10 +1009,10 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
               fileId: file_id,
               jobId: job.id,
               fileName,
-              presetId: recommendation.recommendedPresetId,
-              presetName: db.getPresetById(recommendation.recommendedPresetId)?.name || 'Unknown',
-              reason: recommendation.reason,
-              expectedCompression: recommendation.expectedCompression,
+              presetId: presetId,
+              presetName: db.getPresetById(presetId)?.name || 'Unknown',
+              reason: reason,
+              expectedCompression: expectedCompression,
               originalSize,
               estimatedSize,
               mode,
@@ -1016,7 +1034,16 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
         let reason: string;
         let expectedCompression: string;
 
-        if (metadata) {
+        if (userPresetId) {
+          // User explicitly selected a preset
+          presetId = userPresetId;
+          const preset = db.getPresetById(presetId);
+          reason = `User selected preset: ${preset?.name || presetId}`;
+          expectedCompression = 'Unknown (user preset)';
+          logger.info(`[SMART_TRANSCODE] Library file ${file_id}: ${reason}`);
+          job = db.createJobForLibraryFile(file_id, presetId);
+        } else if (metadata) {
+          // Auto-select optimal preset based on file analysis
           const analysis = presetOptimizer.analyzeFile(metadata, fileSize);
           const recommendation = presetOptimizer.recommendForFile(analysis, onlineNodes, presets, mode);
 

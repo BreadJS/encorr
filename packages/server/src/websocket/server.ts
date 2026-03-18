@@ -1225,17 +1225,31 @@ export class EncorrWebSocketServer {
     // Get pending assignments for this node
     const pendingCount = this.pendingAssignments.get(node.id) || 0;
 
-    // For simplicity, count each active job as using one CPU worker
-    // In the future, we could track which GPU each job is using
-    const usedCpuWorkers = activeJobs.length + pendingCount;
+    // Total in-flight jobs (both active and pending)
+    const totalInFlight = activeJobs.length + pendingCount;
+
+    // Calculate available CPU workers
+    const availableCpu = Math.max(0, (maxWorkers.cpu || 0) - totalInFlight);
+
+    // Calculate total GPU capacity
+    const totalGpuCapacity = (maxWorkers.gpus || []).reduce((sum: number, max: number) => sum + max, 0);
+
+    // Assume all active/pending jobs are GPU jobs (worst case for availability)
+    // In the future, we should track which jobs are GPU vs CPU
+    const availableGpuSlots = Math.max(0, totalGpuCapacity - totalInFlight);
+
+    // Distribute available slots back to the GPU array format
+    const availableGpus = (maxWorkers.gpus || []).map((max: number) => {
+      // Simple distribution: each GPU gets its max, capped by what's available
+      // This isn't perfect but ensures total doesn't exceed capacity
+      return Math.min(max, availableGpuSlots);
+    });
+
+    this.logger.debug(`[WORKERS] Node ${node.name}: active=${activeJobs.length}, pending=${pendingCount}, totalInFlight=${totalInFlight}, maxGpuCapacity=${totalGpuCapacity}, availableGpuSlots=${availableGpuSlots}`);
 
     return {
-      cpu: Math.max(0, (maxWorkers.cpu || 0) - usedCpuWorkers),
-      gpus: (maxWorkers.gpus || []).map((max: number, idx: number) => {
-        // For now, assume GPU workers are available if CPU workers are available
-        // In the future, track GPU-specific job assignments
-        return max;
-      }),
+      cpu: availableCpu,
+      gpus: availableGpus,
     };
   }
 
@@ -1342,8 +1356,10 @@ export class EncorrWebSocketServer {
   private findNodeWithAvailableGpu(nodes: any[]): any | null {
     for (const node of nodes) {
       const available = this.getAvailableWorkers(node);
-      const hasGpuWorker = available.gpus.some((g: number) => g > 0);
-      if (hasGpuWorker) { // GPU workers are independent of CPU workers
+      // Check if ANY GPU has available slots
+      const totalGpuSlotsAvailable = available.gpus.reduce((sum: number, slots: number) => sum + slots, 0);
+      if (totalGpuSlotsAvailable > 0) {
+        this.logger.debug(`[GPU_AVAIL] Node ${node.name} has ${totalGpuSlotsAvailable} GPU slots available`);
         return node;
       }
     }

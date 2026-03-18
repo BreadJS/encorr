@@ -89,6 +89,7 @@ export interface OptimizationResult {
 export interface SmartTranscodeRequest {
   file_ids: string[];
   mode: TranscodeMode;
+  preset_id?: string; // Optional: user-selected preset (for GPU/CPU modes)
 }
 
 export interface SmartTranscodeResult {

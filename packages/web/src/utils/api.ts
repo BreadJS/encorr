@@ -185,7 +185,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
-  createSmartJob: (data: { file_ids: string[]; mode: 'auto' | 'gpu' | 'cpu' }) =>
+  createSmartJob: (data: { file_ids: string[]; mode: 'auto' | 'gpu' | 'cpu'; preset_id?: string }) =>
     request<{
       success: boolean;
       jobs: Array<{

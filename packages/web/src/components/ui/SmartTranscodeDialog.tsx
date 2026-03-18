@@ -2,10 +2,13 @@
 // Smart Transcode Dialog Component
 // ============================================================================
 
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { Dialog } from '@/components/ui/Dialog';
 import { Button } from '@/components/ui/Button';
-import { Loader2, Cpu, Zap, Settings2, HardDrive, CheckCircle2 } from 'lucide-react';
+import { Loader2, Cpu, Zap, Settings2, CheckCircle2, ChevronDown } from 'lucide-react';
+import { BUILTIN_PRESETS } from '@/data/presets';
+import { api } from '@/utils/api';
 import type { TranscodeMode } from '@encorr/shared';
 
 // ============================================================================
@@ -31,7 +34,7 @@ interface SmartTranscodeDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   files: LibraryFile[];
-  onConfirm: (mode: TranscodeMode) => Promise<void>;
+  onConfirm: (mode: TranscodeMode, presetId: string) => Promise<void>;
 }
 
 // ============================================================================
@@ -45,59 +48,71 @@ function formatBytes(bytes: number): string {
   return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
 }
 
-function estimateSize(file: LibraryFile, mode: TranscodeMode): number {
-  const originalSize = file.filesize || file.metadata?.size || 0;
-  if (!originalSize) return 0;
-
-  const codec = file.metadata?.video_codec?.toLowerCase() || '';
-  const bitrate = file.metadata?.bitrate || 0;
-
-  // Estimate compression ratio - all modes now target H.265 for space savings
-  let compressionRatio = 0.5; // Default: 50% reduction
-
-  if (codec.includes('265') || codec.includes('hevc')) {
-    // H.265 source - already compressed, but we can still reduce bitrate
-    // H.265 to H.265 re-encoding can achieve 10-30% additional compression
-    if (bitrate > 5000000) {
-      // High bitrate H.265 - more compression possible
-      compressionRatio = 0.7; // 30% reduction
-    } else if (bitrate > 3000000) {
-      // Medium bitrate H.265
-      compressionRatio = 0.8; // 20% reduction
-    } else {
-      // Low bitrate H.265 - minimal compression
-      compressionRatio = 0.9; // 10% reduction
-    }
-  } else if (codec.includes('264') || codec.includes('avc')) {
-    // H.264 source - excellent candidate for H.265 conversion
-    // H.264 to H.265 typically achieves 40-60% compression
-    if (bitrate > 8000000) {
-      // Very high bitrate H.264 - maximum compression
-      compressionRatio = 0.35; // 65% reduction
-    } else if (bitrate > 5000000) {
-      // High bitrate H.264
-      compressionRatio = 0.4; // 60% reduction
-    } else {
-      // Normal bitrate H.264
-      compressionRatio = 0.5; // 50% reduction
-    }
-  } else if (codec.includes('mpeg2') || codec.includes('mpeg2video')) {
-    // MPEG-2 source (DVD rips) - excellent candidate for H.265 conversion
-    // MPEG-2 is very inefficient, so H.265 provides massive compression
-    if (bitrate > 8000000) {
-      // Very high bitrate MPEG-2 - maximum compression
-      compressionRatio = 0.25; // 75% reduction
-    } else if (bitrate > 5000000) {
-      // High bitrate MPEG-2
-      compressionRatio = 0.3; // 70% reduction
-    } else {
-      // Normal bitrate MPEG-2 (typical DVD)
-      compressionRatio = 0.35; // 65% reduction
-    }
+// Helper to detect if a preset is GPU-based from config
+function isGpuPreset(preset: any): boolean {
+  // Check for HandBrake-style video_encoder field first (prioritize this for user presets)
+  const videoEncoder = preset.config.video_encoder;
+  if (videoEncoder) {
+    return videoEncoder.includes('nvenc') ||
+           videoEncoder.includes('vce') ||
+           videoEncoder.includes('qsv') ||
+           videoEncoder.includes('amf') ||
+           videoEncoder.includes('quick');
   }
 
-  return Math.round(originalSize * compressionRatio);
+  // Check for encoding_type field (FFmpeg format)
+  if (preset.config.encoding_type === 'gpu') return true;
+  if (preset.config.encoding_type === 'cpu') return false;
+
+  return false;
 }
+
+// Helper to detect GPU type from config
+function getGpuType(preset: any): 'nvidia' | 'amd' | 'intel' | null {
+  // Check for HandBrake-style video_encoder field first (prioritize for user presets)
+  const videoEncoder = preset.config.video_encoder;
+  if (videoEncoder) {
+    if (videoEncoder.includes('nvenc') || videoEncoder.includes('nvidia')) return 'nvidia';
+    if (videoEncoder.includes('vce') || videoEncoder.includes('amf') || videoEncoder.includes('amd')) return 'amd';
+    if (videoEncoder.includes('qsv') || videoEncoder.includes('intel') || videoEncoder.includes('quick')) return 'intel';
+  }
+
+  // Check for gpu_type field (FFmpeg format)
+  if (preset.config.gpu_type) {
+    return preset.config.gpu_type;
+  }
+
+  return null;
+}
+
+// Helper to get video codec from config (handles both formats)
+function getVideoCodec(preset: any): 'h264' | 'h265' | null {
+  // Check for HandBrake-style video_encoder field first (prioritize for user presets)
+  const videoEncoder = preset.config.video_encoder;
+  if (videoEncoder) {
+    if (videoEncoder.includes('h265') || videoEncoder.includes('hevc') || videoEncoder.includes('x265')) return 'h265';
+    if (videoEncoder.includes('h264') || videoEncoder.includes('x264') || videoEncoder.includes('avc')) return 'h264';
+  }
+
+  // Check for video_codec field (FFmpeg format)
+  if (preset.config.video_codec) {
+    return preset.config.video_codec;
+  }
+
+  return null;
+}
+
+// Theme colors
+const theme = {
+  green: '#74c69d',
+  greenHover: '#5fb382',
+  bgPrimary: '#252326',
+  bgSecondary: '#1E1D1F',
+  bgTertiary: '#38363a',
+  border: '#39363a',
+  text: '#ffffff',
+  textMuted: '#6b7280',
+};
 
 // ============================================================================
 // Component
@@ -111,27 +126,180 @@ export function SmartTranscodeDialog({
 }: SmartTranscodeDialogProps) {
   const [mode, setMode] = useState<TranscodeMode>('auto');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [codecFilter, setCodecFilter] = useState<'all' | 'h264' | 'h265'>('all');
 
-  // Calculate previews based on selected mode
-  const previews = files.map(file => ({
-    fileId: file.id,
-    fileName: file.filename,
-    originalSize: file.filesize || file.metadata?.size || 0,
-    estimatedSize: estimateSize(file, mode),
-    codec: file.metadata?.video_codec || 'Unknown',
-  }));
+  // GPU dropdown states
+  const [nvidiaDropdownOpen, setNvidiaDropdownOpen] = useState(false);
+  const [amdDropdownOpen, setAmdDropdownOpen] = useState(false);
+  const [intelDropdownOpen, setIntelDropdownOpen] = useState(false);
 
-  const totalOriginalSize = previews.reduce((sum, p) => sum + p.originalSize, 0);
-  const totalEstimatedSize = previews.reduce((sum, p) => sum + p.estimatedSize, 0);
-  const spaceSaved = totalOriginalSize - totalEstimatedSize;
-  const spaceSavedPercent = totalOriginalSize > 0
-    ? ((spaceSaved / totalOriginalSize) * 100).toFixed(0)
-    : '0';
+  // Per-vendor preset selection states (for GPU mode)
+  const [nvidiaPresetId, setNvidiaPresetId] = useState<string>('');
+  const [amdPresetId, setAmdPresetId] = useState<string>('');
+  const [intelPresetId, setIntelPresetId] = useState<string>('');
+  const [cpuPresetId, setCpuPresetId] = useState<string>('');
+
+  // Fetch all presets (built-in + user) from API
+  const { data: apiPresets = [] } = useQuery({
+    queryKey: ['presets'],
+    queryFn: () => api.getPresets(),
+    refetchOnWindowFocus: false,
+  });
+
+  // Combine built-in presets with API presets (user presets)
+  const allPresets = useMemo(() => {
+    // Create a map to avoid duplicates by ID
+    const presetMap = new Map();
+
+    // Add built-in presets first
+    BUILTIN_PRESETS.forEach(preset => {
+      presetMap.set(preset.id, preset);
+    });
+
+    // Add/override with API presets (includes user presets)
+    apiPresets.forEach((preset: any) => {
+      presetMap.set(preset.id, preset);
+    });
+
+    return Array.from(presetMap.values());
+  }, [apiPresets]);
+
+  // Group presets by encoding type and gpu type (handles both FFmpeg and HandBrake formats)
+  const gpuPresets = allPresets.filter(p => isGpuPreset(p));
+  const cpuPresets = allPresets.filter(p => !isGpuPreset(p) && p.id !== 'builtin-analyze');
+
+  // Group GPU presets by GPU type
+  const nvidiaPresets = gpuPresets.filter(p => getGpuType(p) === 'nvidia');
+  const amdPresets = gpuPresets.filter(p => getGpuType(p) === 'amd');
+  const intelPresets = gpuPresets.filter(p => getGpuType(p) === 'intel');
+
+  // Debug logging
+  console.log('[SmartTranscodeDialog] Presets Debug:', {
+    allPresetsCount: allPresets.length,
+    gpuPresetsCount: gpuPresets.length,
+    nvidiaPresetsCount: nvidiaPresets.length,
+    nvidiaPresetNames: nvidiaPresets.map(p => ({ id: p.id, name: p.name, encoder: p.config.video_encoder, gpuType: getGpuType(p) })),
+    apiPresetsCount: apiPresets.length,
+  });
+
+  // Selected preset state
+  const [selectedPresetId, setSelectedPresetId] = useState<string>('');
+
+  // Auto-select default preset based on mode
+  const getDefaultPresetForMode = (currentMode: TranscodeMode): string => {
+    if (currentMode === 'gpu') {
+      // Default to NVIDIA H.265
+      const nvidiaH265 = nvidiaPresets.find(p => getVideoCodec(p) === 'h265');
+      return nvidiaH265?.id || nvidiaPresets[0]?.id || '';
+    } else if (currentMode === 'cpu') {
+      // Default to High Quality H.265 CPU
+      const h265Cpu = cpuPresets.find(p => getVideoCodec(p) === 'h265');
+      return h265Cpu?.id || cpuPresets[0]?.id || '';
+    }
+    return '';
+  };
+
+  // Initialize vendor-specific preset defaults
+  const initializeVendorPresets = () => {
+    // NVIDIA default
+    const nvidiaH265 = nvidiaPresets.find(p => getVideoCodec(p) === 'h265');
+    setNvidiaPresetId(nvidiaH265?.id || nvidiaPresets[0]?.id || '');
+
+    // AMD default
+    const amdH265 = amdPresets.find(p => getVideoCodec(p) === 'h265');
+    setAmdPresetId(amdH265?.id || amdPresets[0]?.id || '');
+
+    // Intel default
+    const intelH265 = intelPresets.find(p => getVideoCodec(p) === 'h265');
+    setIntelPresetId(intelH265?.id || intelPresets[0]?.id || '');
+
+    // CPU default
+    const cpuH265 = cpuPresets.find(p => getVideoCodec(p) === 'h265');
+    setCpuPresetId(cpuH265?.id || cpuPresets[0]?.id || '');
+  };
+
+  // Set codec default for all GPU vendors (for GPU mode codec buttons)
+  const setGpuCodecDefault = (codec: 'h264' | 'h265') => {
+    // Set NVIDIA default for this codec
+    const nvidiaCodec = nvidiaPresets.find(p => getVideoCodec(p) === codec);
+    if (nvidiaCodec) setNvidiaPresetId(nvidiaCodec.id);
+
+    // Set AMD default for this codec
+    const amdCodec = amdPresets.find(p => getVideoCodec(p) === codec);
+    if (amdCodec) setAmdPresetId(amdCodec.id);
+
+    // Set Intel default for this codec
+    const intelCodec = intelPresets.find(p => getVideoCodec(p) === codec);
+    if (intelCodec) setIntelPresetId(intelCodec.id);
+  };
+
+  // Update selected preset when mode changes
+  const handleModeChange = (newMode: TranscodeMode) => {
+    setMode(newMode);
+    setSelectedPresetId(getDefaultPresetForMode(newMode));
+    // Initialize vendor presets if not already set
+    if (!nvidiaPresetId || !amdPresetId || !intelPresetId || !cpuPresetId) {
+      initializeVendorPresets();
+    }
+    // Close all dropdowns when switching modes
+    setNvidiaDropdownOpen(false);
+    setAmdDropdownOpen(false);
+    setIntelDropdownOpen(false);
+  };
+
+  // Initialize preset when dialog opens
+  const handleDialogOpenChange = (open: boolean) => {
+    if (open) {
+      // Initialize vendor presets if not already set
+      if (!nvidiaPresetId || !amdPresetId || !intelPresetId || !cpuPresetId) {
+        initializeVendorPresets();
+      }
+      if (!selectedPresetId) {
+        setSelectedPresetId(getDefaultPresetForMode(mode));
+      }
+    }
+    onOpenChange(open);
+  };
+
+  // Get current preset info based on mode and vendor selection
+  const getCurrentPreset = () => {
+    if (mode === 'gpu') {
+      // For GPU mode, find which vendor has a selection and return that preset
+      if (nvidiaPresetId && nvidiaPresets.some(p => p.id === nvidiaPresetId)) {
+        return allPresets.find(p => p.id === nvidiaPresetId);
+      }
+      if (amdPresetId && amdPresets.some(p => p.id === amdPresetId)) {
+        return allPresets.find(p => p.id === amdPresetId);
+      }
+      if (intelPresetId && intelPresets.some(p => p.id === intelPresetId)) {
+        return allPresets.find(p => p.id === intelPresetId);
+      }
+      // Fallback to first GPU preset
+      return allPresets.find(p => p.id === nvidiaPresets[0]?.id);
+    } else if (mode === 'cpu') {
+      return allPresets.find(p => p.id === cpuPresetId);
+    }
+    return allPresets.find(p => p.id === selectedPresetId);
+  };
+
+  // Get the active preset ID to use for transcoding
+  const getActivePresetId = (): string => {
+    if (mode === 'gpu') {
+      // Prioritize based on which vendor has presets
+      if (nvidiaPresetId) return nvidiaPresetId;
+      if (amdPresetId) return amdPresetId;
+      if (intelPresetId) return intelPresetId;
+      return nvidiaPresets[0]?.id || '';
+    } else if (mode === 'cpu') {
+      return cpuPresetId || cpuPresets[0]?.id || '';
+    }
+    return selectedPresetId;
+  };
 
   const handleConfirm = async () => {
     setIsSubmitting(true);
     try {
-      await onConfirm(mode);
+      await onConfirm(mode, getActivePresetId());
       onOpenChange(false);
     } catch (error) {
       console.error('Failed to start transcoding:', error);
@@ -139,6 +307,22 @@ export function SmartTranscodeDialog({
       setIsSubmitting(false);
     }
   };
+
+  const getFilteredPresets = () => {
+    let presets = mode === 'gpu' ? gpuPresets : cpuPresets;
+    if (codecFilter !== 'all') {
+      presets = presets.filter(p => getVideoCodec(p) === codecFilter);
+    }
+    return presets;
+  };
+
+  // Get presets for each GPU type dropdown (no codec filtering for vendor dropdowns)
+  const getFilteredGpuPresets = (gpuType: 'nvidia' | 'amd' | 'intel') => {
+    // Return all presets for the vendor, without codec filtering
+    return gpuPresets.filter(p => getGpuType(p) === gpuType);
+  };
+
+  const currentPreset = getCurrentPreset();
 
   return (
     <Dialog
@@ -156,7 +340,7 @@ export function SmartTranscodeDialog({
           </Button>
           <Button
             onClick={handleConfirm}
-            disabled={isSubmitting || files.length === 0}
+            disabled={isSubmitting || files.length === 0 || (!getActivePresetId() && mode !== 'auto')}
           >
             {isSubmitting ? (
               <>
@@ -176,7 +360,7 @@ export function SmartTranscodeDialog({
       <div className="space-y-4">
         {/* Description */}
         <p className="text-sm text-gray-400">
-          Select files to transcode. The system will automatically optimize settings for your files.
+          Select files to transcode and choose your preset.
         </p>
 
         {/* Mode Selection */}
@@ -184,157 +368,378 @@ export function SmartTranscodeDialog({
           <h3 className="text-base font-semibold text-white">Processing Mode</h3>
 
           {/* Auto Mode */}
-          <label
-            className={`flex items-start space-x-3 rounded-lg border p-4 transition-colors cursor-pointer ${
-              mode === 'auto' ? 'border-primary bg-primary/5' : 'hover:bg-white/5'
+          <div
+            onClick={() => handleModeChange('auto')}
+            className={`flex items-start space-x-3 rounded-lg border p-4 transition-all cursor-pointer ${
+              mode === 'auto' ? 'bg-primary/5' : 'hover:bg-white/5'
             }`}
-            style={{ borderColor: mode === 'auto' ? '#74c69d' : '#39363a' }}
+            style={{
+              borderColor: mode === 'auto' ? theme.green : theme.border,
+              backgroundColor: mode === 'auto' ? `${theme.green}10` : undefined
+            }}
           >
             <input
               type="radio"
               name="transcode-mode"
               value="auto"
               checked={mode === 'auto'}
-              onChange={() => setMode('auto')}
+              onChange={() => handleModeChange('auto')}
               className="mt-1"
+              onClick={(e) => e.stopPropagation()}
             />
             <div className="flex-1">
               <div className="flex items-center gap-2 font-medium text-white">
-                <Settings2 className="h-4 w-4" />
+                <Settings2 className="h-4 w-4" style={{ color: mode === 'auto' ? theme.green : undefined }} />
                 Auto (Recommended)
               </div>
               <p className="mt-1 text-sm text-gray-400">
                 System analyzes each file and chooses optimal settings. Uses GPU when available for best performance.
               </p>
-              <div className="mt-2 flex flex-wrap gap-2 text-xs">
-                <span className="rounded-full bg-green-100 px-2 py-0.5 text-green-700 dark:bg-green-900/30 dark:text-green-400">
-                  Automatic
-                </span>
-                <span className="rounded-full bg-blue-100 px-2 py-0.5 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">
-                  Optimal compression
-                </span>
-              </div>
             </div>
-          </label>
-
-          {/* GPU Mode */}
-          <label
-            className={`flex items-start space-x-3 rounded-lg border p-4 transition-colors cursor-pointer ${
-              mode === 'gpu' ? 'border-primary bg-primary/5' : 'hover:bg-white/5'
-            }`}
-            style={{ borderColor: mode === 'gpu' ? '#74c69d' : '#39363a' }}
-          >
-            <input
-              type="radio"
-              name="transcode-mode"
-              value="gpu"
-              checked={mode === 'gpu'}
-              onChange={() => setMode('gpu')}
-              className="mt-1"
-            />
-            <div className="flex-1">
-              <div className="flex items-center gap-2 font-medium text-white">
-                <Zap className="h-4 w-4" />
-                GPU (Maximum Speed)
-              </div>
-              <p className="mt-1 text-sm text-gray-400">
-                Force GPU encoding for fastest transcoding. Minimal CPU usage. Requires compatible GPU.
-              </p>
-              <div className="mt-2 flex flex-wrap gap-2 text-xs">
-                <span className="rounded-full bg-purple-100 px-2 py-0.5 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400">
-                  Very fast
-                </span>
-                <span className="rounded-full bg-orange-100 px-2 py-0.5 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400">
-                  Low CPU usage
-                </span>
-              </div>
-            </div>
-          </label>
-
-          {/* CPU Mode */}
-          <label
-            className={`flex items-start space-x-3 rounded-lg border p-4 transition-colors cursor-pointer ${
-              mode === 'cpu' ? 'border-primary bg-primary/5' : 'hover:bg-white/5'
-            }`}
-            style={{ borderColor: mode === 'cpu' ? '#74c69d' : '#39363a' }}
-          >
-            <input
-              type="radio"
-              name="transcode-mode"
-              value="cpu"
-              checked={mode === 'cpu'}
-              onChange={() => setMode('cpu')}
-              className="mt-1"
-            />
-            <div className="flex-1">
-              <div className="flex items-center gap-2 font-medium text-white">
-                <Cpu className="h-4 w-4" />
-                CPU (Maximum Compatibility)
-              </div>
-              <p className="mt-1 text-sm text-gray-400">
-                Force CPU encoding. Works on any system but slower and higher CPU usage.
-              </p>
-              <div className="mt-2 flex flex-wrap gap-2 text-xs">
-                <span className="rounded-full bg-gray-100 px-2 py-0.5 text-gray-700 dark:bg-gray-900/30 dark:text-gray-400">
-                  Universal
-                </span>
-                <span className="rounded-full bg-red-100 px-2 py-0.5 text-red-700 dark:bg-red-900/30 dark:text-red-400">
-                  Higher CPU usage
-                </span>
-              </div>
-            </div>
-          </label>
-        </div>
-
-        {/* File Preview */}
-        <div className="space-y-2">
-          <h3 className="text-base font-semibold text-white">Files to Transcode ({files.length})</h3>
-          <div className="max-h-60 overflow-y-auto rounded-md border" style={{ borderColor: '#39363a' }}>
-            <div className="grid grid-cols-12 gap-2 border-b p-2 text-xs font-medium text-gray-400" style={{ borderColor: '#39363a', backgroundColor: '#1E1D1F' }}>
-              <div className="col-span-6">File Name</div>
-              <div className="col-span-3 text-right">Original</div>
-              <div className="col-span-3 text-right">Est. Output</div>
-            </div>
-            {previews.map((preview) => (
-              <div
-                key={preview.fileId}
-                className="grid grid-cols-12 gap-2 border-b p-2 text-sm last:border-0"
-                style={{ borderColor: '#39363a' }}
-              >
-                <div className="col-span-6 truncate text-gray-300" title={preview.fileName}>
-                  {preview.fileName}
-                </div>
-                <div className="col-span-3 text-right text-gray-400">
-                  {formatBytes(preview.originalSize)}
-                </div>
-                <div className="col-span-3 text-right text-green-400">
-                  ~{formatBytes(preview.estimatedSize)}
-                </div>
-              </div>
-            ))}
           </div>
-        </div>
 
-        {/* Summary */}
-        <div className="rounded-lg p-4" style={{ backgroundColor: '#1E1D1F', border: '1px solid #39363a' }}>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <HardDrive className="h-5 w-5 text-gray-400" />
-              <div>
-                <p className="text-sm font-medium text-white">Estimated Space Savings</p>
-                <p className="text-xs text-gray-400">
-                  Total: {formatBytes(totalEstimatedSize)} from {formatBytes(totalOriginalSize)}
+          {/* GPU Mode with Preset Selection */}
+          <div
+            onClick={() => handleModeChange('gpu')}
+            className={`rounded-lg border p-4 transition-all cursor-pointer ${
+              mode === 'gpu' ? 'bg-primary/5' : 'hover:bg-white/5'
+            }`}
+            style={{
+              borderColor: mode === 'gpu' ? theme.green : theme.border,
+              backgroundColor: mode === 'gpu' ? `${theme.green}10` : undefined,
+              overflow: (nvidiaDropdownOpen || amdDropdownOpen || intelDropdownOpen) ? 'visible' : undefined
+            }}
+          >
+            <div className="flex items-start space-x-3 mb-3">
+              <input
+                type="radio"
+                name="transcode-mode"
+                value="gpu"
+                checked={mode === 'gpu'}
+                onChange={() => handleModeChange('gpu')}
+                className="mt-1"
+                onClick={(e) => e.stopPropagation()}
+              />
+              <div className="flex-1">
+                <div className="flex items-center gap-2 font-medium text-white">
+                  <Zap className="h-4 w-4" style={{ color: mode === 'gpu' ? theme.green : undefined }} />
+                  GPU
+                </div>
+                <p className="mt-1 text-sm text-gray-400">
+                  Force GPU encoding for fastest transcoding. Minimal CPU usage.
                 </p>
               </div>
             </div>
-            <div className="text-right">
-              <p className="text-2xl font-bold text-green-400">
-                {spaceSavedPercent}%
-              </p>
-              <p className="text-xs text-gray-400">
-                {formatBytes(spaceSaved)} saved
-              </p>
+
+            {/* GPU Preset Dropdown */}
+            {mode === 'gpu' && (
+              <div
+                className="ml-8 space-y-2"
+                onClick={(e) => e.stopPropagation()}
+                style={{ overflow: (nvidiaDropdownOpen || amdDropdownOpen || intelDropdownOpen) ? 'visible' : undefined }}
+              >
+                {/* Codec Filter Buttons - Set defaults for all vendors */}
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => {
+                      setCodecFilter('h265');
+                      setGpuCodecDefault('h265');
+                    }}
+                    className={`px-3 py-1 text-xs rounded transition-colors ${
+                      codecFilter === 'h265' ? 'text-white' : 'text-gray-300 hover:bg-white/5'
+                    }`}
+                    style={{
+                      backgroundColor: codecFilter === 'h265' ? theme.green : theme.bgTertiary,
+                    }}
+                  >
+                    H.265
+                  </button>
+                  <button
+                    onClick={() => {
+                      setCodecFilter('h264');
+                      setGpuCodecDefault('h264');
+                    }}
+                    className={`px-3 py-1 text-xs rounded transition-colors ${
+                      codecFilter === 'h264' ? 'text-white' : 'text-gray-300 hover:bg-white/5'
+                    }`}
+                    style={{
+                      backgroundColor: codecFilter === 'h264' ? theme.green : theme.bgTertiary,
+                    }}
+                  >
+                    H.264
+                  </button>
+                </div>
+
+                {/* GPU Type Dropdowns */}
+                <div className="flex flex-col gap-2">
+                  {/* NVIDIA */}
+                  {nvidiaPresets.length > 0 && (
+                    <div className="relative">
+                      <button
+                        onClick={() => {
+                          setNvidiaDropdownOpen(!nvidiaDropdownOpen);
+                          setAmdDropdownOpen(false);
+                          setIntelDropdownOpen(false);
+                        }}
+                        className={`w-full text-left px-3 py-2 text-sm rounded border transition-all flex items-center justify-between ${
+                          nvidiaPresetId && nvidiaPresets.some(p => p.id === nvidiaPresetId)
+                            ? 'text-white'
+                            : 'text-gray-300'
+                        }`}
+                        style={{
+                          backgroundColor: theme.bgSecondary,
+                          borderColor: nvidiaDropdownOpen ? theme.green : theme.border,
+                        }}
+                      >
+                        <span className="truncate">
+                          {nvidiaPresetId && nvidiaPresets.some(p => p.id === nvidiaPresetId)
+                            ? nvidiaPresets.find(p => p.id === nvidiaPresetId)!.name
+                            : 'NVIDIA'}
+                        </span>
+                        <ChevronDown className={`h-4 w-4 flex-shrink-0 ml-1 transition-transform ${
+                          nvidiaDropdownOpen ? 'rotate-180' : ''
+                        }`} />
+                      </button>
+                      <div
+                        className={`absolute left-0 right-0 top-full mt-1 rounded-md overflow-hidden transition-all duration-200 z-50 ${
+                          nvidiaDropdownOpen
+                            ? 'max-h-60 opacity-100'
+                            : 'max-h-0 opacity-0'
+                        }`}
+                        style={{ backgroundColor: theme.bgSecondary, border: `1px solid ${theme.border}` }}
+                      >
+                        {getFilteredGpuPresets('nvidia').map(preset => (
+                          <button
+                            key={preset.id}
+                            onClick={() => {
+                              setNvidiaPresetId(preset.id);
+                              setNvidiaDropdownOpen(false);
+                            }}
+                            className={`w-full text-left px-3 py-2 text-xs transition-colors ${
+                              nvidiaPresetId === preset.id
+                                ? 'text-white'
+                                : 'text-gray-300 hover:bg-white/5'
+                            }`}
+                            style={{
+                              backgroundColor: nvidiaPresetId === preset.id ? `${theme.green}30` : 'transparent',
+                            }}
+                          >
+                            <div className="font-medium">{preset.name}</div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* AMD */}
+                  {amdPresets.length > 0 && (
+                    <div className="relative">
+                      <button
+                        onClick={() => {
+                          setAmdDropdownOpen(!amdDropdownOpen);
+                          setNvidiaDropdownOpen(false);
+                          setIntelDropdownOpen(false);
+                        }}
+                        className={`w-full text-left px-3 py-2 text-sm rounded border transition-all flex items-center justify-between ${
+                          amdPresetId && amdPresets.some(p => p.id === amdPresetId)
+                            ? 'text-white'
+                            : 'text-gray-300'
+                        }`}
+                        style={{
+                          backgroundColor: theme.bgSecondary,
+                          borderColor: amdDropdownOpen ? theme.green : theme.border,
+                        }}
+                      >
+                        <span className="truncate">
+                          {amdPresetId && amdPresets.some(p => p.id === amdPresetId)
+                            ? amdPresets.find(p => p.id === amdPresetId)!.name
+                            : 'AMD'}
+                        </span>
+                        <ChevronDown className={`h-4 w-4 flex-shrink-0 ml-1 transition-transform ${
+                          amdDropdownOpen ? 'rotate-180' : ''
+                        }`} />
+                      </button>
+                      <div
+                        className={`absolute left-0 right-0 top-full mt-1 rounded-md overflow-hidden transition-all duration-200 z-50 ${
+                          amdDropdownOpen
+                            ? 'max-h-60 opacity-100'
+                            : 'max-h-0 opacity-0'
+                        }`}
+                        style={{ backgroundColor: theme.bgSecondary, border: `1px solid ${theme.border}` }}
+                      >
+                        {getFilteredGpuPresets('amd').map(preset => (
+                          <button
+                            key={preset.id}
+                            onClick={() => {
+                              setAmdPresetId(preset.id);
+                              setAmdDropdownOpen(false);
+                            }}
+                            className={`w-full text-left px-3 py-2 text-xs transition-colors ${
+                              amdPresetId === preset.id
+                                ? 'text-white'
+                                : 'text-gray-300 hover:bg-white/5'
+                            }`}
+                            style={{
+                              backgroundColor: amdPresetId === preset.id ? `${theme.green}30` : 'transparent',
+                            }}
+                          >
+                            <div className="font-medium">{preset.name}</div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Intel */}
+                  {intelPresets.length > 0 && (
+                    <div className="relative">
+                      <button
+                        onClick={() => {
+                          setIntelDropdownOpen(!intelDropdownOpen);
+                          setNvidiaDropdownOpen(false);
+                          setAmdDropdownOpen(false);
+                        }}
+                        className={`w-full text-left px-3 py-2 text-sm rounded border transition-all flex items-center justify-between ${
+                          intelPresetId && intelPresets.some(p => p.id === intelPresetId)
+                            ? 'text-white'
+                            : 'text-gray-300'
+                        }`}
+                        style={{
+                          backgroundColor: theme.bgSecondary,
+                          borderColor: intelDropdownOpen ? theme.green : theme.border,
+                        }}
+                      >
+                        <span className="truncate">
+                          {intelPresetId && intelPresets.some(p => p.id === intelPresetId)
+                            ? intelPresets.find(p => p.id === intelPresetId)!.name
+                            : 'Intel'}
+                        </span>
+                        <ChevronDown className={`h-4 w-4 flex-shrink-0 ml-1 transition-transform ${
+                          intelDropdownOpen ? 'rotate-180' : ''
+                        }`} />
+                      </button>
+                      <div
+                        className={`absolute left-0 right-0 top-full mt-1 rounded-md overflow-hidden transition-all duration-200 z-50 ${
+                          intelDropdownOpen
+                            ? 'max-h-60 opacity-100'
+                            : 'max-h-0 opacity-0'
+                        }`}
+                        style={{ backgroundColor: theme.bgSecondary, border: `1px solid ${theme.border}` }}
+                      >
+                        {getFilteredGpuPresets('intel').map(preset => (
+                          <button
+                            key={preset.id}
+                            onClick={() => {
+                              setIntelPresetId(preset.id);
+                              setIntelDropdownOpen(false);
+                            }}
+                            className={`w-full text-left px-3 py-2 text-xs transition-colors ${
+                              intelPresetId === preset.id
+                                ? 'text-white'
+                                : 'text-gray-300 hover:bg-white/5'
+                            }`}
+                            style={{
+                              backgroundColor: intelPresetId === preset.id ? `${theme.green}30` : 'transparent',
+                            }}
+                          >
+                            <div className="font-medium">{preset.name}</div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* CPU Mode with Preset Selection */}
+          <div
+            onClick={() => handleModeChange('cpu')}
+            className={`rounded-lg border p-4 transition-all cursor-pointer ${
+              mode === 'cpu' ? 'bg-primary/5' : 'hover:bg-white/5'
+            }`}
+            style={{
+              borderColor: mode === 'cpu' ? theme.green : theme.border,
+              backgroundColor: mode === 'cpu' ? `${theme.green}10` : undefined
+            }}
+          >
+            <div className="flex items-start space-x-3 mb-3">
+              <input
+                type="radio"
+                name="transcode-mode"
+                value="cpu"
+                checked={mode === 'cpu'}
+                onChange={() => handleModeChange('cpu')}
+                className="mt-1"
+                onClick={(e) => e.stopPropagation()}
+              />
+              <div className="flex-1">
+                <div className="flex items-center gap-2 font-medium text-white">
+                  <Cpu className="h-4 w-4" style={{ color: mode === 'cpu' ? theme.green : undefined }} />
+                  CPU
+                </div>
+                <p className="mt-1 text-sm text-gray-400">
+                  CPU encoding. Works on any system.
+                </p>
+              </div>
             </div>
+
+            {/* CPU Preset Dropdown */}
+            {mode === 'cpu' && (
+              <div className="ml-8 space-y-2" onClick={(e) => e.stopPropagation()}>
+                {/* CPU Presets List */}
+                <div className="space-y-1">
+                  {getFilteredPresets().map(preset => (
+                    <button
+                      key={preset.id}
+                      onClick={() => setCpuPresetId(preset.id)}
+                      className={`w-full text-left px-3 py-2 text-sm rounded border transition-all ${
+                        cpuPresetId === preset.id
+                          ? 'text-white'
+                          : 'text-gray-300 hover:bg-white/5'
+                      }`}
+                      style={{
+                        backgroundColor: cpuPresetId === preset.id ? `${theme.green}30` : theme.bgSecondary,
+                        borderColor: cpuPresetId === preset.id ? theme.green : theme.border,
+                      }}
+                    >
+                      <div className="font-medium">{preset.name}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Selected Preset Info */}
+        {currentPreset && mode !== 'auto' && (
+          <div className="rounded-lg p-3" style={{ backgroundColor: theme.bgSecondary, border: `1px solid ${theme.border}` }}>
+            <p className="text-sm font-medium text-white mb-1">Selected Preset</p>
+            <p className="text-xs text-gray-400">{currentPreset.name}</p>
+            <p className="text-xs text-gray-500 mt-1">{currentPreset.description}</p>
+          </div>
+        )}
+
+        {/* File List */}
+        <div className="space-y-2">
+          <h3 className="text-base font-semibold text-white">Files to Transcode ({files.length})</h3>
+          <div className="max-h-40 overflow-y-auto rounded-md border" style={{ borderColor: theme.border, backgroundColor: theme.bgSecondary }}>
+            <div className="grid grid-cols-12 gap-2 border-b p-2 text-xs font-medium text-gray-400" style={{ borderColor: theme.border, backgroundColor: theme.bgTertiary }}>
+              <div className="col-span-12">File Name</div>
+            </div>
+            {files.map((file) => (
+              <div
+                key={file.id}
+                className="border-b p-2 text-sm last:border-0"
+                style={{ borderColor: theme.border }}
+              >
+                <div className="truncate text-gray-300" title={file.filename}>
+                  {file.filename}
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       </div>

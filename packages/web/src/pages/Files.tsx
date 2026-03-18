@@ -198,9 +198,9 @@ export function Files() {
 
   // Smart transcode mutation
   const smartTranscodeMutation = useMutation({
-    mutationFn: async (mode: TranscodeMode) => {
+    mutationFn: async ({ mode, presetId }: { mode: TranscodeMode; presetId?: string }) => {
       const fileIds = Array.from(selectedFiles);
-      return api.createSmartJob({ file_ids: fileIds, mode });
+      return api.createSmartJob({ file_ids: fileIds, mode, preset_id: presetId });
     },
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['files'] });
@@ -849,8 +849,8 @@ export function Files() {
         open={showSmartTranscodeDialog}
         onOpenChange={setShowSmartTranscodeDialog}
         files={files.filter((f: any) => selectedFiles.has(f.id))}
-        onConfirm={async (mode) => {
-          await smartTranscodeMutation.mutateAsync(mode);
+        onConfirm={async (mode, presetId) => {
+          await smartTranscodeMutation.mutateAsync({ mode, presetId });
         }}
       />
     </div>
