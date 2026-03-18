@@ -1079,20 +1079,39 @@ export class EncorrDatabase {
       return null;
     }
 
-    // Extract directory and filename from the full filepath
-    const lastSlashIndex = libFile.filepath.lastIndexOf('/');
-    const lastBackslashIndex = libFile.filepath.lastIndexOf('\\');
-    const lastSeparator = Math.max(lastSlashIndex, lastBackslashIndex);
+    // Get the library to determine the root path
+    const library = this.getLibraryById(libFile.library_id);
+    if (!library) {
+      this.logger.warn(`Library ${libFile.library_id} not found`);
+      return null;
+    }
 
-    const directory = lastSeparator >= 0 ? libFile.filepath.substring(0, lastSeparator) : libFile.filepath;
-    const filename = lastSeparator >= 0 ? libFile.filepath.substring(lastSeparator + 1) : libFile.filepath;
+    // Calculate the relative path from the library root to the file
+    const libraryPath = library.path;
+    const filePath = libFile.filepath;
+
+    // Normalize paths for comparison
+    const normalizedLibPath = libraryPath.replace(/\\/g, '/').replace(/\/$/, '');
+    const normalizedFilePath = filePath.replace(/\\/g, '/');
+
+    // Calculate relative path (includes subdirectories)
+    let relativePath: string;
+    if (normalizedFilePath.startsWith(normalizedLibPath + '/')) {
+      relativePath = normalizedFilePath.substring(normalizedLibPath.length + 1);
+    } else if (normalizedFilePath === normalizedLibPath) {
+      relativePath = libFile.filename;
+    } else {
+      // Fallback: file is not under library path, use filename only
+      this.logger.warn(`File ${filePath} is not under library path ${libraryPath}, using filename only`);
+      relativePath = libFile.filename;
+    }
 
     // Get or create a folder mapping for this library
     // For library files, we'll create a special folder mapping
     let folderMapping = this.getAllFolderMappings().find(m => m.server_path === `library:${libFile.library_id}`);
 
     if (!folderMapping) {
-      // Create a folder mapping for this library
+      // Create a folder mapping for this library using the library's root path
       const mappingId = uuidv4();
       const now = Math.floor(Date.now() / 1000);
       const stmt = this.db.prepare(`
@@ -1108,15 +1127,15 @@ export class EncorrDatabase {
         return null;
       }
 
-      // Use the directory as node_path
-      stmt.run(mappingId, firstNodeId, `library:${libFile.library_id}`, directory, now);
+      // Use the library's root path as node_path (not the file's directory!)
+      stmt.run(mappingId, firstNodeId, `library:${libFile.library_id}`, libraryPath, now);
       folderMapping = this.getFolderMappingById(mappingId)!;
     }
 
     // Check if a file entry already exists for this library file
     const existingFile = this.db.prepare(`
       SELECT * FROM files WHERE folder_mapping_id = ? AND relative_path = ?
-    `).get(folderMapping!.id, filename) as { id: string } | undefined;
+    `).get(folderMapping!.id, relativePath) as { id: string } | undefined;
 
     let fileId: string;
 
@@ -1133,7 +1152,7 @@ export class EncorrDatabase {
       fileStmt.run(
         fileId,
         folderMapping!.id,
-        filename,
+        relativePath,
         libFile.filesize || 0,
         libFile.format || 'unknown',
         '', // codec - will be filled by analysis

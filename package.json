@@ -22,7 +22,7 @@
     "build:node": "tsc --build packages/shared packages/node",
     "start": "concurrently \"npm:start:server\" \"npm:start:web\"",
     "start:server": "node packages/server/dist/index.js",
-    "start:web": "http-server packages/web/dist -p 8100 --silent",
+    "start:web": "npx http-server packages/web/dist -p 8100 --silent",
     "start:node": "node packages/node/dist/cli/index.js start",
     "clean": "rm -rf packages/*/dist packages/*/node_modules",
     "lint": "eslint . --ext .ts,.tsx",
