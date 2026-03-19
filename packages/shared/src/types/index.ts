@@ -253,6 +253,7 @@ export interface FFmpegConfig {
   video_codec: 'h264' | 'h265';
   encoding_type: EncoderType;
   gpu_type?: GPUVendor;
+  gpu_device_id?: number;  // Specific GPU device ID to use (for multi-GPU systems)
   quality_mode: 'crf' | 'cq' | 'qp';
   quality: number; // CRF/CQ/QP value
   preset: string; // speed preset (slow, medium, fast, etc.)

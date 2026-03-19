@@ -428,6 +428,7 @@ export interface FFmpegConfig {
   video_codec: 'h264' | 'h265';
   encoding_type: EncoderType;
   gpu_type?: GPUVendor;
+  gpu_device_id?: number; // Specific GPU device ID to use (for multi-GPU systems)
   quality_mode: 'crf' | 'cq' | 'qp';
   quality: number;
   preset: string;
@@ -571,13 +572,13 @@ export function buildFFmpegArgs(options: FFmpegOptions): string[] {
     } else {
       // Fallback to standard hwaccel method
       console.log(`[buildFFmpegArgs] No explicit decoder found for ${sourceCodec} on ${config.gpu_type}, using hwaccel`);
-      useHwaccel(args, config.gpu_type);
+      useHwaccel(args, config.gpu_type, config.gpu_device_id);
       args.push('-i', input);
     }
   } else {
     // Standard hardware acceleration (hint-based, may still use software decoding)
     if (config.encoding_type === 'gpu' && config.gpu_type) {
-      useHwaccel(args, config.gpu_type);
+      useHwaccel(args, config.gpu_type, config.gpu_device_id);
     }
 
     // Input
@@ -651,6 +652,9 @@ export function buildFFmpegArgs(options: FFmpegOptions): string[] {
   // Log the generated command for debugging
   console.log(`[buildFFmpegArgs] Config:`, JSON.stringify(config, null, 2));
   console.log(`[buildFFmpegArgs] Hardware decode: ${config.encoding_type === 'gpu' ? config.gpu_type : 'none (software)'}`);
+  if (config.encoding_type === 'gpu' && config.gpu_device_id !== undefined) {
+    console.log(`[buildFFmpegArgs] GPU device ID: ${config.gpu_device_id}`);
+  }
   console.log(`[buildFFmpegArgs] Explicit decoder: ${config.use_explicit_decoder ? 'enabled' : 'disabled'}`);
   console.log(`[buildFFmpegArgs] Generated ${args.length} args:`, args.join(' '));
 
@@ -658,17 +662,27 @@ export function buildFFmpegArgs(options: FFmpegOptions): string[] {
 }
 
 // Helper function to add hwaccel arguments
-function useHwaccel(args: string[], gpuType: GPUVendor): void {
+function useHwaccel(args: string[], gpuType: GPUVendor, gpuDeviceId?: number): void {
   switch (gpuType) {
     case 'nvidia':
       args.push('-hwaccel', 'cuda');
+      if (gpuDeviceId !== undefined) {
+        args.push('-gpu', gpuDeviceId.toString());
+      }
       break;
     case 'intel':
       args.push('-hwaccel', 'qsv');
+      if (gpuDeviceId !== undefined) {
+        // For Intel QSV, use -init_hw_device to specify the GPU
+        args.push('-init_hw_device', `qsv:hw_${gpuDeviceId}`);
+      }
       break;
     case 'amd':
       // AMD on Windows uses d3d11va
       args.push('-hwaccel', 'd3d11va');
+      if (gpuDeviceId !== undefined) {
+        args.push('-init_hw_device', `d3d11va:hw_${gpuDeviceId}`);
+      }
       break;
   }
 }

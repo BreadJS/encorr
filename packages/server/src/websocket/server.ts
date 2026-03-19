@@ -1315,6 +1315,7 @@ export class EncorrWebSocketServer {
   }
 
   // Get available worker slots for a node
+  // Returns available slots per GPU device (index in array = GPU device ID)
   private getAvailableWorkers(node: any): { cpu: number; gpus: number[] } {
     const maxWorkers = node.max_workers || { cpu: 1, gpus: [] };
     const allJobs = this.db.getJobsByNode(node.id);
@@ -1325,39 +1326,52 @@ export class EncorrWebSocketServer {
     // Get pending assignments for this node (jobs sent but not yet confirmed)
     const pendingCount = this.pendingAssignments.get(node.id) || 0;
 
-    // Total in-flight jobs (both active and pending)
-    const totalInFlight = activeJobs.length + pendingCount;
-
     // Calculate available CPU workers
-    const availableCpu = Math.max(0, (maxWorkers.cpu || 0) - totalInFlight);
+    const availableCpu = Math.max(0, (maxWorkers.cpu || 0) - activeJobs.length - pendingCount);
 
-    // Calculate total GPU capacity
-    const totalGpuCapacity = (maxWorkers.gpus || []).reduce((sum: number, max: number) => sum + max, 0);
+    // Calculate available GPU slots per GPU device
+    const availableGpus = (maxWorkers.gpus || []).map((maxSlots: number, gpuIndex: number) => {
+      // Count jobs assigned to this specific GPU device
+      const jobsOnThisGpu = activeJobs.filter((j: any) => {
+        const preset = this.db.getPresetById(j.preset_id);
+        return preset?.config?.encoding_type === 'gpu' &&
+               preset?.config?.gpu_device_id === gpuIndex;
+      }).length;
 
-    // Available GPU slots (same logic)
-    const availableGpuSlots = Math.max(0, totalGpuCapacity - totalInFlight);
-
-    // Distribute available slots back to the GPU array format
-    const availableGpus = (maxWorkers.gpus || []).map((max: number) => {
-      // Simple distribution: each GPU gets its max, capped by what's available
-      // This isn't perfect but ensures total doesn't exceed capacity
-      return Math.min(max, availableGpuSlots);
+      // Available slots for this GPU
+      return Math.max(0, maxSlots - jobsOnThisGpu);
     });
 
-    // Detailed logging to see exactly which jobs are counted
+    // Detailed logging
     if (activeJobs.length > 0 || pendingCount > 0) {
-      this.logger.debug(`[WORKERS] Node ${node.name}: maxCpu=${maxWorkers.cpu || 0}, activeJobs=${activeJobs.length}, pending=${pendingCount}, totalInFlight=${totalInFlight}, availableCpu=${availableCpu}`);
-      if (activeJobs.length > 0) {
-        activeJobs.forEach(j => {
-          this.logger.debug(`[WORKERS]   Active job: ${j.id}, status=${j.status}`);
-        });
-      }
+      this.logger.debug(`[WORKERS] Node ${node.name}: maxCpu=${maxWorkers.cpu || 0}, activeJobs=${activeJobs.length}, pending=${pendingCount}, availableCpu=${availableCpu}`);
+      activeJobs.forEach(j => {
+        const preset = this.db.getPresetById(j.preset_id);
+        const gpuInfo = preset?.config?.encoding_type === 'gpu'
+          ? `, GPU ${preset.config.gpu_device_id ?? 'default'}`
+          : ', CPU';
+        this.logger.debug(`[WORKERS]   Active job: ${j.id}, status=${j.status}${gpuInfo}`);
+      });
     }
 
     return {
       cpu: availableCpu,
       gpus: availableGpus,
     };
+  }
+
+  // Find an available GPU device on a node (returns GPU device ID or null)
+  private findAvailableGpuDevice(node: any): number | null {
+    const available = this.getAvailableWorkers(node);
+
+    for (let gpuId = 0; gpuId < available.gpus.length; gpuId++) {
+      if (available.gpus[gpuId] > 0) {
+        this.logger.debug(`[GPU_SELECT] Node ${node.name}: Selected GPU ${gpuId} with ${available.gpus[gpuId]} available slot(s)`);
+        return gpuId;
+      }
+    }
+
+    return null;
   }
 
   private assignQueuedJobs(): void {
@@ -1450,13 +1464,23 @@ export class EncorrWebSocketServer {
 
     // Process transcode jobs (can use GPU or CPU)
     for (const { job, preset } of transcodeJobs) {
-      // Prefer GPU workers for transcode jobs
-      const nodeWithGpu = this.findNodeWithAvailableGpu(onlineNodes);
-      if (nodeWithGpu) {
-        if (this.assignJobToNodeWithRetry(nodeWithGpu, job, preset)) {
-          assignedCount++;
-          continue;
+      // Check if preset uses GPU encoding
+      const usesGpu = preset?.config?.encoding_type === 'gpu';
+
+      if (usesGpu) {
+        // Find node with available GPU workers
+        const nodeWithGpu = this.findNodeWithAvailableGpu(onlineNodes);
+        if (nodeWithGpu) {
+          // Find specific GPU device on this node
+          const gpuDeviceId = this.findAvailableGpuDevice(nodeWithGpu);
+          if (gpuDeviceId !== null) {
+            if (this.assignJobToNodeWithRetry(nodeWithGpu, job, preset, gpuDeviceId)) {
+              assignedCount++;
+              continue;
+            }
+          }
         }
+        this.logger.warn(`No GPU workers available for GPU job ${job.id}, falling back to CPU`);
       }
 
       // Fall back to CPU workers
@@ -1550,7 +1574,7 @@ export class EncorrWebSocketServer {
     return bestNode;
   }
 
-  private assignJobToNodeWithRetry(node: any, job: any, preset: any): boolean {
+  private assignJobToNodeWithRetry(node: any, job: any, preset: any, gpuDeviceId?: number): boolean {
     // Get job details
     const file = this.db.getFileById(job.file_id);
     if (!file) {
@@ -1626,11 +1650,17 @@ export class EncorrWebSocketServer {
     // Enhance preset config with source codec and explicit decoder flag for GPU
     const enhancedConfig = { ...preset.config };
 
-    // For GPU encoding, add source codec and enable explicit decoder
-    if (enhancedConfig.encoding_type === 'gpu' && sourceCodec) {
-      enhancedConfig.source_codec = sourceCodec;
-      enhancedConfig.use_explicit_decoder = true;
-      this.logger.info(`[GPU_PIPELINE] Job ${job.id}: Enhanced config with source_codec=${sourceCodec}, use_explicit_decoder=true for true GPU pipeline`);
+    // For GPU encoding, add source codec, GPU device ID, and enable explicit decoder
+    if (enhancedConfig.encoding_type === 'gpu') {
+      if (sourceCodec) {
+        enhancedConfig.source_codec = sourceCodec;
+        enhancedConfig.use_explicit_decoder = true;
+        this.logger.info(`[GPU_PIPELINE] Job ${job.id}: Enhanced config with source_codec=${sourceCodec}, use_explicit_decoder=true for true GPU pipeline`);
+      }
+      if (gpuDeviceId !== undefined) {
+        enhancedConfig.gpu_device_id = gpuDeviceId;
+        this.logger.info(`[GPU_DEVICE] Job ${job.id}: Assigned to GPU device ${gpuDeviceId}`);
+      }
     }
 
     // Determine source path
