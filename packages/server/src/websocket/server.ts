@@ -98,6 +98,8 @@ export class EncorrWebSocketServer {
   private heartbeatInterval: NodeJS.Timeout | null = null;
   // Track pending job assignments per node (node_id -> count of pending assignments)
   private pendingAssignments: Map<string, number> = new Map();
+  // Track GPU device usage per node (node_id -> Set of GPU device IDs in use)
+  private pendingGpuAssignments: Map<string, Set<number>> = new Map();
 
   constructor(options: WebSocketServerOptions) {
     this.db = options.db;
@@ -1188,13 +1190,23 @@ export class EncorrWebSocketServer {
             this.logger.info(`[JOB_ASSIGN] Job ${jobData.job_id} not assigned (current status: ${job?.status})`);
           }
 
-          // NOW decrement pending assignments after job status is updated
+          // NOW decrement pending assignments and clear GPU device tracking after job status is updated
           // This ensures the job is counted as 'assigned' or 'processing' before we decrement
           const jobAfterUpdate = this.db.getJobById(jobData.job_id);
           if (jobAfterUpdate && (jobAfterUpdate.status === 'processing' || jobAfterUpdate.status === 'assigned')) {
             const pending = this.pendingAssignments.get(nodeId) || 0;
             this.pendingAssignments.set(nodeId, Math.max(0, pending - 1));
             this.logger.info(`[JOB_ASSIGN_ACK] ACK for accepted job ${jobData.job_id}, decremented pending ${pending} -> ${Math.max(0, pending - 1)}`);
+
+            // Clear GPU device from pending tracking
+            const preset = this.db.getPresetById(jobData.preset_id);
+            if (preset?.config?.encoding_type === 'gpu' && preset.config.gpu_device_id !== undefined) {
+              const pendingGpus = this.pendingGpuAssignments.get(nodeId);
+              if (pendingGpus) {
+                pendingGpus.delete(preset.config.gpu_device_id);
+                this.logger.debug(`[JOB_ASSIGN_ACK] Cleared GPU ${preset.config.gpu_device_id} from pending tracking for node ${nodeId}`);
+              }
+            }
           } else {
             this.logger.info(`[JOB_ASSIGN_ACK] ACK received for job ${jobData.job_id}, job status: ${jobAfterUpdate?.status}, pending unchanged`);
           }
@@ -1206,6 +1218,17 @@ export class EncorrWebSocketServer {
           // Decrement pending assignment on failure
           const pending = this.pendingAssignments.get(nodeId) || 0;
           this.pendingAssignments.set(nodeId, Math.max(0, pending - 1));
+
+          // Clear GPU device from pending tracking on failure
+          const preset = this.db.getPresetById(jobData.preset_id);
+          if (preset?.config?.encoding_type === 'gpu' && preset.config.gpu_device_id !== undefined) {
+            const pendingGpus = this.pendingGpuAssignments.get(nodeId);
+            if (pendingGpus) {
+              pendingGpus.delete(preset.config.gpu_device_id);
+              this.logger.debug(`[JOB_ASSIGN_ACK] Cleared GPU ${preset.config.gpu_device_id} from pending tracking for node ${nodeId} (job failed)`);
+            }
+          }
+
           reject(error);
         },
         timeout,
@@ -1326,25 +1349,32 @@ export class EncorrWebSocketServer {
     // Get pending assignments for this node (jobs sent but not yet confirmed)
     const pendingCount = this.pendingAssignments.get(node.id) || 0;
 
+    // Get pending GPU assignments for this node
+    const pendingGpuDevices = this.pendingGpuAssignments.get(node.id) || new Set<number>();
+
     // Calculate available CPU workers
     const availableCpu = Math.max(0, (maxWorkers.cpu || 0) - activeJobs.length - pendingCount);
 
     // Calculate available GPU slots per GPU device
     const availableGpus = (maxWorkers.gpus || []).map((maxSlots: number, gpuIndex: number) => {
-      // Count jobs assigned to this specific GPU device
+      // Count jobs assigned to this specific GPU device from database
       const jobsOnThisGpu = activeJobs.filter((j: any) => {
         const preset = this.db.getPresetById(j.preset_id);
         return preset?.config?.encoding_type === 'gpu' &&
                preset?.config?.gpu_device_id === gpuIndex;
       }).length;
 
+      // Count pending assignments to this GPU device from in-memory tracking
+      const pendingOnThisGpu = pendingGpuDevices.has(gpuIndex) ? 1 : 0;
+
       // Available slots for this GPU
-      return Math.max(0, maxSlots - jobsOnThisGpu);
+      return Math.max(0, maxSlots - jobsOnThisGpu - pendingOnThisGpu);
     });
 
     // Detailed logging
-    if (activeJobs.length > 0 || pendingCount > 0) {
+    if (activeJobs.length > 0 || pendingCount > 0 || pendingGpuDevices.size > 0) {
       this.logger.debug(`[WORKERS] Node ${node.name}: maxCpu=${maxWorkers.cpu || 0}, activeJobs=${activeJobs.length}, pending=${pendingCount}, availableCpu=${availableCpu}`);
+      this.logger.debug(`[WORKERS] Pending GPU devices: [${Array.from(pendingGpuDevices).join(', ')}]`);
       activeJobs.forEach(j => {
         const preset = this.db.getPresetById(j.preset_id);
         const gpuInfo = preset?.config?.encoding_type === 'gpu'
@@ -1693,6 +1723,15 @@ export class EncorrWebSocketServer {
     }
 
     this.logger.debug(`Assigning job ${job.id} to node ${node.name} (${node.id})${isAnalyzeJob ? ' (analyze only)' : ''}`);
+
+    // Track GPU device usage in pending assignments BEFORE sending to node
+    // This prevents multiple jobs from being assigned to the same GPU device simultaneously
+    if (enhancedConfig.encoding_type === 'gpu' && enhancedConfig.gpu_device_id !== undefined) {
+      const pendingGpus = this.pendingGpuAssignments.get(node.id) || new Set<number>();
+      pendingGpus.add(enhancedConfig.gpu_device_id);
+      this.pendingGpuAssignments.set(node.id, pendingGpus);
+      this.logger.debug(`[GPU_TRACK] Added GPU ${enhancedConfig.gpu_device_id} to pending tracking for node ${node.id}`);
+    }
 
     this.assignJobToNode(node.id, {
       job_id: job.id,
