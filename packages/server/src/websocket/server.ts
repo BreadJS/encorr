@@ -1344,26 +1344,69 @@ export class EncorrWebSocketServer {
   }
 
   private findNodeWithAvailableCpu(nodes: any[]): any | null {
+    // Find the node with available CPU workers (load balanced)
+    let bestNode: any | null = null;
+    let maxAvailableCpu = 0;
+    let minActiveJobs = Infinity;
+
     for (const node of nodes) {
       const available = this.getAvailableWorkers(node);
+
       if (available.cpu > 0) {
-        return node;
+        const activeJobs = this.db.getJobsByNode(node.id).filter(
+          (j: any) => j.status === 'assigned' || j.status === 'processing'
+        ).length;
+
+        // Prefer node with more available CPU slots
+        // If tied, prefer node with fewer active jobs
+        if (available.cpu > maxAvailableCpu ||
+            (available.cpu === maxAvailableCpu && activeJobs < minActiveJobs)) {
+          maxAvailableCpu = available.cpu;
+          minActiveJobs = activeJobs;
+          bestNode = node;
+        }
       }
     }
-    return null;
+
+    if (bestNode) {
+      this.logger.debug(`[CPU_AVAIL] Node ${bestNode.name} selected with ${maxAvailableCpu} CPU slots available (active jobs: ${minActiveJobs})`);
+    }
+
+    return bestNode;
   }
 
   private findNodeWithAvailableGpu(nodes: any[]): any | null {
+    // Find the node with the MOST available GPU slots (load balancing)
+    // When tied, prefer the node with fewer active jobs (better load distribution)
+    let bestNode: any | null = null;
+    let maxAvailableSlots = 0;
+    let minActiveJobs = Infinity;
+
     for (const node of nodes) {
       const available = this.getAvailableWorkers(node);
-      // Check if ANY GPU has available slots
       const totalGpuSlotsAvailable = available.gpus.reduce((sum: number, slots: number) => sum + slots, 0);
+
       if (totalGpuSlotsAvailable > 0) {
-        this.logger.debug(`[GPU_AVAIL] Node ${node.name} has ${totalGpuSlotsAvailable} GPU slots available`);
-        return node;
+        const activeJobs = this.db.getJobsByNode(node.id).filter(
+          (j: any) => j.status === 'assigned' || j.status === 'processing'
+        ).length;
+
+        // Prefer node with more available slots
+        // If tied on slots, prefer node with fewer active jobs
+        if (totalGpuSlotsAvailable > maxAvailableSlots ||
+            (totalGpuSlotsAvailable === maxAvailableSlots && activeJobs < minActiveJobs)) {
+          maxAvailableSlots = totalGpuSlotsAvailable;
+          minActiveJobs = activeJobs;
+          bestNode = node;
+        }
       }
     }
-    return null;
+
+    if (bestNode) {
+      this.logger.debug(`[GPU_AVAIL] Node ${bestNode.name} selected with ${maxAvailableSlots} GPU slots available (active jobs: ${minActiveJobs})`);
+    }
+
+    return bestNode;
   }
 
   private assignJobToNodeWithRetry(node: any, job: any, preset: any): boolean {
