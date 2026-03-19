@@ -11,7 +11,7 @@
     "dev:node": "concurrently \"npm:watch:shared\" \"npm:dev:node:start\"",
     "dev:server": "concurrently \"npm:watch:shared\" \"npm:dev:server:start\"",
     "dev:web": "concurrently \"npm:watch:shared\" \"npm:dev:web:start\"",
-    "watch:shared": "tsc --build --watch packages/shared",
+    "watch:shared": "tsc --build --force --watch packages/shared",
     "dev:server:start": "tsx watch packages/server/src/index.ts",
     "dev:web:start": "cd packages/web && vite --host 0.0.0.0",
     "dev:node:start": "tsx watch packages/node/src/cli/index.ts start",
