@@ -499,7 +499,7 @@ export class EncorrDatabase {
       data.node_id,
       normalizePath(data.server_path),
       data.node_path,
-      data.watch ?? true,
+      data.watch ? 1 : 0,
       now
     );
 

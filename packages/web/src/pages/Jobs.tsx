@@ -571,9 +571,9 @@ export function Jobs() {
                   >
                     <div className="p-4">
                       {/* Device Settings - Simple List */}
-                      <div className="flex flex-wrap gap-x-8 gap-y-4">
+                      <div className="flex flex-wrap gap-y-4">
                         {/* CPU Device */}
-                        <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-3 pr-8">
                           <div className="flex items-center gap-2 w-32 flex-shrink-0">
                             <Cpu className="h-4 w-4" style={{ color: getVendorColor('cpu', node.system_info?.cpu) }} />
                             <div>
@@ -621,16 +621,14 @@ export function Jobs() {
                           </div>
                         </div>
 
-                        {/* Simple divider after CPU if GPUs exist */}
-                        {node.system_info?.gpus && node.system_info.gpus.length > 0 && (
-                          <div className="hidden sm:block w-px bg-[#39363a]" />
-                        )}
-
-                        {/* GPU Devices */}
+                        {/* Divider + GPU Devices */}
                         {node.system_info?.gpus && node.system_info.gpus.length > 0 && node.system_info.gpus.map((gpu: any, index: number) => {
+                          const isLast = index === node.system_info.gpus.length - 1;
                           return (
                             <ReactFragment key={`gpu-${index}`}>
-                              <div className="flex items-center gap-3">
+                              {/* Separator before GPU (not after last) */}
+                              {!isLast && <div className="hidden sm:block w-px bg-[#39363a] mr-8" />}
+                              <div className={`flex items-center gap-3 ${!isLast ? 'pr-8' : ''}`}>
                                 <div className="flex items-center gap-2 w-32 flex-shrink-0">
                                 <Zap className="h-4 w-4" style={{ color: getVendorColor('gpu', undefined, gpu.vendor) }} />
                                 <div>
@@ -675,10 +673,6 @@ export function Jobs() {
                                 </button>
                               </div>
                             </div>
-                            {/* Divider after GPU (except last) */}
-                            {index < node.system_info.gpus.length - 1 && (
-                              <div className="hidden sm:block w-px bg-[#39363a]" />
-                            )}
                             </ReactFragment>
                           );
                         })}
