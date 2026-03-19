@@ -5,7 +5,7 @@ import { StatusBadge } from '@/components/ui/Badge';
 import { Dialog } from '@/components/ui/Dialog';
 import { RefreshCw, Cpu, HardDrive, Zap, Pause, Play, Trash2, ChevronLeft, ChevronRight, X, Settings, Plus, Minus, AlertTriangle, Scan, Film } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useMemo, useState } from 'react';
+import { useMemo, useState, Fragment as ReactFragment } from 'react';
 import { useWebSocket } from '@/hooks/useWebSocket';
 
 export function Jobs() {
@@ -569,117 +569,120 @@ export function Jobs() {
                       expandedNodeSettings === node.id ? 'max-h-[800px] overflow-visible' : 'max-h-0 overflow-hidden'
                     }`}
                   >
-                    <div className="p-4 space-y-3">
-                      {/* CPU Device Line */}
-                      <div className="flex items-center gap-6 py-2">
-                        {/* Device Info */}
-                        <div className="flex items-center gap-3 w-56 flex-shrink-0">
-                          <Cpu className="h-5 w-5 text-gray-400" />
-                          <div>
-                            <div className="text-sm font-medium text-white">CPU</div>
-                            <div className="text-xs text-gray-500">{node.system_info?.cpu_cores || '—'} cores</div>
-                          </div>
-                        </div>
-
-                        {/* Amount of Jobs */}
+                    <div className="p-4">
+                      {/* Device Settings - Simple List */}
+                      <div className="flex flex-wrap gap-x-8 gap-y-4">
+                        {/* CPU Device */}
                         <div className="flex items-center gap-3">
-                          <button
-                            onClick={() => {
-                              const currentValue = nodeWorkers[node.id]?.cpu ?? node.max_workers?.cpu ?? 1;
-                              if (currentValue > 0) {
-                                const newValue = currentValue - 1;
-                                saveNodeWorkers(node.id, newValue, nodeWorkers[node.id]?.gpus || []);
-                              }
-                            }}
-                            disabled={(nodeWorkers[node.id]?.cpu ?? node.max_workers?.cpu ?? 1) <= 0}
-                            className="h-7 w-7 rounded-full flex items-center justify-center transition-all disabled:cursor-not-allowed"
-                            style={{
-                              backgroundColor: (nodeWorkers[node.id]?.cpu ?? node.max_workers?.cpu ?? 1) <= 0 ? '#38363a' : '#4a454a',
-                              color: (nodeWorkers[node.id]?.cpu ?? node.max_workers?.cpu ?? 1) <= 0 ? '#6b7280' : '#ffffff'
-                            }}
-                          >
-                            <Minus className="h-3 w-3" />
-                          </button>
-                          <div className="w-16 text-center">
-                            <span className="text-xl font-bold text-white">{nodeWorkers[node.id]?.cpu ?? node.max_workers?.cpu ?? 1}</span>
-                            <span className="text-xs text-gray-500 ml-1">jobs</span>
-                          </div>
-                          <button
-                            onClick={() => {
-                              const currentValue = nodeWorkers[node.id]?.cpu ?? node.max_workers?.cpu ?? 1;
-                              const maxCpu = node.system_info?.cpu_cores || 1;
-                              if (currentValue < maxCpu) {
-                                const newValue = currentValue + 1;
-                                saveNodeWorkers(node.id, newValue, nodeWorkers[node.id]?.gpus || []);
-                              }
-                            }}
-                            disabled={(nodeWorkers[node.id]?.cpu ?? node.max_workers?.cpu ?? 1) >= (node.system_info?.cpu_cores || 1)}
-                            className="h-7 w-7 rounded-full flex items-center justify-center transition-all disabled:cursor-not-allowed"
-                            style={{
-                              backgroundColor: (nodeWorkers[node.id]?.cpu ?? node.max_workers?.cpu ?? 1) >= (node.system_info?.cpu_cores || 1) ? '#38363a' : getVendorColor('cpu', node.system_info?.cpu),
-                              color: '#ffffff'
-                            }}
-                          >
-                            <Plus className="h-3 w-3" />
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* GPU Device Lines */}
-                      {node.system_info?.gpus && node.system_info.gpus.length > 0 && node.system_info.gpus.map((gpu: any, index: number) => {
-                        return (
-                          <div key={`gpu-${index}`} className="flex items-center gap-6 py-2">
-                            {/* Device Info */}
-                            <div className="flex items-center gap-3 w-56 flex-shrink-0">
-                              <Zap className="h-5 w-5" style={{ color: getVendorColor('gpu', undefined, gpu.vendor) }} />
-                              <div>
-                                <div className="text-sm font-medium text-white">GPU {index + 1}</div>
-                                <div className="text-xs text-gray-500 truncate max-w-36" title={gpu.name}>{gpu.name}</div>
-                              </div>
+                          <div className="flex items-center gap-2 w-32 flex-shrink-0">
+                            <Cpu className="h-4 w-4" style={{ color: getVendorColor('cpu', node.system_info?.cpu) }} />
+                            <div>
+                              <div className="text-sm font-medium text-white">CPU</div>
+                              <div className="text-xs text-gray-500">{node.system_info?.cpu_cores || '—'} cores</div>
                             </div>
-
-                          {/* Amount of Jobs */}
-                          <div className="flex items-center gap-3">
+                          </div>
+                          <div className="flex items-center gap-2">
                             <button
                               onClick={() => {
-                                const currentGpus = nodeWorkers[node.id]?.gpus || [];
-                                const currentValue = currentGpus[index] || 0;
+                                const currentValue = nodeWorkers[node.id]?.cpu ?? node.max_workers?.cpu ?? 1;
                                 if (currentValue > 0) {
-                                  const newGpus = [...currentGpus];
-                                  newGpus[index] = currentValue - 1;
-                                  saveNodeWorkers(node.id, nodeWorkers[node.id]?.cpu ?? 1, newGpus);
+                                  const newValue = currentValue - 1;
+                                  saveNodeWorkers(node.id, newValue, nodeWorkers[node.id]?.gpus || []);
                                 }
                               }}
-                              disabled={(nodeWorkers[node.id]?.gpus?.[index] || 0) <= 0}
-                              className="h-7 w-7 rounded-full flex items-center justify-center transition-all disabled:cursor-not-allowed"
+                              disabled={(nodeWorkers[node.id]?.cpu ?? node.max_workers?.cpu ?? 1) <= 0}
+                              className="h-6 w-6 rounded-full flex items-center justify-center transition-all disabled:cursor-not-allowed"
                               style={{
-                                backgroundColor: (nodeWorkers[node.id]?.gpus?.[index] || 0) <= 0 ? '#38363a' : '#4a454a',
-                                color: (nodeWorkers[node.id]?.gpus?.[index] || 0) <= 0 ? '#6b7280' : '#ffffff'
+                                backgroundColor: (nodeWorkers[node.id]?.cpu ?? node.max_workers?.cpu ?? 1) <= 0 ? '#38363a' : '#4a454a',
                               }}
                             >
-                              <Minus className="h-3 w-3" />
+                              <Minus className="h-2.5 w-2.5" />
                             </button>
-                            <div className="w-16 text-center">
-                              <span className="text-xl font-bold text-white">{nodeWorkers[node.id]?.gpus?.[index] || 0}</span>
-                              <span className="text-xs text-gray-500 ml-1">jobs</span>
+                            <div className="w-12 text-center">
+                              <span className="text-lg font-bold text-white">{nodeWorkers[node.id]?.cpu ?? node.max_workers?.cpu ?? 1}</span>
                             </div>
                             <button
                               onClick={() => {
-                                const currentGpus = nodeWorkers[node.id]?.gpus || [];
-                                const currentValue = currentGpus[index] || 0;
-                                const newGpus = [...currentGpus];
-                                newGpus[index] = currentValue + 1;
-                                saveNodeWorkers(node.id, nodeWorkers[node.id]?.cpu ?? 1, newGpus);
+                                const currentValue = nodeWorkers[node.id]?.cpu ?? node.max_workers?.cpu ?? 1;
+                                const maxCpu = node.system_info?.cpu_cores || 1;
+                                if (currentValue < maxCpu) {
+                                  const newValue = currentValue + 1;
+                                  saveNodeWorkers(node.id, newValue, nodeWorkers[node.id]?.gpus || []);
+                                }
                               }}
-                              className="h-7 w-7 rounded-full flex items-center justify-center transition-all"
-                              style={{ backgroundColor: getVendorColor('gpu', undefined, gpu.vendor), color: '#ffffff' }}
+                              disabled={(nodeWorkers[node.id]?.cpu ?? node.max_workers?.cpu ?? 1) >= (node.system_info?.cpu_cores || 1)}
+                              className="h-6 w-6 rounded-full flex items-center justify-center transition-all disabled:cursor-not-allowed"
+                              style={{
+                                backgroundColor: (nodeWorkers[node.id]?.cpu ?? node.max_workers?.cpu ?? 1) >= (node.system_info?.cpu_cores || 1) ? '#38363a' : getVendorColor('cpu', node.system_info?.cpu),
+                              }}
                             >
-                              <Plus className="h-3 w-3" />
+                              <Plus className="h-2.5 w-2.5" />
                             </button>
                           </div>
                         </div>
-                        );
-                      })}
+
+                        {/* Simple divider after CPU if GPUs exist */}
+                        {node.system_info?.gpus && node.system_info.gpus.length > 0 && (
+                          <div className="hidden sm:block w-px bg-[#39363a]" />
+                        )}
+
+                        {/* GPU Devices */}
+                        {node.system_info?.gpus && node.system_info.gpus.length > 0 && node.system_info.gpus.map((gpu: any, index: number) => {
+                          return (
+                            <ReactFragment key={`gpu-${index}`}>
+                              <div className="flex items-center gap-3">
+                                <div className="flex items-center gap-2 w-32 flex-shrink-0">
+                                <Zap className="h-4 w-4" style={{ color: getVendorColor('gpu', undefined, gpu.vendor) }} />
+                                <div>
+                                  <div className="text-sm font-medium text-white">GPU {index + 1}</div>
+                                  <div className="text-xs text-gray-500 truncate max-w-28" title={gpu.name}>{gpu.name}</div>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  onClick={() => {
+                                    const currentGpus = nodeWorkers[node.id]?.gpus || [];
+                                    const currentValue = currentGpus[index] || 0;
+                                    if (currentValue > 0) {
+                                      const newGpus = [...currentGpus];
+                                      newGpus[index] = currentValue - 1;
+                                      saveNodeWorkers(node.id, nodeWorkers[node.id]?.cpu ?? 1, newGpus);
+                                    }
+                                  }}
+                                  disabled={(nodeWorkers[node.id]?.gpus?.[index] || 0) <= 0}
+                                  className="h-6 w-6 rounded-full flex items-center justify-center transition-all disabled:cursor-not-allowed"
+                                  style={{
+                                    backgroundColor: (nodeWorkers[node.id]?.gpus?.[index] || 0) <= 0 ? '#38363a' : '#4a454a',
+                                  }}
+                                >
+                                  <Minus className="h-2.5 w-2.5" />
+                                </button>
+                                <div className="w-12 text-center">
+                                  <span className="text-lg font-bold text-white">{nodeWorkers[node.id]?.gpus?.[index] || 0}</span>
+                                </div>
+                                <button
+                                  onClick={() => {
+                                    const currentGpus = nodeWorkers[node.id]?.gpus || [];
+                                    const currentValue = currentGpus[index] || 0;
+                                    const newGpus = [...currentGpus];
+                                    newGpus[index] = currentValue + 1;
+                                    saveNodeWorkers(node.id, nodeWorkers[node.id]?.cpu ?? 1, newGpus);
+                                  }}
+                                  className="h-6 w-6 rounded-full flex items-center justify-center transition-all"
+                                  style={{ backgroundColor: getVendorColor('gpu', undefined, gpu.vendor) }}
+                                >
+                                  <Plus className="h-2.5 w-2.5" />
+                                </button>
+                              </div>
+                            </div>
+                            {/* Divider after GPU (except last) */}
+                            {index < node.system_info.gpus.length - 1 && (
+                              <div className="hidden sm:block w-px bg-[#39363a]" />
+                            )}
+                            </ReactFragment>
+                          );
+                        })}
+                      </div>
                     </div>
                   </div>
 
@@ -755,39 +758,37 @@ export function Jobs() {
                         </h2>
                         <div className="flex items-center gap-4 mt-2 text-sm text-gray-400">
                           <span className="flex items-center gap-1">
-                            <Cpu className="h-3 w-3" />
+                            <Cpu className="h-3 w-3" style={{ color: getVendorColor('cpu', node.system_info?.cpu) }} />
                             {node.system_info?.cpu || 'Unknown CPU'}
                           </span>
                           <span className="flex items-center gap-1">
                             <HardDrive className="h-3 w-3" />
                             {formatRAM(node.system_info?.ram_total || 0)}
                           </span>
-                          {node.system_info?.gpus && node.system_info.gpus.length > 0 && (
-                            <span className="flex items-center gap-1">
-                              <Zap className="h-3 w-3" />
-                              {node.system_info.gpus.map((gpu: any, i: number) => {
-                                // Only add vendor prefix if name doesn't already start with vendor or common abbreviations
-                                const nameLower = gpu.name?.toLowerCase() || '';
-                                const vendorLower = gpu.vendor?.toLowerCase() || '';
+                          {node.system_info?.gpus && node.system_info.gpus.length > 0 &&
+                            node.system_info.gpus.map((gpu: any, i: number) => {
+                              // Only add vendor prefix if name doesn't already start with vendor or common abbreviations
+                              const nameLower = gpu.name?.toLowerCase() || '';
+                              const vendorLower = gpu.vendor?.toLowerCase() || '';
 
-                                // Check if vendor is already in name (including common abbreviations)
-                                const vendorInName =
-                                  nameLower.startsWith(vendorLower) ||
-                                  (vendorLower.includes('nvidia') && nameLower.startsWith('nvidia')) ||
-                                  (vendorLower.includes('amd') || vendorLower.includes('advanced micro')) && nameLower.startsWith('amd') ||
-                                  (vendorLower.includes('intel') && nameLower.startsWith('intel')) ||
-                                  (vendorLower.includes('apple') && nameLower.startsWith('apple'));
+                              // Check if vendor is already in name (including common abbreviations)
+                              const vendorInName =
+                                nameLower.startsWith(vendorLower) ||
+                                (vendorLower.includes('nvidia') && nameLower.startsWith('nvidia')) ||
+                                (vendorLower.includes('amd') || vendorLower.includes('advanced micro')) && nameLower.startsWith('amd') ||
+                                (vendorLower.includes('intel') && nameLower.startsWith('intel')) ||
+                                (vendorLower.includes('apple') && nameLower.startsWith('apple'));
 
-                                const needsPrefix = vendorLower && !vendorInName;
-                                const displayName = `${needsPrefix ? (gpu.vendor || '') + ' ' : ''}${gpu.name || 'Unknown GPU'}`;
-                                return (
-                                  <span key={i}>
-                                    {displayName} ({formatVRAM(gpu.memory)})
-                                  </span>
-                                );
-                              })}
-                            </span>
-                          )}
+                              const needsPrefix = vendorLower && !vendorInName;
+                              const displayName = `${needsPrefix ? (gpu.vendor || '') + ' ' : ''}${gpu.name || 'Unknown GPU'}`;
+                              return (
+                                <span key={i} className="flex items-center gap-1">
+                                  <Zap className="h-3 w-3" style={{ color: getVendorColor('gpu', undefined, gpu.vendor) }} />
+                                  {displayName} ({formatVRAM(gpu.memory)})
+                                </span>
+                              );
+                            })
+                          }
                         </div>
                       </div>
                     </div>
@@ -799,7 +800,7 @@ export function Jobs() {
                         {/* CPU */}
                         <div className="text-left">
                           <div className="flex items-start gap-2 mb-1">
-                            <Cpu className="h-3 w-3 text-gray-400 mt-0.5" />
+                            <Cpu className="h-3 w-3 mt-0.5" style={{ color: getVendorColor('cpu', node.system_info?.cpu) }} />
                             <span className="text-xs text-gray-400">CPU</span>
                           </div>
                           <div className="flex items-center gap-2">
