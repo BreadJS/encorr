@@ -2,7 +2,7 @@
 // Smart Transcode Dialog Component
 // ============================================================================
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Dialog } from '@/components/ui/Dialog';
 import { Button } from '@/components/ui/Button';
@@ -119,7 +119,7 @@ export function SmartTranscodeDialog({
 }: SmartTranscodeDialogProps) {
   const [mode, setMode] = useState<TranscodeMode>('auto');
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [codecFilter, setCodecFilter] = useState<'all' | 'h264' | 'h265'>('all');
+  const [selectedQuickSelectPresetId, setSelectedQuickSelectPresetId] = useState<string>('');
 
   // GPU dropdown states
   const [nvidiaDropdownOpen, setNvidiaDropdownOpen] = useState(false);
@@ -136,6 +136,13 @@ export function SmartTranscodeDialog({
   const { data: apiPresets = [] } = useQuery({
     queryKey: ['presets'],
     queryFn: () => api.getPresets(),
+    refetchOnWindowFocus: false,
+  });
+
+  // Fetch Quick Select Presets from API
+  const { data: quickSelectPresets = [] } = useQuery({
+    queryKey: ['quick-select-presets'],
+    queryFn: () => api.getQuickSelectPresets(),
     refetchOnWindowFocus: false,
   });
 
@@ -185,6 +192,13 @@ export function SmartTranscodeDialog({
 
   // Initialize vendor-specific preset defaults
   const initializeVendorPresets = () => {
+    // Try to use the first Quick Select Preset if available
+    if (quickSelectPresets.length > 0) {
+      applyQuickSelectPreset(quickSelectPresets[0]);
+      return;
+    }
+
+    // Fallback to manual initialization
     // NVIDIA default - H.265
     const nvidiaH265 = nvidiaPresets.find(p => getVideoCodec(p) === 'h265')
                       || nvidiaPresets.find(p => getVideoCodec(p) === 'h264')
@@ -208,20 +222,22 @@ export function SmartTranscodeDialog({
     setCpuPresetId(cpuH265?.id || cpuPresets[0]?.id || '');
   };
 
-  // Set codec default for all GPU vendors (for GPU mode codec buttons)
-  const setGpuCodecDefault = (codec: 'h264' | 'h265') => {
-    // Set NVIDIA default for this codec
-    const nvidiaCodec = nvidiaPresets.find(p => getVideoCodec(p) === codec);
-    if (nvidiaCodec) setNvidiaPresetId(nvidiaCodec.id);
-
-    // Set AMD default for this codec
-    const amdCodec = amdPresets.find(p => getVideoCodec(p) === codec);
-    if (amdCodec) setAmdPresetId(amdCodec.id);
-
-    // Set Intel default for this codec
-    const intelCodec = intelPresets.find(p => getVideoCodec(p) === codec);
-    if (intelCodec) setIntelPresetId(intelCodec.id);
+  // Apply Quick Select Preset to vendor dropdowns
+  const applyQuickSelectPreset = (qsPreset: any) => {
+    if (qsPreset.nvidia_preset_id) setNvidiaPresetId(qsPreset.nvidia_preset_id);
+    if (qsPreset.amd_preset_id) setAmdPresetId(qsPreset.amd_preset_id);
+    if (qsPreset.intel_preset_id) setIntelPresetId(qsPreset.intel_preset_id);
+    if (qsPreset.cpu_preset_id) setCpuPresetId(qsPreset.cpu_preset_id);
+    setSelectedQuickSelectPresetId(qsPreset.id);
   };
+
+  // Auto-apply first Quick Select Preset when loaded
+  useEffect(() => {
+    if (quickSelectPresets.length > 0 && !selectedQuickSelectPresetId) {
+      initializeVendorPresets();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quickSelectPresets]);
 
   // Update selected preset when mode changes
   const handleModeChange = (newMode: TranscodeMode) => {
@@ -285,11 +301,7 @@ export function SmartTranscodeDialog({
   };
 
   const getFilteredPresets = () => {
-    let presets = mode === 'gpu' ? gpuPresets : cpuPresets;
-    if (codecFilter !== 'all') {
-      presets = presets.filter(p => getVideoCodec(p) === codecFilter);
-    }
-    return presets;
+    return mode === 'gpu' ? gpuPresets : cpuPresets;
   };
 
   // Get presets for each GPU type dropdown (no codec filtering for vendor dropdowns)
@@ -414,37 +426,31 @@ export function SmartTranscodeDialog({
                 onClick={(e) => e.stopPropagation()}
                 style={{ overflow: (nvidiaDropdownOpen || amdDropdownOpen || intelDropdownOpen) ? 'visible' : undefined }}
               >
-                {/* Codec Filter Buttons - Set defaults for all vendors */}
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => {
-                      setCodecFilter('h265');
-                      setGpuCodecDefault('h265');
-                    }}
-                    className={`px-3 py-1 text-xs rounded transition-colors ${
-                      codecFilter === 'h265' ? 'text-white' : 'text-gray-300 hover:bg-white/5'
-                    }`}
-                    style={{
-                      backgroundColor: codecFilter === 'h265' ? theme.green : theme.bgTertiary,
-                    }}
-                  >
-                    H.265
-                  </button>
-                  <button
-                    onClick={() => {
-                      setCodecFilter('h264');
-                      setGpuCodecDefault('h264');
-                    }}
-                    className={`px-3 py-1 text-xs rounded transition-colors ${
-                      codecFilter === 'h264' ? 'text-white' : 'text-gray-300 hover:bg-white/5'
-                    }`}
-                    style={{
-                      backgroundColor: codecFilter === 'h264' ? theme.green : theme.bgTertiary,
-                    }}
-                  >
-                    H.264
-                  </button>
-                </div>
+                {/* Quick Select Presets */}
+                {quickSelectPresets.length > 0 && (
+                  <div className="mb-3">
+                    <p className="text-xs text-gray-400 mb-2">Quick Select Presets:</p>
+                    <div className="flex flex-wrap gap-2">
+                      {quickSelectPresets.map((qsPreset: any) => (
+                        <button
+                          key={qsPreset.id}
+                          onClick={() => applyQuickSelectPreset(qsPreset)}
+                          className={`px-3 py-1.5 text-xs rounded transition-all flex items-center gap-1.5 ${
+                            selectedQuickSelectPresetId === qsPreset.id
+                              ? 'text-white'
+                              : 'text-gray-300 hover:bg-white/5'
+                          }`}
+                          style={{
+                            backgroundColor: selectedQuickSelectPresetId === qsPreset.id ? theme.green : theme.bgTertiary,
+                          }}
+                        >
+                          <Zap className="h-3 w-3" />
+                          <span>{qsPreset.name}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 {/* GPU Type Dropdowns */}
                 <div className="flex flex-col gap-2">

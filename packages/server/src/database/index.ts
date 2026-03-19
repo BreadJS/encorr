@@ -279,6 +279,48 @@ export class EncorrDatabase {
       );
       this.logger.info(`Seeded built-in preset: ${preset.name}`);
     }
+
+    // Seed built-in Quick Select Presets
+    const builtinQuickSelectPresets = [
+      {
+        id: 'quick-select-h264',
+        name: 'H.264 Quick Select',
+        description: 'H.264 encoding for all GPU vendors',
+        nvidia_preset_id: 'builtin-nvidia-h264-gpu',
+        amd_preset_id: 'builtin-amd-h264-gpu',
+        intel_preset_id: 'builtin-intel-h264-gpu',
+        cpu_preset_id: 'builtin-fast-h264-cpu',
+      },
+      {
+        id: 'quick-select-h265',
+        name: 'H.265 Quick Select',
+        description: 'H.265 encoding for all GPU vendors',
+        nvidia_preset_id: 'builtin-nvidia-h265-gpu',
+        amd_preset_id: 'builtin-amd-h265-gpu',
+        intel_preset_id: 'builtin-intel-h265-gpu',
+        cpu_preset_id: 'builtin-high-quality-h265-cpu',
+      },
+    ];
+
+    for (const qsPreset of builtinQuickSelectPresets) {
+      // Use INSERT OR REPLACE to update existing Quick Select Presets
+      const stmt = this.db.prepare(`
+        INSERT OR REPLACE INTO quick_select_presets (id, name, description, is_builtin, nvidia_preset_id, amd_preset_id, intel_preset_id, cpu_preset_id, created_at)
+        VALUES (?, ?, ?, 1, ?, ?, ?, ?, COALESCE((SELECT created_at FROM quick_select_presets WHERE id = ?), ?))
+      `);
+      stmt.run(
+        qsPreset.id,
+        qsPreset.name,
+        qsPreset.description,
+        qsPreset.nvidia_preset_id,
+        qsPreset.amd_preset_id,
+        qsPreset.intel_preset_id,
+        qsPreset.cpu_preset_id,
+        qsPreset.id,
+        now
+      );
+      this.logger.info(`Seeded built-in Quick Select preset: ${qsPreset.name}`);
+    }
   }
 
   close(): void {
