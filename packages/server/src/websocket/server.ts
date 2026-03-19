@@ -1165,16 +1165,9 @@ export class EncorrWebSocketServer {
 
       connection.pendingRequests.set(messageId, {
         resolve: () => {
-          // For ACK callback: decrement pending assignments only for jobs that are still active
-          // (For rejected jobs, pending was already decremented in handleJobAccept)
+          // First, get the job and update its status BEFORE decrementing pendingAssignments
+          // This prevents a race condition where the job looks available while it's being assigned
           const job = this.db.getJobById(jobData.job_id);
-          if (job && (job.status === 'processing' || job.status === 'assigned')) {
-            const pending = this.pendingAssignments.get(nodeId) || 0;
-            this.pendingAssignments.set(nodeId, Math.max(0, pending - 1));
-            this.logger.info(`[JOB_ASSIGN_ACK] ACK for accepted job ${jobData.job_id}, decremented pending ${pending} -> ${Math.max(0, pending - 1)}`);
-          } else {
-            this.logger.info(`[JOB_ASSIGN_ACK] ACK received for job ${jobData.job_id}, job status: ${job?.status}, pending unchanged`);
-          }
 
           // Only assign the job if it's not already in a terminal state
           // We use assignJob to set node_id, but it also sets status='assigned'
@@ -1193,6 +1186,17 @@ export class EncorrWebSocketServer {
             }
           } else {
             this.logger.info(`[JOB_ASSIGN] Job ${jobData.job_id} not assigned (current status: ${job?.status})`);
+          }
+
+          // NOW decrement pending assignments after job status is updated
+          // This ensures the job is counted as 'assigned' or 'processing' before we decrement
+          const jobAfterUpdate = this.db.getJobById(jobData.job_id);
+          if (jobAfterUpdate && (jobAfterUpdate.status === 'processing' || jobAfterUpdate.status === 'assigned')) {
+            const pending = this.pendingAssignments.get(nodeId) || 0;
+            this.pendingAssignments.set(nodeId, Math.max(0, pending - 1));
+            this.logger.info(`[JOB_ASSIGN_ACK] ACK for accepted job ${jobData.job_id}, decremented pending ${pending} -> ${Math.max(0, pending - 1)}`);
+          } else {
+            this.logger.info(`[JOB_ASSIGN_ACK] ACK received for job ${jobData.job_id}, job status: ${jobAfterUpdate?.status}, pending unchanged`);
           }
 
           this.broadcastJobsUpdate();
@@ -1554,10 +1558,37 @@ export class EncorrWebSocketServer {
       return false;
     }
 
-    const mapping = this.db.getFolderMappingById(file.folder_mapping_id);
+    let mapping = this.db.getFolderMappingById(file.folder_mapping_id);
     if (!mapping) {
       this.logger.warn(`Job ${job.id}: folder mapping ${file.folder_mapping_id} not found`);
       return false;
+    }
+
+    // Variable to track if we should use the library's server path directly (no mapping needed)
+    let useLibraryServerPath = false;
+    let libraryServerPath: string | undefined;
+
+    // For library mappings, check if there's a node-specific mapping for the target node
+    if (mapping.server_path?.startsWith('library:')) {
+      const libraryId = mapping.server_path.replace('library:', '');
+      const nodeMappings = this.db.getFolderMappingsByNode(node.id);
+      const nodeSpecificMapping = nodeMappings.find(m => m.server_path === `library:${libraryId}`);
+
+      if (nodeSpecificMapping) {
+        this.logger.info(`[NODE_MAPPING] Found node-specific mapping for node ${node.name} and library ${libraryId}`);
+        mapping = nodeSpecificMapping;
+      } else {
+        // No node-specific mapping exists - use the library's server path directly
+        // This allows nodes running on the same machine as the server to access files directly
+        const library = this.db.getLibraryById(libraryId);
+        if (library) {
+          this.logger.info(`[NODE_MAPPING] No node-specific mapping for node ${node.name} and library ${libraryId}, using library server path: ${library.path}`);
+          useLibraryServerPath = true;
+          libraryServerPath = library.path;
+        } else {
+          this.logger.warn(`[NODE_MAPPING] Library ${libraryId} not found, falling back to default mapping`);
+        }
+      }
     }
 
     // Check if this is an analyze-only job
@@ -1569,9 +1600,10 @@ export class EncorrWebSocketServer {
 
     // For library files, get metadata from library_files table
     if (mapping.server_path?.startsWith('library:')) {
-      const fullPath = mapping.node_path && !mapping.node_path.includes('.mkv') && !mapping.node_path.includes('.mp4') && !mapping.node_path.includes('.avi')
-        ? `${mapping.node_path}/${file.relative_path}`
-        : mapping.node_path || file.relative_path;
+      const basePath = useLibraryServerPath ? libraryServerPath : mapping.node_path;
+      const fullPath = basePath && !basePath.includes('.mkv') && !basePath.includes('.mp4') && !basePath.includes('.avi')
+        ? `${basePath}/${file.relative_path}`
+        : basePath || file.relative_path;
 
       const libFile = this.db.getLibraryFileByFilepath(fullPath);
       if (libFile?.metadata) {
@@ -1605,10 +1637,11 @@ export class EncorrWebSocketServer {
     let sourcePath: string;
 
     if (mapping.server_path?.startsWith('library:')) {
-      if (mapping.node_path && (mapping.node_path.includes('.mkv') || mapping.node_path.includes('.mp4') || mapping.node_path.includes('.avi'))) {
-        sourcePath = mapping.node_path;
+      const basePath = useLibraryServerPath ? libraryServerPath! : mapping.node_path;
+      if (basePath && (basePath.includes('.mkv') || basePath.includes('.mp4') || basePath.includes('.avi'))) {
+        sourcePath = basePath;
       } else {
-        sourcePath = `${mapping.node_path}/${file.relative_path}`;
+        sourcePath = `${basePath}/${file.relative_path}`;
       }
     } else {
       sourcePath = `${mapping.node_path}/${file.relative_path}`;
@@ -1618,10 +1651,11 @@ export class EncorrWebSocketServer {
     let destPath: string | undefined;
     if (!isAnalyzeJob) {
       if (mapping.server_path?.startsWith('library:')) {
-        if (mapping.node_path && (mapping.node_path.includes('.mkv') || mapping.node_path.includes('.mp4') || mapping.node_path.includes('.avi'))) {
-          destPath = mapping.node_path.replace(/\.[^.]+$/, '_enc.mkv');
+        const basePath = useLibraryServerPath ? libraryServerPath! : mapping.node_path;
+        if (basePath && (basePath.includes('.mkv') || basePath.includes('.mp4') || basePath.includes('.avi'))) {
+          destPath = basePath.replace(/\.[^.]+$/, '_enc.mkv');
         } else {
-          destPath = `${mapping.node_path}/${file.relative_path.replace(/\.[^.]+$/, '_enc.mkv')}`;
+          destPath = `${basePath}/${file.relative_path.replace(/\.[^.]+$/, '_enc.mkv')}`;
         }
       } else {
         destPath = `${mapping.node_path}/${file.relative_path.replace(/\.[^.]+$/, '_enc.mkv')}`;

@@ -87,27 +87,23 @@ export function Mappings() {
 
   const openAddDialog = () => {
     setAddDialogOpen(true);
-    // Get library IDs that already have mappings
-    const mappedLibraryIds = new Set(
-      mappings?.map((m: any) => m.server_path.replace('library:', '')) || []
-    );
-    // Filter libraries to only show unmapped ones
-    const availableLibraries = libraries?.filter((lib: any) => !mappedLibraryIds.has(lib.id)) || [];
-    // Auto-select first available library and node if available
-    if (availableLibraries.length > 0 && !selectedLibraryId) {
-      setSelectedLibraryId(availableLibraries[0].id);
-    }
-    if (nodes && nodes.length > 0 && !selectedNodeId) {
+    // Clear previous selections to avoid showing wrong available libraries
+    setSelectedLibraryId('');
+    setSelectedNodeId('');
+    // Auto-select first node if available (this will then filter the libraries)
+    if (nodes && nodes.length > 0) {
       setSelectedNodeId(nodes[0].id);
     }
   };
 
-  // Get available libraries (those without mappings)
+  // Get available libraries (those without mappings for the selected node)
   const availableLibraries = libraries?.filter((lib: any) => {
-    const mappedLibraryIds = new Set(
-      mappings?.map((m: any) => m.server_path.replace('library:', '')) || []
+    // Only filter out libraries that have a mapping for the SELECTED node
+    // Libraries with mappings for other nodes should still be shown
+    const hasMappingForSelectedNode = mappings?.some((m: any) =>
+      m.server_path === `library:${lib.id}` && m.node_id === selectedNodeId
     );
-    return !mappedLibraryIds.has(lib.id);
+    return !hasMappingForSelectedNode;
   }) || [];
 
   // Helper to resolve server_path to actual path
@@ -394,6 +390,12 @@ export function Mappings() {
                       key={node.id}
                       onClick={() => {
                         setSelectedNodeId(node.id);
+                        // Clear library selection if it already has a mapping for this node
+                        if (selectedLibraryId && mappings?.some((m: any) =>
+                          m.server_path === `library:${selectedLibraryId}` && m.node_id === node.id
+                        )) {
+                          setSelectedLibraryId('');
+                        }
                         setNodeDropdownOpen(false);
                       }}
                       className={`w-full text-left px-4 py-2.5 text-sm transition-colors ${
