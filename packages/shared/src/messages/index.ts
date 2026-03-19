@@ -158,7 +158,7 @@ export const JobAssignPayloadSchema = z.object({
     preset_id: z.string(),
     config: z.object({
       source_path: z.string(),
-      dest_path: z.string(),
+      dest_path: z.string().optional(), // Optional for analyze-only jobs
       ffmpeg: z.custom<FFmpegConfig>(),
     }),
   }),

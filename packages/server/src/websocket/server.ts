@@ -1118,7 +1118,7 @@ export class EncorrWebSocketServer {
       file_id: string;
       preset_id: string;
       source_path: string;
-      dest_path: string;
+      dest_path?: string; // Optional for analyze-only jobs
       config: any;
     }
   ): Promise<boolean> {
