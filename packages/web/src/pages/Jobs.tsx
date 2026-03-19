@@ -3,8 +3,6 @@ import { Card, CardContent } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { StatusBadge } from '@/components/ui/Badge';
 import { Dialog } from '@/components/ui/Dialog';
-import { PresetDropdown } from '@/components/ui/PresetDropdown';
-import { BUILTIN_PRESETS, type PresetDropdownOption } from '@/data/presets';
 import { RefreshCw, Cpu, HardDrive, Zap, Pause, Play, Trash2, ChevronLeft, ChevronRight, X, Settings, Plus, Minus, AlertTriangle, Scan, Film } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
@@ -32,7 +30,6 @@ export function Jobs() {
   // Node settings state
   const [expandedNodeSettings, setExpandedNodeSettings] = useState<string | null>(null);
   const [nodeWorkers, setNodeWorkers] = useState<Record<string, { cpu: number; gpus: number[] }>>({});
-  const [nodePresets, setNodePresets] = useState<Record<string, { cpu: string | null; gpus: (string | null)[] }>>({});
   const [pausedNodes, setPausedNodes] = useState<Set<string>>(new Set());
   const [showClearDialog, setShowClearDialog] = useState(false);
 
@@ -40,40 +37,6 @@ export function Jobs() {
   useWebSocket({
     channels: ['nodes', 'jobs'],
   });
-
-  // Fetch user presets from database
-  const { data: userPresets = [] } = useQuery({
-    queryKey: ['presets'],
-    queryFn: () => api.getPresets(),
-  });
-
-  // Combine built-in presets with user presets for dropdown
-  const presetOptions = useMemo(() => {
-    const builtin: PresetDropdownOption[] = BUILTIN_PRESETS.map(p => ({
-      id: p.id,
-      name: p.name,
-      description: p.description,
-      is_builtin: true,
-      codec: p.config.video_codec,
-      type: p.config.encoding_type,
-      quality: p.config.quality,
-    }));
-
-    // Filter out built-in presets from API response - only show actual user-created presets
-    const user: PresetDropdownOption[] = userPresets
-      .filter((p: any) => !p.is_builtin)
-      .map((p: any) => ({
-        id: p.id,
-        name: p.name,
-        description: p.description || '',
-        is_builtin: false,
-        codec: p.config?.video_codec || 'h264',
-        type: p.config?.encoding_type || 'cpu',
-        quality: p.config?.quality || 22,
-      }));
-
-    return { builtin, user };
-  }, [userPresets]);
 
   // Fetch nodes from API (real-time updates via WebSocket)
   const { data: nodes = [], refetch: refetchNodes } = useQuery({
@@ -660,20 +623,6 @@ export function Jobs() {
                             <Plus className="h-3 w-3" />
                           </button>
                         </div>
-
-                        {/* Preset - Full width */}
-                        <div className="flex-1">
-                          <PresetDropdown
-                            value={nodePresets[node.id]?.cpu || null}
-                            onChange={(newValue) => setNodePresets(prev => ({
-                              ...prev,
-                              [node.id]: { ...prev[node.id], cpu: newValue, gpus: prev[node.id]?.gpus || [] }
-                            }))}
-                            presets={presetOptions.builtin}
-                            userPresets={presetOptions.user}
-                            placeholder="Select preset..."
-                          />
-                        </div>
                       </div>
 
                       {/* GPU Device Lines */}
@@ -728,29 +677,6 @@ export function Jobs() {
                               <Plus className="h-3 w-3" />
                             </button>
                           </div>
-
-                          {/* Preset - Full width */}
-                          <div className="flex-1">
-                            <PresetDropdown
-                              value={nodePresets[node.id]?.gpus?.[index] || null}
-                              onChange={(newValue) => {
-                                const currentGpus = nodePresets[node.id]?.gpus || [];
-                                const newGpus = [...currentGpus];
-                                newGpus[index] = newValue;
-                                // Ensure array length matches GPU count
-                                while (newGpus.length < node.system_info.gpus.length) {
-                                  newGpus.push(null);
-                                }
-                                setNodePresets(prev => ({
-                                  ...prev,
-                                  [node.id]: { ...prev[node.id], cpu: prev[node.id]?.cpu || null, gpus: newGpus }
-                                }));
-                              }}
-                              presets={presetOptions.builtin}
-                              userPresets={presetOptions.user}
-                              placeholder="Select preset..."
-                            />
-                          </div>
                         </div>
                         );
                       })}
@@ -790,16 +716,6 @@ export function Jobs() {
                                     }
                                   }));
                                 }
-                                // Initialize presets if not set
-                                if (!nodePresets[node.id]) {
-                                  setNodePresets(prev => ({
-                                    ...prev,
-                                    [node.id]: {
-                                      cpu: node.config?.cpu_preset || null,
-                                      gpus: node.system_info?.gpus?.map((_: any, i: number) => node.config?.gpu_presets?.[i] || null) || []
-                                    }
-                                  }));
-                                }
                               }
                             }}
                             className={`h-7 w-7 rounded-full flex items-center justify-center transition-all duration-300 ${
@@ -833,17 +749,8 @@ export function Jobs() {
                           >
                             {pausedNodes.has(node.id) ? <Play className="h-3 w-3" /> : <Pause className="h-3 w-3" />}
                           </button>
-                          {/* Warning icon for misconfigured nodes */}
-                          {(!node.config?.cpu_preset || (node.system_info.gpus?.length > 0 && (!node.config?.gpu_presets || node.config.gpu_presets.some((p: any) => !p)))) && (
-                            <span title="Presets not configured">
-                              <AlertTriangle className="h-4 w-4 text-yellow-500" />
-                            </span>
-                          )}
                           <StatusBadge status={
-                            // Check if node has required preset configuration
-                            (!node.config?.cpu_preset || (node.system_info.gpus?.length > 0 && (!node.config?.gpu_presets || node.config.gpu_presets.some((p: any) => !p))))
-                              ? 'misconfigured'
-                              : node.status === 'online' && node.active_jobs?.length > 0 ? 'busy' : node.status
+                            node.status === 'online' && node.active_jobs?.length > 0 ? 'busy' : node.status
                           } />
                         </h2>
                         <div className="flex items-center gap-4 mt-2 text-sm text-gray-400">

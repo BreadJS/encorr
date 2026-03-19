@@ -607,6 +607,10 @@ export class EncorrWebSocketServer {
 
       // Return job to queue
       this.db.updateNodeStatus(connection.nodeId, 'online');
+
+      // Broadcast updates so the UI shows the failed job status
+      this.broadcastJobsUpdate();
+      this.broadcastNodesUpdate();
     }
 
     this.sendMessage(ws, createAckMessage(message.id!));
