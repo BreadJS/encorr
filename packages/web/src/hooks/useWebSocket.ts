@@ -63,6 +63,7 @@ function connectWebSocket(url: string, queryClient: ReturnType<typeof useQueryCl
             queryClient.setQueryData(['jobs'], message.payload.jobs);
             // Update library files status based on job data
             queryClient.invalidateQueries({ queryKey: ['library-files'] });
+            queryClient.invalidateQueries({ queryKey: ['files'] });
             break;
 
           case 'ACK':

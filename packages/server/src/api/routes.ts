@@ -297,6 +297,10 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       return sendError('Library not found');
     }
 
+    // Delete folder mappings associated with this library
+    const mappings = db.getAllFolderMappings().filter(m => m.server_path === `library:${id}`);
+    mappings.forEach(mapping => db.deleteFolderMapping(mapping.id));
+
     db.deleteLibrary(id);
 
     logger.info(`Library deleted: ${id} (${library.name})`);

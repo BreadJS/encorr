@@ -1560,6 +1560,9 @@ export class EncorrWebSocketServer {
       return false;
     }
 
+    // Check if this is an analyze-only job
+    const isAnalyzeJob = preset.config?.action === 'analyze';
+
     // Get file metadata to extract source codec
     let sourceCodec: string | undefined;
     let metadata: any = undefined;
@@ -1598,24 +1601,34 @@ export class EncorrWebSocketServer {
       this.logger.info(`[GPU_PIPELINE] Job ${job.id}: Enhanced config with source_codec=${sourceCodec}, use_explicit_decoder=true for true GPU pipeline`);
     }
 
-    // Determine source and destination paths
+    // Determine source path
     let sourcePath: string;
-    let destPath: string;
 
     if (mapping.server_path?.startsWith('library:')) {
       if (mapping.node_path && (mapping.node_path.includes('.mkv') || mapping.node_path.includes('.mp4') || mapping.node_path.includes('.avi'))) {
         sourcePath = mapping.node_path;
-        destPath = mapping.node_path.replace(/\.[^.]+$/, '_enc.mkv');
       } else {
         sourcePath = `${mapping.node_path}/${file.relative_path}`;
-        destPath = `${mapping.node_path}/${file.relative_path.replace(/\.[^.]+$/, '_enc.mkv')}`;
       }
     } else {
       sourcePath = `${mapping.node_path}/${file.relative_path}`;
-      destPath = `${mapping.node_path}/${file.relative_path.replace(/\.[^.]+$/, '_enc.mkv')}`;
     }
 
-    this.logger.debug(`Assigning job ${job.id} to node ${node.name} (${node.id})`);
+    // Determine destination path (only for transcode jobs, not analyze)
+    let destPath: string | undefined;
+    if (!isAnalyzeJob) {
+      if (mapping.server_path?.startsWith('library:')) {
+        if (mapping.node_path && (mapping.node_path.includes('.mkv') || mapping.node_path.includes('.mp4') || mapping.node_path.includes('.avi'))) {
+          destPath = mapping.node_path.replace(/\.[^.]+$/, '_enc.mkv');
+        } else {
+          destPath = `${mapping.node_path}/${file.relative_path.replace(/\.[^.]+$/, '_enc.mkv')}`;
+        }
+      } else {
+        destPath = `${mapping.node_path}/${file.relative_path.replace(/\.[^.]+$/, '_enc.mkv')}`;
+      }
+    }
+
+    this.logger.debug(`Assigning job ${job.id} to node ${node.name} (${node.id})${isAnalyzeJob ? ' (analyze only)' : ''}`);
 
     this.assignJobToNode(node.id, {
       job_id: job.id,

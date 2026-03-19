@@ -1207,36 +1207,52 @@ export class EncorrDatabase {
 
       // Check if this is a library mapping
       if (mapping && mapping.server_path?.startsWith('library:')) {
-        // Construct the full filepath that should be in library_files
-        // For old mappings: node_path is the full file path
-        // For new mappings: node_path is directory + relative_path is filename
-        let libraryFilepath = mapping.node_path;
-        if (!libraryFilepath.includes('.mkv') && !libraryFilepath.includes('.mp4') && !libraryFilepath.includes('.avi')) {
-          libraryFilepath = `${mapping.node_path}/${file.relative_path}`;
+        // Extract library_id from server_path (format: "library:{id}")
+        const libraryId = mapping.server_path.replace('library:', '');
+
+        // The library file's filepath is stored relative to the library root
+        // We need to match it using the file's relative_path
+        // Note: file.relative_path might be like "Movies/101 dalmatiers 2..." or just the filename
+        // The library_file.filepath could be the full path from library root
+
+        // Try to find the library file by library_id first
+        // Then match by checking if the filepath contains our relative path or vice versa
+        const libFiles = this.getLibraryFiles(libraryId);
+        let matchedLibFile: any = null;
+
+        // Try to match by exact relative_path first
+        matchedLibFile = libFiles.find(lf => lf.filepath === file.relative_path || lf.filepath.endsWith('/' + file.relative_path));
+
+        // If no match, try matching by filename (extracted from relative_path)
+        if (!matchedLibFile) {
+          const filename = file.relative_path.split('/').pop() || file.relative_path;
+          matchedLibFile = libFiles.find(lf => lf.filename === filename);
         }
 
-        // Update the library file directly
-        const libFileStmt = this.db.prepare(`
-          UPDATE library_files
-          SET format = ?,
-              duration = ?,
-              status = 'analyzed',
-              metadata = ?,
-              updated_at = ?
-          WHERE filepath = ?
-        `);
-        const result = libFileStmt.run(
-          metadata.container,
-          metadata.duration,
-          JSON.stringify(metadata),
-          now,
-          libraryFilepath
-        );
+        if (matchedLibFile) {
+          // Update the library file directly
+          const libFileStmt = this.db.prepare(`
+            UPDATE library_files
+            SET format = ?,
+                duration = ?,
+                status = 'analyzed',
+                metadata = ?,
+                updated_at = ?
+            WHERE id = ?
+          `);
+          const result = libFileStmt.run(
+            metadata.container,
+            metadata.duration,
+            JSON.stringify(metadata),
+            now,
+            matchedLibFile.id
+          );
 
-        if (result.changes > 0) {
-          this.logger.info(`Also updated library_file: ${libraryFilepath} with metadata`);
+          if (result.changes > 0) {
+            this.logger.info(`Also updated library_file: ${matchedLibFile.filepath} (id: ${matchedLibFile.id}) with metadata`);
+          }
         } else {
-          this.logger.warn(`Could not find library_file with filepath: ${libraryFilepath}`);
+          this.logger.warn(`Could not find library_file for library ${libraryId} with relative_path: ${file.relative_path}`);
         }
       }
     }

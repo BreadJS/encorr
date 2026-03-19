@@ -65,6 +65,7 @@ export function Library() {
     mutationFn: (data: { name: string; path: string }) => api.createLibrary(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['libraries'] });
+      queryClient.invalidateQueries({ queryKey: ['mappings'] });
       closeAddDialog();
     },
   });
@@ -73,6 +74,7 @@ export function Library() {
     mutationFn: (id: string) => api.deleteLibrary(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['libraries'] });
+      queryClient.invalidateQueries({ queryKey: ['mappings'] });
       if (selectedLibraryId === deleteMutation.variables) {
         setSelectedLibraryId(null);
       }
