@@ -853,7 +853,12 @@ export function Jobs() {
                             <div key={index} className="text-left">
                               <div className="flex items-start gap-2 mb-1">
                                 <Zap className="h-3 w-3" style={{ color: getVendorColor('gpu', undefined, gpu.vendor) }} />
-                                <span className="text-xs text-gray-400">GPU {index + 1}</span>
+                                <span className="text-xs text-gray-400">
+                                  GPU {index + 1}
+                                  {gpu.temperatureGpu !== undefined && (
+                                    <span className="ml-1">({gpu.temperatureGpu}°C)</span>
+                                  )}
+                                </span>
                               </div>
                               <div className="flex flex-col items-start gap-1">
                                 <div className="flex items-center gap-2">

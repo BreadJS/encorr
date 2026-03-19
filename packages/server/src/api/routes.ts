@@ -903,6 +903,9 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       }
     }
 
+    // Broadcast job list immediately so clients see new jobs in queue
+    wsServer.broadcastJobsUpdate();
+
     // Trigger immediate job assignment
     wsServer.assignJobsNow();
 
@@ -1111,6 +1114,9 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       }
     }
 
+    // Broadcast job list immediately so clients see new jobs in queue
+    wsServer.broadcastJobsUpdate();
+
     // Trigger immediate job assignment
     wsServer.assignJobsNow();
 
@@ -1155,6 +1161,9 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     }
 
     logger.info(`Job ${id} deleted`);
+
+    // Broadcast update to all connected clients
+    wsServer.broadcastJobsUpdate();
 
     return sendSuccess(null, 'Job deleted');
   });

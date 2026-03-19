@@ -1103,6 +1103,17 @@ export class EncorrDatabase {
     stmt.run(nodeId, now, jobId);
   }
 
+  // Update only node_id and started_at without changing status
+  // Used when job is already 'processing' but we need to set the node_id
+  updateJobNode(jobId: string, nodeId: string, startedAt: number): void {
+    const stmt = this.db.prepare(`
+      UPDATE jobs
+      SET node_id = ?, started_at = ?
+      WHERE id = ?
+    `);
+    stmt.run(nodeId, startedAt, jobId);
+  }
+
   updateJobProgress(jobId: string, progress: number, currentAction: string): void {
     const stmt = this.db.prepare(`
       UPDATE jobs
@@ -1398,6 +1409,7 @@ export class EncorrDatabase {
       progress: row.progress,
       current_action: row.current_action,
       error_message: row.error_message,
+      stats: row.stats,
       started_at: row.started_at,
       completed_at: row.completed_at,
       created_at: row.created_at,

@@ -190,6 +190,7 @@ export interface Job {
   progress: number;
   current_action: string | null;
   error_message: string | null;
+  stats: string | null;
   started_at: number | null;
   completed_at: number | null;
   created_at: number;

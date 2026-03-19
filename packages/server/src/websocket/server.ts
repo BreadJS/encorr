@@ -241,6 +241,13 @@ export class EncorrWebSocketServer {
         this.connectionsByNodeId.delete(connection.nodeId);
         this.eventHandlers.nodeDisconnected?.(connection.nodeId);
 
+        // Clear pending assignments for this node since it's disconnected
+        const pendingCount = this.pendingAssignments.get(connection.nodeId) || 0;
+        if (pendingCount > 0) {
+          this.logger.info(`[DISCONNECT] Clearing ${pendingCount} pending assignments for disconnected node ${connection.nodeId}`);
+          this.pendingAssignments.delete(connection.nodeId);
+        }
+
         // Broadcast node update to web clients
         this.broadcastNodesUpdate();
       }
@@ -601,6 +608,18 @@ export class EncorrWebSocketServer {
     } else {
       this.logger.warn(`Job ${payload.job_id} rejected by node ${connection.nodeId}: ${payload.reason}`);
 
+      // Decrement pending assignments since this job is no longer pending
+      const pending = this.pendingAssignments.get(connection.nodeId) || 0;
+      this.pendingAssignments.set(connection.nodeId, Math.max(0, pending - 1));
+      this.logger.info(`[PENDING] Decremented pending assignments for node ${connection.nodeId} after rejection: ${pending} -> ${Math.max(0, pending - 1)}`);
+
+      // Clean up any pending request for this job to prevent double-decrement when ACK arrives
+      // We need to find and remove the pending request for this job_id
+      for (const [msgId, pendingReq] of connection.pendingRequests) {
+        // Note: We can't directly match job_id here since the pending request doesn't store it
+        // But decrementing once in handleJobAccept is sufficient since the ACK's decrement will no-op due to Math.max(0, x-1)
+      }
+
       // Fail the job with the rejection reason so it's properly tracked
       const fullErrorMessage = `Rejected by node ${connection.nodeId}: ${payload.reason || 'Unknown reason'}`;
       this.db.failJob(payload.job_id, fullErrorMessage);
@@ -611,6 +630,9 @@ export class EncorrWebSocketServer {
       // Broadcast updates so the UI shows the failed job status
       this.broadcastJobsUpdate();
       this.broadcastNodesUpdate();
+
+      // Trigger job assignment again to pick up remaining queued jobs
+      this.assignJobsNow();
     }
 
     this.sendMessage(ws, createAckMessage(message.id!));
@@ -863,6 +885,34 @@ export class EncorrWebSocketServer {
       gpu_usage: gpuUsage.length > 0 ? gpuUsage : undefined,
     });
 
+    // Also update GPU objects in system_info with dynamic data (temperature, utilization)
+    if (payload.gpus && payload.gpus.length > 0) {
+      const node = this.db.getAllNodes().find(n => n.id === connection.nodeId);
+      if (node && node.system_info?.gpus) {
+        // Update each GPU with dynamic data from USAGE_UPDATE
+        node.system_info.gpus = node.system_info.gpus.map((gpu, index) => {
+          const updateData = payload.gpus![index];
+          if (updateData) {
+            return {
+              ...gpu,
+              utilizationGpu: updateData.utilizationGpu,
+              utilizationMemory: updateData.utilizationMemory,
+              temperatureGpu: updateData.temperatureGpu,
+              memoryUsed: updateData.memoryUsed,
+              memoryFree: updateData.memoryFree,
+              powerDraw: updateData.powerDraw,
+              clockCore: updateData.clockCore,
+            };
+          }
+          return gpu;
+        });
+        this.db.updateNodeSystemInfo(connection.nodeId, node.system_info);
+      }
+    }
+
+    // Broadcast node updates so temperature shows in real-time
+    this.broadcastNodesUpdate();
+
     this.sendMessage(ws, createAckMessage(message.id!));
   }
 
@@ -1029,6 +1079,8 @@ export class EncorrWebSocketServer {
   private sendMessage(ws: WebSocket, message: ServerToNodeMessage | ServerToWebClientMessage): void {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(message));
+    } else {
+      this.logger.warn(`[SEND_MESSAGE] Cannot send message, WebSocket state is ${ws.readyState} (OPEN=${WebSocket.OPEN})`);
     }
   }
 
@@ -1073,13 +1125,15 @@ export class EncorrWebSocketServer {
     return new Promise((resolve, reject) => {
       const connection = this.connectionsByNodeId.get(nodeId);
       if (!connection) {
+        this.logger.warn(`[JOB_ASSIGN] Node ${nodeId} not connected when trying to assign job ${jobData.job_id}`);
         reject(new Error('Node not connected'));
         return;
       }
 
       // Track pending assignment
-      const currentPending = this.pendingAssignments.get(nodeId) || 0;
-      this.pendingAssignments.set(nodeId, currentPending + 1);
+      const pendingBefore = this.pendingAssignments.get(nodeId) || 0;
+      this.pendingAssignments.set(nodeId, pendingBefore + 1);
+      this.logger.info(`[JOB_ASSIGN] Sending job ${jobData.job_id} to node ${nodeId}, pending: ${pendingBefore} -> ${pendingBefore + 1}`);
 
       const messageId = generateMessageId();
       const message = createMessage(
@@ -1099,6 +1153,8 @@ export class EncorrWebSocketServer {
         messageId
       );
 
+      this.logger.info(`[JOB_ASSIGN] Sending job ${jobData.job_id} to node ${nodeId}, pending was ${pendingBefore}, will be ${pendingBefore + 1}`);
+
       const timeout = setTimeout(() => {
         connection.pendingRequests.delete(messageId);
         // Decrement pending assignment on timeout
@@ -1109,10 +1165,36 @@ export class EncorrWebSocketServer {
 
       connection.pendingRequests.set(messageId, {
         resolve: () => {
-          // Decrement pending assignment on success
-          const pending = this.pendingAssignments.get(nodeId) || 0;
-          this.pendingAssignments.set(nodeId, Math.max(0, pending - 1));
-          this.db.assignJob(jobData.job_id, nodeId);
+          // For ACK callback: decrement pending assignments only for jobs that are still active
+          // (For rejected jobs, pending was already decremented in handleJobAccept)
+          const job = this.db.getJobById(jobData.job_id);
+          if (job && (job.status === 'processing' || job.status === 'assigned')) {
+            const pending = this.pendingAssignments.get(nodeId) || 0;
+            this.pendingAssignments.set(nodeId, Math.max(0, pending - 1));
+            this.logger.info(`[JOB_ASSIGN_ACK] ACK for accepted job ${jobData.job_id}, decremented pending ${pending} -> ${Math.max(0, pending - 1)}`);
+          } else {
+            this.logger.info(`[JOB_ASSIGN_ACK] ACK received for job ${jobData.job_id}, job status: ${job?.status}, pending unchanged`);
+          }
+
+          // Only assign the job if it's not already in a terminal state
+          // We use assignJob to set node_id, but it also sets status='assigned'
+          // So we need to check the job status to prevent overwriting
+          if (job && job.status !== 'failed' && job.status !== 'completed' && job.status !== 'cancelled') {
+            // If job is already 'processing', only update node_id and started_at without changing status
+            // This prevents overwriting 'processing' back to 'assigned'
+            if (job.status === 'processing') {
+              const now = Math.floor(Date.now() / 1000);
+              this.db.updateJobNode(jobData.job_id, nodeId, now);
+              this.logger.debug(`[JOB_ASSIGN] Job ${jobData.job_id} already processing, only updated node_id to ${nodeId}`);
+            } else {
+              // Job is 'queued' or 'assigned', safe to use assignJob
+              this.db.assignJob(jobData.job_id, nodeId);
+              this.logger.debug(`[JOB_ASSIGN] Job ${jobData.job_id} assigned to node ${nodeId}, status was: ${job.status}`);
+            }
+          } else {
+            this.logger.info(`[JOB_ASSIGN] Job ${jobData.job_id} not assigned (current status: ${job?.status})`);
+          }
+
           this.broadcastJobsUpdate();
           resolve(true);
         },
@@ -1137,6 +1219,10 @@ export class EncorrWebSocketServer {
     this.sendToNode(job.node_id, message);
 
     this.db.cancelJob(jobId);
+
+    // Broadcast updates to all connected clients
+    this.broadcastJobsUpdate();
+    this.broadcastNodesUpdate();
   }
 
   getConnectedNodeIds(): string[] {
@@ -1227,11 +1313,12 @@ export class EncorrWebSocketServer {
   // Get available worker slots for a node
   private getAvailableWorkers(node: any): { cpu: number; gpus: number[] } {
     const maxWorkers = node.max_workers || { cpu: 1, gpus: [] };
-    const activeJobs = this.db.getJobsByNode(node.id).filter(
+    const allJobs = this.db.getJobsByNode(node.id);
+    const activeJobs = allJobs.filter(
       (j: any) => j.status === 'assigned' || j.status === 'processing'
     );
 
-    // Get pending assignments for this node
+    // Get pending assignments for this node (jobs sent but not yet confirmed)
     const pendingCount = this.pendingAssignments.get(node.id) || 0;
 
     // Total in-flight jobs (both active and pending)
@@ -1243,8 +1330,7 @@ export class EncorrWebSocketServer {
     // Calculate total GPU capacity
     const totalGpuCapacity = (maxWorkers.gpus || []).reduce((sum: number, max: number) => sum + max, 0);
 
-    // Assume all active/pending jobs are GPU jobs (worst case for availability)
-    // In the future, we should track which jobs are GPU vs CPU
+    // Available GPU slots (same logic)
     const availableGpuSlots = Math.max(0, totalGpuCapacity - totalInFlight);
 
     // Distribute available slots back to the GPU array format
@@ -1254,7 +1340,15 @@ export class EncorrWebSocketServer {
       return Math.min(max, availableGpuSlots);
     });
 
-    this.logger.debug(`[WORKERS] Node ${node.name}: active=${activeJobs.length}, pending=${pendingCount}, totalInFlight=${totalInFlight}, maxGpuCapacity=${totalGpuCapacity}, availableGpuSlots=${availableGpuSlots}`);
+    // Detailed logging to see exactly which jobs are counted
+    if (activeJobs.length > 0 || pendingCount > 0) {
+      this.logger.debug(`[WORKERS] Node ${node.name}: maxCpu=${maxWorkers.cpu || 0}, activeJobs=${activeJobs.length}, pending=${pendingCount}, totalInFlight=${totalInFlight}, availableCpu=${availableCpu}`);
+      if (activeJobs.length > 0) {
+        activeJobs.forEach(j => {
+          this.logger.debug(`[WORKERS]   Active job: ${j.id}, status=${j.status}`);
+        });
+      }
+    }
 
     return {
       cpu: availableCpu,
@@ -1267,6 +1361,15 @@ export class EncorrWebSocketServer {
     const allNodes = this.db.getAllNodes();
     const onlineNodes = allNodes.filter(n => n.status === 'online' || n.status === 'busy');
 
+    // Log detailed job info
+    this.logger.info(`[JOB_ASSIGN] Queued jobs: ${queuedJobs.length}, Online nodes: ${onlineNodes.length}/${allNodes.length}`);
+    if (queuedJobs.length > 0) {
+      queuedJobs.forEach(j => this.logger.debug(`[JOB_ASSIGN] Queued job: ${j.id}, preset: ${j.preset_id}, file: ${j.file_id}`));
+    }
+    if (allNodes.length > 0) {
+      allNodes.forEach(n => this.logger.debug(`[JOB_ASSIGN] Node: ${n.name} (${n.id}), status: ${n.status}, max_workers: ${JSON.stringify(n.max_workers)}`));
+    }
+
     if (queuedJobs.length === 0) {
       return;
     }
@@ -1276,6 +1379,24 @@ export class EncorrWebSocketServer {
     // Clean up stale jobs first
     const now = Math.floor(Date.now() / 1000);
     const staleTimeout = 300; // 5 minutes
+
+    // Log current state for debugging
+    this.logger.info(`[CLEANUP] Starting job assignment cleanup`);
+    allNodes.forEach(n => {
+      const activeJobs = this.db.getJobsByNode(n.id).filter(j => j.status === 'assigned' || j.status === 'processing');
+      const pendingCount = this.pendingAssignments.get(n.id) || 0;
+      const maxWorkers = n.max_workers || { cpu: 1, gpus: [] };
+      this.logger.info(`[CLEANUP] Node ${n.name}: maxCpu=${maxWorkers.cpu || 0}, activeJobs=${activeJobs.length}, pending=${pendingCount}, connected=${this.isNodeConnected(n.id)}`);
+
+      // Log all jobs for this node to help debug
+      const allJobs = this.db.getJobsByNode(n.id);
+      if (allJobs.length > 0) {
+        this.logger.debug(`[CLEANUP] All jobs for node ${n.name}:`);
+        allJobs.forEach(j => {
+          this.logger.debug(`[CLEANUP]   Job ${j.id}: status=${j.status}, created_at=${j.created_at}, started_at=${j.started_at || 'null'}`);
+        });
+      }
+    });
 
     allNodes.forEach(n => {
       const activeJobs = this.db.getJobsByNode(n.id);
@@ -1345,9 +1466,12 @@ export class EncorrWebSocketServer {
       }
     }
 
+    // Always broadcast to show updated job list (even if no jobs were assigned)
+    // This ensures clients see new jobs in the queue immediately
+    this.broadcastJobsUpdate();
+
     if (assignedCount > 0) {
       this.logger.info(`Assigned ${assignedCount} job(s) to nodes`);
-      this.broadcastJobsUpdate();
       this.broadcastNodesUpdate();
     }
   }
@@ -1358,8 +1482,12 @@ export class EncorrWebSocketServer {
     let maxAvailableCpu = 0;
     let minActiveJobs = Infinity;
 
+    this.logger.debug(`[FIND_CPU] Checking ${nodes.length} nodes for available CPU workers`);
+
     for (const node of nodes) {
       const available = this.getAvailableWorkers(node);
+
+      this.logger.debug(`[FIND_CPU] Node ${node.name}: availableCpu=${available.cpu}, maxCpu=${node.max_workers?.cpu || 0}`);
 
       if (available.cpu > 0) {
         const activeJobs = this.db.getJobsByNode(node.id).filter(
