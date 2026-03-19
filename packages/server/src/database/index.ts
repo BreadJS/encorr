@@ -1220,13 +1220,41 @@ export class EncorrDatabase {
         const libFiles = this.getLibraryFiles(libraryId);
         let matchedLibFile: any = null;
 
-        // Try to match by exact relative_path first
-        matchedLibFile = libFiles.find(lf => lf.filepath === file.relative_path || lf.filepath.endsWith('/' + file.relative_path));
+        // Get the library to calculate relative paths correctly
+        const library = this.getLibraryById(libraryId);
+        if (library) {
+          // For each library file, calculate its relative path from the library root
+          // and match it against the file's relative_path
+          const normalizedLibPath = library.path.replace(/\\/g, '/').replace(/\/$/, '');
 
-        // If no match, try matching by filename (extracted from relative_path)
+          for (const lf of libFiles) {
+            // Calculate relative path for this library file (same logic as createJobForLibraryFile)
+            const normalizedLfPath = lf.filepath.replace(/\\/g, '/');
+            let lfRelativePath: string;
+
+            if (normalizedLfPath.startsWith(normalizedLibPath + '/')) {
+              lfRelativePath = normalizedLfPath.substring(normalizedLibPath.length + 1);
+            } else {
+              // Fallback: use the filepath as-is if it doesn't start with library path
+              lfRelativePath = normalizedLfPath;
+            }
+
+            // Exact match on relative path
+            if (lfRelativePath === file.relative_path) {
+              matchedLibFile = lf;
+              break;
+            }
+          }
+        }
+
+        // If still no match, try matching by filename only
         if (!matchedLibFile) {
           const filename = file.relative_path.split('/').pop() || file.relative_path;
-          matchedLibFile = libFiles.find(lf => lf.filename === filename);
+          // Only match if there's exactly one file with this name to avoid wrong matches
+          const filesWithSameName = libFiles.filter(lf => lf.filename === filename);
+          if (filesWithSameName.length === 1) {
+            matchedLibFile = filesWithSameName[0];
+          }
         }
 
         if (matchedLibFile) {
@@ -1277,17 +1305,60 @@ export class EncorrDatabase {
     if (job) {
       this.updateFileStatus(job.file_id, 'failed');
 
-      // Update library_files status too
-      const libFileStmt = this.db.prepare(`
-        UPDATE library_files
-        SET status = 'failed',
-            error_message = ?,
-            updated_at = ?
-        WHERE filepath IN (
-          SELECT relative_path FROM files WHERE id = ?
-        )
-      `);
-      libFileStmt.run(errorMessage, now, job.file_id);
+      // Update library_files status too using the same matching logic as completeAnalyzeJob
+      const file = this.getFileById(job.file_id);
+      if (file) {
+        const mapping = this.getFolderMappingById(file.folder_mapping_id);
+
+        // Check if this is a library mapping
+        if (mapping && mapping.server_path?.startsWith('library:')) {
+          const libraryId = mapping.server_path.replace('library:', '');
+          const library = this.getLibraryById(libraryId);
+
+          if (library) {
+            // Find the matching library file using relative path matching
+            const libFiles = this.getLibraryFiles(libraryId);
+            const normalizedLibPath = library.path.replace(/\\/g, '/').replace(/\/$/, '');
+            let matchedLibFile: any = null;
+
+            for (const lf of libFiles) {
+              const normalizedLfPath = lf.filepath.replace(/\\/g, '/');
+              let lfRelativePath: string;
+
+              if (normalizedLfPath.startsWith(normalizedLibPath + '/')) {
+                lfRelativePath = normalizedLfPath.substring(normalizedLibPath.length + 1);
+              } else {
+                lfRelativePath = normalizedLfPath;
+              }
+
+              if (lfRelativePath === file.relative_path) {
+                matchedLibFile = lf;
+                break;
+              }
+            }
+
+            // Fallback to filename-only match if exactly one file matches
+            if (!matchedLibFile) {
+              const filename = file.relative_path.split('/').pop() || file.relative_path;
+              const filesWithSameName = libFiles.filter(lf => lf.filename === filename);
+              if (filesWithSameName.length === 1) {
+                matchedLibFile = filesWithSameName[0];
+              }
+            }
+
+            if (matchedLibFile) {
+              const libFileStmt = this.db.prepare(`
+                UPDATE library_files
+                SET status = 'failed',
+                    error_message = ?,
+                    updated_at = ?
+                WHERE id = ?
+              `);
+              libFileStmt.run(errorMessage, now, matchedLibFile.id);
+            }
+          }
+        }
+      }
 
       this.logger.info(`Job ${jobId} failed, file ${job.file_id} status set to failed`);
     }
