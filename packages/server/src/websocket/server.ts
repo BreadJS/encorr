@@ -600,6 +600,11 @@ export class EncorrWebSocketServer {
       this.broadcastNodesUpdate();
     } else {
       this.logger.warn(`Job ${payload.job_id} rejected by node ${connection.nodeId}: ${payload.reason}`);
+
+      // Fail the job with the rejection reason so it's properly tracked
+      const fullErrorMessage = `Rejected by node ${connection.nodeId}: ${payload.reason || 'Unknown reason'}`;
+      this.db.failJob(payload.job_id, fullErrorMessage);
+
       // Return job to queue
       this.db.updateNodeStatus(connection.nodeId, 'online');
     }

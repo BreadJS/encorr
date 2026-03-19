@@ -130,6 +130,35 @@ CREATE INDEX IF NOT EXISTS idx_jobs_node ON jobs(node_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_preset ON jobs(preset_id);
 
 -- ============================================================================
+-- Job History Table
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS job_history (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    file_id TEXT NOT NULL,
+    node_id TEXT,
+    preset_id TEXT NOT NULL,
+    preset_name TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('completed', 'failed', 'cancelled')),
+    error_message TEXT,
+    started_at INTEGER,
+    completed_at INTEGER,
+    duration_seconds INTEGER,
+    original_size INTEGER,
+    transcoded_size INTEGER,
+    stats TEXT, -- JSON: Additional completion stats
+    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+    FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE,
+    FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_history_file ON job_history(file_id);
+CREATE INDEX IF NOT EXISTS idx_job_history_status ON job_history(status);
+CREATE INDEX IF NOT EXISTS idx_job_history_created ON job_history(created_at);
+
+-- ============================================================================
 -- ============================================================================
 -- Presets Table
 -- ============================================================================

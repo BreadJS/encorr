@@ -204,6 +204,24 @@ export interface JobProgress {
   ratio?: string;
 }
 
+export interface JobHistory {
+  id: string;
+  job_id: string;
+  file_id: string;
+  node_id?: string;
+  preset_id: string;
+  preset_name: string;
+  status: 'completed' | 'failed' | 'cancelled';
+  error_message?: string;
+  started_at: number | null;
+  completed_at: number | null;
+  duration_seconds?: number;
+  original_size?: number;
+  transcoded_size?: number;
+  stats?: string;
+  created_at: number;
+}
+
 // ============================================================================
 // Presets
 // ============================================================================

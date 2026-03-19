@@ -1159,6 +1159,27 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     return sendSuccess(null, 'Job deleted');
   });
 
+  // Get job history for a file
+  fastify.get('/files/:fileId/job-history', async (request, reply) => {
+    const { fileId } = request.params as { fileId: string };
+    const { limit } = request.query as { limit?: string };
+
+    const historyLimit = limit ? parseInt(limit, 10) : 50;
+    const history = db.getJobHistoryByFile(fileId, historyLimit);
+
+    return sendSuccess(history);
+  });
+
+  // Get all job history
+  fastify.get('/job-history', async (request, reply) => {
+    const { limit } = request.query as { limit?: string };
+
+    const historyLimit = limit ? parseInt(limit, 10) : 100;
+    const history = db.getAllJobHistory(historyLimit);
+
+    return sendSuccess(history);
+  });
+
   // ========================================================================
   // Presets
   // ========================================================================

@@ -277,6 +277,12 @@ export const api = {
     details: any[];
   }>('/workers/availability'),
 
+  // Job History
+  getFileJobHistory: (fileId: string, limit?: number) =>
+    request<any[]>(`/files/${fileId}/job-history${limit ? '?limit=' + limit : ''}`),
+  getAllJobHistory: (limit?: number) =>
+    request<any[]>(`/job-history${limit ? '?limit=' + limit : ''}`),
+
   // Logs
   getLogs: (params?: { level?: string; category?: string; limit?: number }) =>
     request<any[]>(`/logs${new URLSearchParams(params as any).toString() ? '?' + new URLSearchParams(params as any).toString() : ''}`),

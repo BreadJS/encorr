@@ -15,6 +15,7 @@ import type {
   VideoMetadata,
   Job,
   JobProgress,
+  JobHistory,
   JobStatus,
   Preset,
   QuickSelectPreset,
@@ -1133,6 +1134,9 @@ export class EncorrDatabase {
       WHERE id = ?
     `);
     stmt.run(now, JSON.stringify(stats), outputPath || null, jobId);
+
+    // Add to job history
+    this.addToJobHistory(jobId, 'completed');
   }
 
   completeAnalyzeJob(jobId: string, metadata: {
@@ -1238,6 +1242,9 @@ export class EncorrDatabase {
     `);
     stmt.run(errorMessage, now, jobId);
 
+    // Add to job history
+    this.addToJobHistory(jobId, 'failed');
+
     // Also update the file status to failed
     const job = this.getJobById(jobId);
     if (job) {
@@ -1267,11 +1274,118 @@ export class EncorrDatabase {
       WHERE id = ?
     `);
     stmt.run(now, jobId);
+
+    // Add to job history
+    this.addToJobHistory(jobId, 'cancelled');
   }
 
   deleteJob(jobId: string): void {
     const stmt = this.db.prepare('DELETE FROM jobs WHERE id = ?');
     stmt.run(jobId);
+  }
+
+  // ========================================================================
+  // Job History
+  // ========================================================================
+
+  addToJobHistory(jobId: string, status: 'completed' | 'failed' | 'cancelled'): void {
+    const job = this.getJobById(jobId);
+    if (!job) {
+      this.logger.warn(`Job ${jobId} not found, cannot add to history`);
+      return;
+    }
+
+    const file = this.getFileById(job.file_id);
+    const preset = this.getPresetById(job.preset_id);
+    if (!file || !preset) {
+      this.logger.warn(`File or preset not found for job ${jobId}, cannot add to history`);
+      return;
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const duration = job.started_at ? (now - job.started_at) : undefined;
+
+    let stats: any = {};
+    if (job.stats) {
+      try {
+        stats = JSON.parse(job.stats);
+      } catch {
+        stats = {};
+      }
+    }
+
+    const stmt = this.db.prepare(`
+      INSERT INTO job_history (
+        id, job_id, file_id, node_id, preset_id, preset_name, status,
+        error_message, started_at, completed_at, duration_seconds,
+        original_size, transcoded_size, stats, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    stmt.run(
+      uuidv4(),
+      job.id,
+      job.file_id,
+      job.node_id || null,
+      job.preset_id,
+      preset.name,
+      status,
+      job.error_message || null,
+      job.started_at || null,
+      job.completed_at || now,
+      duration,
+      file.original_size || null,
+      stats.transcoded_size || null,
+      job.stats || null,
+      now
+    );
+
+    this.logger.info(`Added job ${jobId} to history with status ${status}`);
+  }
+
+  getJobHistoryByFile(fileId: string, limit: number = 50): JobHistory[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM job_history
+      WHERE file_id = ?
+      ORDER BY completed_at DESC, created_at DESC
+      LIMIT ?
+    `);
+    const rows = stmt.all(fileId, limit) as any[];
+    return rows.map(row => this.parseJobHistory(row));
+  }
+
+  getJobHistoryByFileId(fileId: string): JobHistory[] {
+    return this.getJobHistoryByFile(fileId, 100);
+  }
+
+  getAllJobHistory(limit: number = 100): JobHistory[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM job_history
+      ORDER BY completed_at DESC, created_at DESC
+      LIMIT ?
+    `);
+    const rows = stmt.all(limit) as any[];
+    return rows.map(row => this.parseJobHistory(row));
+  }
+
+  private parseJobHistory(row: any): JobHistory {
+    return {
+      id: row.id,
+      job_id: row.job_id,
+      file_id: row.file_id,
+      node_id: row.node_id ?? undefined,
+      preset_id: row.preset_id,
+      preset_name: row.preset_name,
+      status: row.status,
+      error_message: row.error_message,
+      started_at: row.started_at,
+      completed_at: row.completed_at,
+      duration_seconds: row.duration_seconds ?? undefined,
+      original_size: row.original_size ?? undefined,
+      transcoded_size: row.transcoded_size ?? undefined,
+      stats: row.stats,
+      created_at: row.created_at,
+    };
   }
 
   private parseJob(row: any): Job {
