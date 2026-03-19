@@ -17,6 +17,7 @@ import type {
   JobProgress,
   JobStatus,
   Preset,
+  QuickSelectPreset,
   HandBrakeConfig,
   Settings,
   ActivityLog,
@@ -70,174 +71,8 @@ export class EncorrDatabase {
     const schema = readFileSync(schemaPath, 'utf-8');
     this.db.exec(schema);
 
-    // Run migrations for new columns
-    this.runMigrations();
-
     // Seed built-in presets
     this.seedBuiltinPresets();
-  }
-
-  private runMigrations(): void {
-    // Check if columns exist and add them if they don't
-    const tableInfo = this.db.pragma('table_info(nodes)') as Array<{ name: string }>;
-    const existingColumns = new Set(tableInfo.map(col => col.name));
-
-    // Add cpu_usage column if it doesn't exist
-    if (!existingColumns.has('cpu_usage')) {
-      this.db.exec('ALTER TABLE nodes ADD COLUMN cpu_usage INTEGER DEFAULT 0');
-    }
-
-    // Add ram_usage column if it doesn't exist
-    if (!existingColumns.has('ram_usage')) {
-      this.db.exec('ALTER TABLE nodes ADD COLUMN ram_usage INTEGER DEFAULT 0');
-    }
-
-    // Add gpu_usage column if it doesn't exist
-    if (!existingColumns.has('gpu_usage')) {
-      this.db.exec('ALTER TABLE nodes ADD COLUMN gpu_usage TEXT');
-    }
-
-    // Add active_jobs column if it doesn't exist
-    if (!existingColumns.has('active_jobs')) {
-      this.db.exec('ALTER TABLE nodes ADD COLUMN active_jobs TEXT');
-    }
-
-    // Add config column if it doesn't exist
-    if (!existingColumns.has('config')) {
-      this.db.exec('ALTER TABLE nodes ADD COLUMN config TEXT');
-    }
-
-    // Add max_workers column if it doesn't exist
-    if (!existingColumns.has('max_workers')) {
-      this.db.exec('ALTER TABLE nodes ADD COLUMN max_workers TEXT');
-    }
-
-    // Migration: Add output_path column to jobs table
-    try {
-      const jobsTableInfo = this.db.pragma('table_info(jobs)') as Array<{ name: string }>;
-      const jobsColumns = new Set(jobsTableInfo.map(col => col.name));
-
-      if (!jobsColumns.has('output_path')) {
-        this.logger.info('Running migration: Add output_path to jobs table');
-        this.db.exec('ALTER TABLE jobs ADD COLUMN output_path TEXT');
-      }
-    } catch (error) {
-      // Table might not exist yet, ignore
-      this.logger.debug('Could not check jobs table for output_path column:', error);
-    }
-
-    // Migration: Add 'analyzed' status to files table
-    // We need to recreate the table to update the CHECK constraint
-    try {
-      const filesTableInfo = this.db.pragma('table_info(files)') as Array<{ sql: string }>;
-      const filesCreateSql = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='files'").get() as { sql: string } | undefined;
-
-      if (filesCreateSql && !filesCreateSql.sql.includes("'analyzed'")) {
-        this.logger.info('Running migration: Add analyzed status to files table');
-
-        // Begin transaction
-        this.db.exec('BEGIN TRANSACTION');
-
-        // Create new table with updated constraint
-        this.db.exec(`
-          CREATE TABLE files_new (
-            id TEXT PRIMARY KEY,
-            folder_mapping_id TEXT NOT NULL,
-            relative_path TEXT NOT NULL,
-            original_size INTEGER,
-            original_format TEXT,
-            original_codec TEXT,
-            duration INTEGER,
-            resolution TEXT,
-            status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'queued', 'processing', 'completed', 'failed', 'skipped', 'analyzed')),
-            metadata TEXT,
-            created_at INTEGER DEFAULT (strftime('%s', 'now')),
-            FOREIGN KEY (folder_mapping_id) REFERENCES folder_mappings(id) ON DELETE CASCADE
-          )
-        `);
-
-        // Copy data
-        this.db.exec(`
-          INSERT INTO files_new (id, folder_mapping_id, relative_path, original_size, original_format, original_codec, duration, resolution, status, metadata, created_at)
-          SELECT id, folder_mapping_id, relative_path, original_size, original_format, original_codec, duration, resolution, status, metadata, created_at
-          FROM files
-        `);
-
-        // Drop old table
-        this.db.exec('DROP TABLE files');
-
-        // Rename new table
-        this.db.exec('ALTER TABLE files_new RENAME TO files');
-
-        // Recreate indexes
-        this.db.exec('CREATE INDEX IF NOT EXISTS idx_files_status ON files(status)');
-        this.db.exec('CREATE INDEX IF NOT EXISTS idx_files_folder ON files(folder_mapping_id)');
-        this.db.exec('CREATE INDEX IF NOT EXISTS idx_files_format ON files(original_format)');
-
-        this.db.exec('COMMIT');
-        this.logger.info('Migration completed: Added analyzed status to files table');
-      }
-    } catch (error: any) {
-      this.logger.warn('Migration for analyzed status failed or already applied:', error?.message || error);
-      this.db.exec('ROLLBACK');
-    }
-
-    // Migration: Add 'analyzed' status to library_files table
-    try {
-      const libFilesCreateSql = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='library_files'").get() as { sql: string } | undefined;
-
-      if (libFilesCreateSql && !libFilesCreateSql.sql.includes("'analyzed'")) {
-        this.logger.info('Running migration: Add analyzed status to library_files table');
-
-        // Begin transaction
-        this.db.exec('BEGIN TRANSACTION');
-
-        // Create new table with updated constraint and metadata column
-        this.db.exec(`
-          CREATE TABLE library_files_new (
-            id TEXT PRIMARY KEY,
-            library_id TEXT NOT NULL,
-            filename TEXT NOT NULL,
-            filepath TEXT NOT NULL,
-            filesize INTEGER,
-            format TEXT,
-            duration INTEGER,
-            status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'queued', 'processing', 'completed', 'failed', 'skipped', 'analyzed')),
-            job_id TEXT,
-            progress INTEGER DEFAULT 0 CHECK(progress >= 0 AND progress <= 100),
-            error_message TEXT,
-            metadata TEXT,
-            created_at INTEGER DEFAULT (strftime('%s', 'now')),
-            updated_at INTEGER DEFAULT (strftime('%s', 'now')),
-            FOREIGN KEY (library_id) REFERENCES libraries(id) ON DELETE CASCADE
-          )
-        `);
-
-        // Copy data
-        this.db.exec(`
-          INSERT INTO library_files_new (id, library_id, filename, filepath, filesize, format, duration, status, job_id, progress, error_message, metadata, created_at, updated_at)
-          SELECT id, library_id, filename, filepath, filesize, format, duration, status, job_id, progress, error_message, NULL, created_at, updated_at
-          FROM library_files
-        `);
-
-        // Drop old table
-        this.db.exec('DROP TABLE library_files');
-
-        // Rename new table
-        this.db.exec('ALTER TABLE library_files_new RENAME TO library_files');
-
-        // Recreate indexes
-        this.db.exec('CREATE INDEX IF NOT EXISTS idx_library_files_library ON library_files(library_id)');
-        this.db.exec('CREATE INDEX IF NOT EXISTS idx_library_files_status ON library_files(status)');
-        this.db.exec('CREATE INDEX IF NOT EXISTS idx_library_files_format ON library_files(format)');
-
-        this.db.exec('COMMIT');
-        this.logger.info('Migration completed: Added analyzed status and metadata to library_files table');
-      }
-    } catch (error: any) {
-      this.logger.warn('Migration for library_files analyzed status failed or already applied:', error?.message || error);
-      this.db.exec('ROLLBACK');
-    }
   }
 
   /**
@@ -1421,16 +1256,17 @@ export class EncorrDatabase {
     name: string;
     description?: string;
     config: HandBrakeConfig;
+    quick_select?: boolean;
   }): Preset {
     const id = uuidv4();
     const now = Math.floor(Date.now() / 1000);
 
     const stmt = this.db.prepare(`
-      INSERT INTO presets (id, name, description, is_builtin, config, created_at)
-      VALUES (?, ?, ?, 0, ?, ?)
+      INSERT INTO presets (id, name, description, is_builtin, quick_select, config, created_at)
+      VALUES (?, ?, ?, 0, ?, ?, ?)
     `);
 
-    stmt.run(id, data.name, data.description ?? null, JSON.stringify(data.config), now);
+    stmt.run(id, data.name, data.description ?? null, data.quick_select ? 1 : 0, JSON.stringify(data.config), now);
 
     return this.getPresetById(id)!;
   }
@@ -1457,6 +1293,7 @@ export class EncorrDatabase {
     name?: string;
     description?: string;
     config?: HandBrakeConfig;
+    quick_select?: boolean;
   }): void {
     const updates: string[] = [];
     const values: any[] = [];
@@ -1472,6 +1309,10 @@ export class EncorrDatabase {
     if (data.config !== undefined) {
       updates.push('config = ?');
       values.push(JSON.stringify(data.config));
+    }
+    if (data.quick_select !== undefined) {
+      updates.push('quick_select = ?');
+      values.push(data.quick_select ? 1 : 0);
     }
 
     if (updates.length === 0) return;
@@ -1493,6 +1334,114 @@ export class EncorrDatabase {
       description: row.description,
       is_builtin: Boolean(row.is_builtin),
       config: JSON.parse(row.config),
+      created_at: row.created_at,
+    };
+  }
+
+  // ========================================================================
+  // Quick Select Presets
+  // ========================================================================
+
+  createQuickSelectPreset(data: {
+    name: string;
+    description?: string;
+    nvidia_preset_id?: string;
+    amd_preset_id?: string;
+    intel_preset_id?: string;
+    cpu_preset_id?: string;
+  }): QuickSelectPreset {
+    const id = uuidv4();
+    const now = Math.floor(Date.now() / 1000);
+
+    const stmt = this.db.prepare(`
+      INSERT INTO quick_select_presets (id, name, description, is_builtin, nvidia_preset_id, amd_preset_id, intel_preset_id, cpu_preset_id, created_at)
+      VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?)
+    `);
+
+    stmt.run(
+      id,
+      data.name,
+      data.description ?? null,
+      data.nvidia_preset_id ?? null,
+      data.amd_preset_id ?? null,
+      data.intel_preset_id ?? null,
+      data.cpu_preset_id ?? null,
+      now
+    );
+
+    return this.getQuickSelectPresetById(id)!;
+  }
+
+  getQuickSelectPresetById(id: string): QuickSelectPreset | undefined {
+    const stmt = this.db.prepare('SELECT * FROM quick_select_presets WHERE id = ?');
+    const row = stmt.get(id) as any;
+    return row ? this.parseQuickSelectPreset(row) : undefined;
+  }
+
+  getAllQuickSelectPresets(): QuickSelectPreset[] {
+    const stmt = this.db.prepare('SELECT * FROM quick_select_presets ORDER BY is_builtin DESC, name ASC');
+    const rows = stmt.all() as any[];
+    return rows.map(row => this.parseQuickSelectPreset(row));
+  }
+
+  updateQuickSelectPreset(id: string, data: {
+    name?: string;
+    description?: string;
+    nvidia_preset_id?: string;
+    amd_preset_id?: string;
+    intel_preset_id?: string;
+    cpu_preset_id?: string;
+  }): void {
+    const updates: string[] = [];
+    const values: any[] = [];
+
+    if (data.name !== undefined) {
+      updates.push('name = ?');
+      values.push(data.name);
+    }
+    if (data.description !== undefined) {
+      updates.push('description = ?');
+      values.push(data.description);
+    }
+    if (data.nvidia_preset_id !== undefined) {
+      updates.push('nvidia_preset_id = ?');
+      values.push(data.nvidia_preset_id);
+    }
+    if (data.amd_preset_id !== undefined) {
+      updates.push('amd_preset_id = ?');
+      values.push(data.amd_preset_id);
+    }
+    if (data.intel_preset_id !== undefined) {
+      updates.push('intel_preset_id = ?');
+      values.push(data.intel_preset_id);
+    }
+    if (data.cpu_preset_id !== undefined) {
+      updates.push('cpu_preset_id = ?');
+      values.push(data.cpu_preset_id);
+    }
+
+    if (updates.length === 0) return;
+
+    values.push(id);
+    const stmt = this.db.prepare(`UPDATE quick_select_presets SET ${updates.join(', ')} WHERE id = ?`);
+    stmt.run(...values);
+  }
+
+  deleteQuickSelectPreset(id: string): void {
+    const stmt = this.db.prepare('DELETE FROM quick_select_presets WHERE id = ? AND is_builtin = 0');
+    stmt.run(id);
+  }
+
+  private parseQuickSelectPreset(row: any): QuickSelectPreset {
+    return {
+      id: row.id,
+      name: row.name,
+      description: row.description,
+      is_builtin: Boolean(row.is_builtin),
+      nvidia_preset_id: row.nvidia_preset_id,
+      amd_preset_id: row.amd_preset_id,
+      intel_preset_id: row.intel_preset_id,
+      cpu_preset_id: row.cpu_preset_id,
       created_at: row.created_at,
     };
   }

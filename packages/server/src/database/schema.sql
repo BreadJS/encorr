@@ -130,6 +130,7 @@ CREATE INDEX IF NOT EXISTS idx_jobs_node ON jobs(node_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_preset ON jobs(preset_id);
 
 -- ============================================================================
+-- ============================================================================
 -- Presets Table
 -- ============================================================================
 
@@ -164,6 +165,35 @@ INSERT OR IGNORE INTO presets (id, name, description, is_builtin, config) VALUES
      '{"video_codec":"h265","encoding_type":"gpu","gpu_type":"amd","quality_mode":"qp","quality":24,"preset":"fast","container":"mkv","audio_encoder":"copy","audio_bitrate":0,"subtitles":"all"}'),
     ('builtin-mobile-h264-cpu', 'Mobile Optimized H.264 (CPU)', 'Optimized for mobile devices with 720p cap', 1,
      '{"video_codec":"h264","encoding_type":"cpu","quality_mode":"crf","quality":24,"preset":"fast","container":"mkv","max_width":1280,"max_height":720,"audio_encoder":"copy","audio_bitrate":0,"subtitles":"first"}');
+
+-- ============================================================================
+-- Quick Select Presets Table
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS quick_select_presets (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    is_builtin BOOLEAN DEFAULT 0,
+    nvidia_preset_id TEXT,
+    amd_preset_id TEXT,
+    intel_preset_id TEXT,
+    cpu_preset_id TEXT,
+    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    FOREIGN KEY (nvidia_preset_id) REFERENCES presets(id) ON DELETE SET NULL,
+    FOREIGN KEY (amd_preset_id) REFERENCES presets(id) ON DELETE SET NULL,
+    FOREIGN KEY (intel_preset_id) REFERENCES presets(id) ON DELETE SET NULL,
+    FOREIGN KEY (cpu_preset_id) REFERENCES presets(id) ON DELETE SET NULL
+);
+
+-- Insert built-in quick select presets
+INSERT OR IGNORE INTO quick_select_presets (id, name, description, is_builtin, nvidia_preset_id, amd_preset_id, intel_preset_id, cpu_preset_id) VALUES
+    ('quick-select-h264', 'H.264 Quick Select', 'H.264 encoding for all GPU vendors', 1,
+     'builtin-nvidia-h264-gpu', 'builtin-amd-h264-gpu', 'builtin-intel-h264-gpu', 'builtin-fast-h264-cpu'),
+    ('quick-select-h265', 'H.265 Quick Select', 'H.265 encoding for all GPU vendors', 1,
+     'builtin-nvidia-h265-gpu', 'builtin-amd-h265-gpu', 'builtin-intel-h265-gpu', 'builtin-high-quality-h265-cpu');
+
+CREATE INDEX IF NOT EXISTS idx_quick_select_presets_name ON quick_select_presets(name);
 
 -- ============================================================================
 -- Settings Table

@@ -41,13 +41,6 @@ interface SmartTranscodeDialogProps {
 // Helper Functions
 // ============================================================================
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return bytes + ' B';
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-  return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
-}
-
 // Helper to detect if a preset is GPU-based from config
 function isGpuPreset(preset: any): boolean {
   // Check for HandBrake-style video_encoder field first (prioritize this for user presets)
@@ -173,15 +166,6 @@ export function SmartTranscodeDialog({
   const amdPresets = gpuPresets.filter(p => getGpuType(p) === 'amd');
   const intelPresets = gpuPresets.filter(p => getGpuType(p) === 'intel');
 
-  // Debug logging
-  console.log('[SmartTranscodeDialog] Presets Debug:', {
-    allPresetsCount: allPresets.length,
-    gpuPresetsCount: gpuPresets.length,
-    nvidiaPresetsCount: nvidiaPresets.length,
-    nvidiaPresetNames: nvidiaPresets.map(p => ({ id: p.id, name: p.name, encoder: p.config.video_encoder, gpuType: getGpuType(p) })),
-    apiPresetsCount: apiPresets.length,
-  });
-
   // Selected preset state
   const [selectedPresetId, setSelectedPresetId] = useState<string>('');
 
@@ -201,17 +185,23 @@ export function SmartTranscodeDialog({
 
   // Initialize vendor-specific preset defaults
   const initializeVendorPresets = () => {
-    // NVIDIA default
-    const nvidiaH265 = nvidiaPresets.find(p => getVideoCodec(p) === 'h265');
-    setNvidiaPresetId(nvidiaH265?.id || nvidiaPresets[0]?.id || '');
+    // NVIDIA default - H.265
+    const nvidiaH265 = nvidiaPresets.find(p => getVideoCodec(p) === 'h265')
+                      || nvidiaPresets.find(p => getVideoCodec(p) === 'h264')
+                      || nvidiaPresets[0];
+    setNvidiaPresetId(nvidiaH265?.id || '');
 
-    // AMD default
-    const amdH265 = amdPresets.find(p => getVideoCodec(p) === 'h265');
-    setAmdPresetId(amdH265?.id || amdPresets[0]?.id || '');
+    // AMD default - H.265
+    const amdH265 = amdPresets.find(p => getVideoCodec(p) === 'h265')
+                   || amdPresets.find(p => getVideoCodec(p) === 'h264')
+                   || amdPresets[0];
+    setAmdPresetId(amdH265?.id || '');
 
-    // Intel default
-    const intelH265 = intelPresets.find(p => getVideoCodec(p) === 'h265');
-    setIntelPresetId(intelH265?.id || intelPresets[0]?.id || '');
+    // Intel default - H.265
+    const intelH265 = intelPresets.find(p => getVideoCodec(p) === 'h265')
+                     || intelPresets.find(p => getVideoCodec(p) === 'h264')
+                     || intelPresets[0];
+    setIntelPresetId(intelH265?.id || '');
 
     // CPU default
     const cpuH265 = cpuPresets.find(p => getVideoCodec(p) === 'h265');
@@ -245,20 +235,6 @@ export function SmartTranscodeDialog({
     setNvidiaDropdownOpen(false);
     setAmdDropdownOpen(false);
     setIntelDropdownOpen(false);
-  };
-
-  // Initialize preset when dialog opens
-  const handleDialogOpenChange = (open: boolean) => {
-    if (open) {
-      // Initialize vendor presets if not already set
-      if (!nvidiaPresetId || !amdPresetId || !intelPresetId || !cpuPresetId) {
-        initializeVendorPresets();
-      }
-      if (!selectedPresetId) {
-        setSelectedPresetId(getDefaultPresetForMode(mode));
-      }
-    }
-    onOpenChange(open);
   };
 
   // Get current preset info based on mode and vendor selection

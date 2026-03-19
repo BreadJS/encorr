@@ -13,6 +13,7 @@ import {
   ChevronLeft,
   ChevronRight,
 } from 'lucide-react';
+import logo from '@/assets/logo.png';
 
 const navItems = [
   { path: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -63,9 +64,12 @@ export function Layout({ children }: LayoutProps) {
         {/* Header with logo and collapse button */}
         <div className="flex h-16 items-center justify-end border-b px-4" style={{ borderColor: 'rgba(116, 198, 157, 0.2)' }}>
           {!isCollapsed && (
-            <h1 className="absolute left-4 text-xl font-bold text-white transition-opacity duration-200" style={{ color: '#74c69d' }}>
-              Encorr
-            </h1>
+            <div className="absolute left-4 flex items-center gap-2 transition-opacity duration-200">
+              <img src={logo} alt="Encorr Logo" className="h-7 w-7" />
+              <h1 className="text-xl font-bold text-white" style={{ color: '#74c69d' }}>
+                Encorr
+              </h1>
+            </div>
           )}
           <button
             onClick={toggleSidebar}

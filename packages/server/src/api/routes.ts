@@ -1248,6 +1248,107 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
   });
 
   // ========================================================================
+  // Quick Select Presets
+  // ========================================================================
+
+  fastify.get('/quick-select-presets', async (request, reply) => {
+    const quickSelectPresets = db.getAllQuickSelectPresets();
+    return sendSuccess(quickSelectPresets);
+  });
+
+  fastify.get('/quick-select-presets/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const quickSelectPreset = db.getQuickSelectPresetById(id);
+
+    if (!quickSelectPreset) {
+      reply.status(404);
+      return sendError('Quick Select Preset not found');
+    }
+
+    return sendSuccess(quickSelectPreset);
+  });
+
+  fastify.post('/quick-select-presets', async (request, reply) => {
+    const data = request.body as {
+      name: string;
+      description?: string;
+      nvidia_preset_id?: string;
+      amd_preset_id?: string;
+      intel_preset_id?: string;
+      cpu_preset_id?: string;
+    };
+
+    const quickSelectPreset = db.createQuickSelectPreset({
+      name: data.name,
+      description: data.description,
+      nvidia_preset_id: data.nvidia_preset_id,
+      amd_preset_id: data.amd_preset_id,
+      intel_preset_id: data.intel_preset_id,
+      cpu_preset_id: data.cpu_preset_id,
+    });
+
+    logger.info(`Quick Select Preset ${quickSelectPreset.id} created: ${data.name}`);
+
+    return sendSuccess(quickSelectPreset);
+  });
+
+  fastify.put('/quick-select-presets/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const data = request.body as {
+      name?: string;
+      description?: string;
+      nvidia_preset_id?: string;
+      amd_preset_id?: string;
+      intel_preset_id?: string;
+      cpu_preset_id?: string;
+    };
+
+    const quickSelectPreset = db.getQuickSelectPresetById(id);
+    if (!quickSelectPreset) {
+      reply.status(404);
+      return sendError('Quick Select Preset not found');
+    }
+
+    if (quickSelectPreset.is_builtin) {
+      reply.status(400);
+      return sendError('Cannot modify built-in Quick Select Presets');
+    }
+
+    db.updateQuickSelectPreset(id, {
+      name: data.name,
+      description: data.description,
+      nvidia_preset_id: data.nvidia_preset_id,
+      amd_preset_id: data.amd_preset_id,
+      intel_preset_id: data.intel_preset_id,
+      cpu_preset_id: data.cpu_preset_id,
+    });
+
+    const updated = db.getQuickSelectPresetById(id);
+    return sendSuccess(updated);
+  });
+
+  fastify.delete('/quick-select-presets/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const quickSelectPreset = db.getQuickSelectPresetById(id);
+
+    if (!quickSelectPreset) {
+      reply.status(404);
+      return sendError('Quick Select Preset not found');
+    }
+
+    if (quickSelectPreset.is_builtin) {
+      reply.status(400);
+      return sendError('Cannot delete built-in Quick Select Presets');
+    }
+
+    db.deleteQuickSelectPreset(id);
+
+    logger.info(`Quick Select Preset ${id} deleted`);
+
+    return sendSuccess(null, 'Quick Select Preset deleted');
+  });
+
+  // ========================================================================
   // Settings
   // ========================================================================
 

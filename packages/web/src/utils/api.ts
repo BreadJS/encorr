@@ -229,6 +229,35 @@ export const api = {
     }),
   deletePreset: (id: string) => request<any>(`/presets/${id}`, { method: 'DELETE' }),
 
+  // Quick Select Presets
+  getQuickSelectPresets: () => request<any[]>('/quick-select-presets'),
+  getQuickSelectPreset: (id: string) => request<any>(`/quick-select-presets/${id}`),
+  createQuickSelectPreset: (data: {
+    name: string;
+    description?: string;
+    nvidia_preset_id?: string;
+    amd_preset_id?: string;
+    intel_preset_id?: string;
+    cpu_preset_id?: string;
+  }) =>
+    request<any>('/quick-select-presets', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  updateQuickSelectPreset: (id: string, data: {
+    name?: string;
+    description?: string;
+    nvidia_preset_id?: string;
+    amd_preset_id?: string;
+    intel_preset_id?: string;
+    cpu_preset_id?: string;
+  }) =>
+    request<any>(`/quick-select-presets/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  deleteQuickSelectPreset: (id: string) => request<any>(`/quick-select-presets/${id}`, { method: 'DELETE' }),
+
   // Settings
   getSettings: () => request<Record<string, any>>('/settings'),
   updateSettings: (data: any) =>

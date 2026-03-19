@@ -217,6 +217,18 @@ export interface Preset {
   created_at: number;
 }
 
+export interface QuickSelectPreset {
+  id: string;
+  name: string;
+  description: string | null;
+  is_builtin: boolean;
+  nvidia_preset_id: string | null;
+  amd_preset_id: string | null;
+  intel_preset_id: string | null;
+  cpu_preset_id: string | null;
+  created_at: number;
+}
+
 export interface FFmpegConfig {
   // Video settings
   video_codec: 'h264' | 'h265';
