@@ -572,13 +572,13 @@ export function buildFFmpegArgs(options: FFmpegOptions): string[] {
     } else {
       // Fallback to standard hwaccel method
       console.log(`[buildFFmpegArgs] No explicit decoder found for ${sourceCodec} on ${config.gpu_type}, using hwaccel`);
-      useHwaccel(args, config.gpu_type, config.gpu_device_id);
+      useHwaccelDecode(args, config.gpu_type, config.gpu_device_id);
       args.push('-i', input);
     }
   } else {
     // Standard hardware acceleration (hint-based, may still use software decoding)
     if (config.encoding_type === 'gpu' && config.gpu_type) {
-      useHwaccel(args, config.gpu_type, config.gpu_device_id);
+      useHwaccelDecode(args, config.gpu_type, config.gpu_device_id);
     }
 
     // Input
@@ -588,6 +588,16 @@ export function buildFFmpegArgs(options: FFmpegOptions): string[] {
   // Video encoder
   const encoder = getFFmpegEncoder(config);
   args.push('-c:v', encoder);
+
+  // Add GPU device selection for ENCODING (this is where -gpu belongs for NVENC)
+  // For Intel and AMD, device selection is handled via -init_hw_device during decode setup
+  if (config.encoding_type === 'gpu' && config.gpu_type === 'nvidia' && config.gpu_device_id !== undefined) {
+    // -gpu is an NVENC encoder option, must come after -i and before -c:v
+    // But since we already added -c:v, we need to insert it right after the encoder name
+    // FFmpeg allows encoder options after -c:v encoder_name
+    args.push('-gpu', config.gpu_device_id.toString());
+    console.log(`[buildFFmpegArgs] NVENC GPU device ${config.gpu_device_id} selected`);
+  }
 
   // Quality settings
   args.push(...getQualityParams(config));
@@ -661,28 +671,49 @@ export function buildFFmpegArgs(options: FFmpegOptions): string[] {
   return args;
 }
 
-// Helper function to add hwaccel arguments
-function useHwaccel(args: string[], gpuType: GPUVendor, gpuDeviceId?: number): void {
+// Helper function to add hwaccel arguments for DECODING
+// Note: GPU device selection for ENCODING is handled separately in buildFFmpegArgs
+function useHwaccelDecode(args: string[], gpuType: GPUVendor, gpuDeviceId?: number): void {
   switch (gpuType) {
     case 'nvidia':
       args.push('-hwaccel', 'cuda');
+      // For CUDA decoding with device selection (FFmpeg 6.0+)
       if (gpuDeviceId !== undefined) {
-        args.push('-gpu', gpuDeviceId.toString());
+        args.push('-hwaccel_device', gpuDeviceId.toString());
       }
       break;
     case 'intel':
       args.push('-hwaccel', 'qsv');
+      // For Intel QSV with device selection
       if (gpuDeviceId !== undefined) {
-        // For Intel QSV, use -init_hw_device to specify the GPU
-        args.push('-init_hw_device', `qsv:hw_${gpuDeviceId}`);
+        // Initialize QSV device before using it
+        args.push('-init_hw_device', `qsv=qsv:hw_${gpuDeviceId}`);
+        args.push('-filter_hw_device', 'qsv');
       }
       break;
     case 'amd':
       // AMD on Windows uses d3d11va
       args.push('-hwaccel', 'd3d11va');
+      // AMD d3d11va doesn't have a simple device selection flag in FFmpeg
+      // The driver typically handles device selection
+      break;
+  }
+}
+
+// Helper function to add GPU encoding options (called separately, after input)
+function addGpuEncoderOptions(args: string[], gpuType: GPUVendor, gpuDeviceId?: number): void {
+  switch (gpuType) {
+    case 'nvidia':
+      // -gpu is an NVENC encoder option
       if (gpuDeviceId !== undefined) {
-        args.push('-init_hw_device', `d3d11va:hw_${gpuDeviceId}`);
+        args.push('-gpu', gpuDeviceId.toString());
       }
+      break;
+    // Intel QSV and AMD AMF don't have separate encoder device options
+    // They use -init_hw_device during decoding setup
+    case 'intel':
+    case 'amd':
+      // Device selection handled during decode setup
       break;
   }
 }
