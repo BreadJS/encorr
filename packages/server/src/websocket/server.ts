@@ -1352,6 +1352,11 @@ export class EncorrWebSocketServer {
     // Get pending GPU assignments for this node
     const pendingGpuDevices = this.pendingGpuAssignments.get(node.id) || new Set<number>();
 
+    this.logger.debug(`[WORKERS] Node ${node.name} (${node.id}):`);
+    this.logger.debug(`[WORKERS]   max_workers: ${JSON.stringify(maxWorkers)}`);
+    this.logger.debug(`[WORKERS]   activeJobs: ${activeJobs.length}, pendingAssignments: ${pendingCount}`);
+    this.logger.debug(`[WORKERS]   pendingGpuDevices: [${Array.from(pendingGpuDevices).join(', ')}]`);
+
     // Calculate available CPU workers
     const availableCpu = Math.max(0, (maxWorkers.cpu || 0) - activeJobs.length - pendingCount);
 
@@ -1368,7 +1373,11 @@ export class EncorrWebSocketServer {
       const pendingOnThisGpu = pendingGpuDevices.has(gpuIndex) ? 1 : 0;
 
       // Available slots for this GPU
-      return Math.max(0, maxSlots - jobsOnThisGpu - pendingOnThisGpu);
+      const available = Math.max(0, maxSlots - jobsOnThisGpu - pendingOnThisGpu);
+
+      this.logger.debug(`[WORKERS]   GPU ${gpuIndex}: max=${maxSlots}, jobs=${jobsOnThisGpu}, pending=${pendingOnThisGpu}, available=${available}`);
+
+      return available;
     });
 
     // Detailed logging
@@ -1497,18 +1506,31 @@ export class EncorrWebSocketServer {
       // Check if preset uses GPU encoding
       const usesGpu = preset?.config?.encoding_type === 'gpu';
 
+      this.logger.info(`[JOB_ASSIGN_LOOP] Processing job ${job.id}, usesGpu=${usesGpu}, assignedCount=${assignedCount}`);
+
       if (usesGpu) {
         // Find node with available GPU workers
         const nodeWithGpu = this.findNodeWithAvailableGpu(onlineNodes);
         if (nodeWithGpu) {
+          // Log available GPUs on this node BEFORE finding one
+          const availableBefore = this.getAvailableWorkers(nodeWithGpu);
+          this.logger.info(`[GPU_SELECT] Node ${nodeWithGpu.name} available GPUs: [${availableBefore.gpus.map((slots, i) => `GPU${i}:${slots}`).join(', ')}]`);
+
           // Find specific GPU device on this node
           const gpuDeviceId = this.findAvailableGpuDevice(nodeWithGpu);
+          this.logger.info(`[GPU_SELECT] Selected GPU device ${gpuDeviceId} for job ${job.id}`);
+
           if (gpuDeviceId !== null) {
             if (this.assignJobToNodeWithRetry(nodeWithGpu, job, preset, gpuDeviceId)) {
               assignedCount++;
+              this.logger.info(`[JOB_ASSIGN_LOOP] Job ${job.id} assigned to GPU ${gpuDeviceId}, assignedCount now ${assignedCount}`);
               continue;
             }
+          } else {
+            this.logger.warn(`[GPU_SELECT] findAvailableGpuDevice returned null for node ${nodeWithGpu.name}`);
           }
+        } else {
+          this.logger.warn(`[GPU_SELECT] No node with available GPU found for job ${job.id}`);
         }
         this.logger.warn(`No GPU workers available for GPU job ${job.id}, falling back to CPU`);
       }

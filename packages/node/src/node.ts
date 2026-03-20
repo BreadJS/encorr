@@ -231,8 +231,9 @@ export class EncorrNode {
     const presetConfig = config.ffmpeg || {};
 
     this.logger.info(`[JOB_ASSIGN] Job assigned: ${jobId}`);
-    this.logger.info(`[JOB_ASSIGN]   full config: ${JSON.stringify(config, null, 2)}`);
-    this.logger.info(`[JOB_ASSIGN]   preset config: ${JSON.stringify(presetConfig, null, 2)}`);
+    this.logger.info(`[JOB_ASSIGN]   encoding_type: ${presetConfig.encoding_type}`);
+    this.logger.info(`[JOB_ASSIGN]   gpu_type: ${presetConfig.gpu_type}`);
+    this.logger.info(`[JOB_ASSIGN]   gpu_device_id: ${presetConfig.gpu_device_id}`);
     this.logger.info(`[JOB_ASSIGN]   action: ${presetConfig.action || 'transcode'}`);
     this.logger.info(`[JOB_ASSIGN]   source: ${config.source_path}`);
     this.logger.info(`[JOB_ASSIGN]   dest: ${config.dest_path}`);
@@ -251,12 +252,18 @@ export class EncorrNode {
     // Accept job
     this.wsClient.sendJobAccept(jobId, true);
 
-    // Determine GPU index from gpu_type (0-based internally, +1 for display)
+    // Use gpu_device_id from server - this is the specific GPU device to use
+    // Server has already load-balanced across available GPU devices
     let gpuIndex: number | undefined = undefined;
-    if (presetConfig.encoding_type === 'gpu' && presetConfig.gpu_type) {
-      if (presetConfig.gpu_type === 'nvidia') gpuIndex = 0;  // GPU 1 for display
-      else if (presetConfig.gpu_type === 'intel') gpuIndex = 1; // GPU 2 for display
-      else if (presetConfig.gpu_type === 'amd') gpuIndex = 2;   // GPU 3 for display
+    if (presetConfig.encoding_type === 'gpu' && presetConfig.gpu_device_id !== undefined) {
+      gpuIndex = presetConfig.gpu_device_id;
+      this.logger.info(`[JOB_ASSIGN] Using GPU device ${gpuIndex} (from server assignment)`);
+    } else if (presetConfig.encoding_type === 'gpu' && presetConfig.gpu_type) {
+      // Fallback to old logic if gpu_device_id not provided
+      if (presetConfig.gpu_type === 'nvidia') gpuIndex = 0;
+      else if (presetConfig.gpu_type === 'intel') gpuIndex = 1;
+      else if (presetConfig.gpu_type === 'amd') gpuIndex = 2;
+      this.logger.warn(`[JOB_ASSIGN] No gpu_device_id provided, using fallback GPU ${gpuIndex} from gpu_type`);
     }
 
     // Check if this is an analyze job
