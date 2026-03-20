@@ -897,6 +897,7 @@ export function Jobs() {
                                 <th className="px-4 py-2 text-left text-xs font-medium text-gray-400" style={{ width: '120px' }}>Progress</th>
                                 <th className="px-4 py-2 text-left text-xs font-medium text-gray-400" style={{ width: '70px' }}>FPS</th>
                                 <th className="px-4 py-2 text-left text-xs font-medium text-gray-400" style={{ width: '70px' }}>Ratio</th>
+                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-400" style={{ width: '60px' }}>Action</th>
                               </tr>
                             </thead>
                             <tbody>
@@ -958,6 +959,17 @@ export function Jobs() {
                                         <span className="text-sm text-gray-400">
                                           {job.ratio || '—'}
                                         </span>
+                                      </td>
+                                      {/* Action - Cancel button */}
+                                      <td className="px-4 py-3">
+                                        <button
+                                          onClick={() => deleteJobMutation.mutate(job.id)}
+                                          className="h-7 w-7 rounded flex items-center justify-center transition-all hover:scale-110 active:scale-95"
+                                          style={{ backgroundColor: '#ef4444', color: '#ffffff' }}
+                                          title="Cancel job"
+                                        >
+                                          <X className="h-3 w-3" />
+                                        </button>
                                       </td>
                                     </tr>
                                   );

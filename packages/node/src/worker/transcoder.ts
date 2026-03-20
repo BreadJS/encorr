@@ -46,6 +46,7 @@ export type ProgressCallback = (progress: number, action: string, eta?: number, 
 
 export class Transcoder {
   private activeJobs: Map<string, ChildProcess> = new Map();
+  private cancelledJobs: Set<string> = new Set(); // Track intentionally cancelled jobs
   private logger: Logger;
   private decoderLogged: boolean = false;
 
@@ -229,9 +230,18 @@ export class Transcoder {
         proc.on('close', (code) => {
           this.activeJobs.delete(jobId);
 
+          // Check if this was an intentional cancellation (SIGTERM = signal 15, typically exits with 255)
+          const wasCancelled = this.cancelledJobs.has(jobId);
+          this.cancelledJobs.delete(jobId); // Clean up tracking
+
           if (code === 0) {
             this.logger.info(`[FFMPEG] Completed successfully`);
             resolve();
+          } else if (wasCancelled) {
+            // Job was intentionally cancelled by user - not an error
+            this.logger.info(`[FFMPEG] Job cancelled by user`);
+            // Reject with a special error that won't be logged as failure
+            reject(new Error('CANCELLED'));
           } else {
             // Log the stderr output for debugging
             const stderrLog = stderrOutput.join('\n');
@@ -283,7 +293,14 @@ export class Transcoder {
     } catch (error) {
       this.activeJobs.delete(jobId);
 
-      this.logger.error(`Transcoding failed: ${jobId}`, error);
+      // Check if this was an intentional cancellation
+      const wasCancelled = error instanceof Error && error.message === 'CANCELLED';
+
+      if (wasCancelled) {
+        this.logger.info(`Transcoding cancelled: ${jobId}`);
+      } else {
+        this.logger.error(`Transcoding failed: ${jobId}`, error);
+      }
 
       // Clean up temp file
       if (existsSync(tempPath)) {
@@ -299,7 +316,7 @@ export class Transcoder {
         original_size: original_size,
         transcoded_size: 0,
         duration_seconds: 0,
-        error: error instanceof Error ? error.message : String(error),
+        error: wasCancelled ? 'Cancelled by user' : (error instanceof Error ? error.message : String(error)),
         output_path: '',
       };
     }
@@ -312,9 +329,10 @@ export class Transcoder {
   cancelJob(jobId: string): boolean {
     const proc = this.activeJobs.get(jobId);
     if (proc) {
+      this.cancelledJobs.add(jobId); // Mark as intentionally cancelled
       proc.kill('SIGTERM');
       this.activeJobs.delete(jobId);
-      this.logger.info(`Cancelled job: ${jobId}`);
+      this.logger.info(`Cancelling job: ${jobId}`);
       return true;
     }
     return false;

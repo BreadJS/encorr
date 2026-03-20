@@ -350,17 +350,29 @@ export class EncorrNode {
           avg_fps: result.avg_fps,
         }, result.output_path);
       } else {
-        this.logger.error(`[JOB_ERROR] Job ${jobId} failed: ${result.error}`);
+        // Check if this was a user cancellation
+        const isCancelled = result.error === 'Cancelled by user';
+        if (isCancelled) {
+          this.logger.info(`[JOB_CANCELLED] Job ${jobId} was cancelled by user`);
+        } else {
+          this.logger.error(`[JOB_ERROR] Job ${jobId} failed: ${result.error}`);
+        }
 
         this.wsClient.sendJobError(jobId, result.error || 'Unknown error', false);
       }
 
     } catch (error) {
-      this.logger.error(`[JOB_ERROR] Job ${jobId} error:`, error);
+      // Check if this was a cancellation
+      const isCancelled = error instanceof Error && error.message === 'CANCELLED';
+      if (isCancelled) {
+        this.logger.info(`[JOB_CANCELLED] Job ${jobId} was cancelled`);
+      } else {
+        this.logger.error(`[JOB_ERROR] Job ${jobId} error:`, error);
+      }
 
       this.wsClient.sendJobError(
         jobId,
-        error instanceof Error ? error.message : String(error),
+        isCancelled ? 'Cancelled by user' : (error instanceof Error ? error.message : String(error)),
         false
       );
     } finally {
