@@ -1565,6 +1565,12 @@ export class EncorrWebSocketServer {
     this.logger.debug(`[FIND_CPU] Checking ${nodes.length} nodes for available CPU workers`);
 
     for (const node of nodes) {
+      // Skip nodes that are not actually connected (WebSocket disconnected)
+      if (!this.isNodeConnected(node.id)) {
+        this.logger.debug(`[FIND_CPU] Skipping node ${node.name} (${node.id}) - not connected via WebSocket`);
+        continue;
+      }
+
       const available = this.getAvailableWorkers(node);
 
       this.logger.debug(`[FIND_CPU] Node ${node.name}: availableCpu=${available.cpu}, maxCpu=${node.max_workers?.cpu || 0}`);
@@ -1600,6 +1606,12 @@ export class EncorrWebSocketServer {
     let minActiveJobs = Infinity;
 
     for (const node of nodes) {
+      // Skip nodes that are not actually connected (WebSocket disconnected)
+      if (!this.isNodeConnected(node.id)) {
+        this.logger.debug(`[GPU_AVAIL] Skipping node ${node.name} (${node.id}) - not connected via WebSocket`);
+        continue;
+      }
+
       const available = this.getAvailableWorkers(node);
       const totalGpuSlotsAvailable = available.gpus.reduce((sum: number, slots: number) => sum + slots, 0);
 
@@ -1763,6 +1775,14 @@ export class EncorrWebSocketServer {
       dest_path: destPath,
       config: enhancedConfig,
     }).catch(error => {
+      // Clear GPU device from pending tracking on assignment failure
+      if (enhancedConfig.encoding_type === 'gpu' && enhancedConfig.gpu_device_id !== undefined) {
+        const pendingGpus = this.pendingGpuAssignments.get(node.id);
+        if (pendingGpus) {
+          pendingGpus.delete(enhancedConfig.gpu_device_id);
+          this.logger.warn(`[GPU_TRACK] Cleared GPU ${enhancedConfig.gpu_device_id} from pending tracking for node ${node.id} due to assignment failure`);
+        }
+      }
       this.logger.error(`Failed to assign job ${job.id}:`, error);
     });
 
