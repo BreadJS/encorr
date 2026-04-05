@@ -4,7 +4,8 @@ import { Card, CardContent } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { TranscodeDialog } from '@/components/ui/TranscodeDialog';
 import { SmartTranscodeDialog } from '@/components/ui/SmartTranscodeDialog';
-import { RefreshCw, ChevronLeft, ChevronRight, Film, Folder, FolderOpen, Check, Search, Filter, Play, Scan, Database, Sparkles, Clock, Zap, X, AlertTriangle } from 'lucide-react';
+import { RefreshCw, ChevronLeft, ChevronRight, Film, Folder, FolderOpen, Check, Search, Filter, Play, Scan, Database, Sparkles, Clock, Zap, X, AlertTriangle, FileText } from 'lucide-react';
+import { ReportDrawer } from '@/components/ReportDrawer';
 import { useState, useMemo } from 'react';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import type { TranscodeMode } from '@encorr/shared';
@@ -34,6 +35,9 @@ export function Files() {
   const [showSmartTranscodeDialog, setShowSmartTranscodeDialog] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   const [perPage] = useState(50);
+  const [reportFileId, setReportFileId] = useState<string | null>(null);
+  const [reportFileName, setReportFileName] = useState('');
+  const [showReportDrawer, setShowReportDrawer] = useState(false);
 
   // Enable WebSocket for real-time updates
   useWebSocket({ enabled: true });
@@ -346,6 +350,7 @@ export function Files() {
   };
 
   return (
+    <>
     <div className="space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between">
@@ -478,7 +483,7 @@ export function Files() {
 
       <div className="flex gap-4 overflow-hidden">
         {/* Sidebar - Folder Navigation */}
-        <Card style={{ backgroundColor: '#252326', border: '1px solid #39363a', width: '240px', flexShrink: 0 }}>
+        <Card style={{ backgroundColor: '#252326', border: 'none', width: '240px', flexShrink: 0 }}>
           <CardContent className="p-0">
             <div className="p-4 border-b border-[#39363a]">
               <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wide">Folders</h3>
@@ -515,7 +520,7 @@ export function Files() {
         {/* Main Content */}
         <div className="flex-1 min-w-0 space-y-4">
           {/* Search and Filters */}
-          <Card style={{ backgroundColor: '#252326', border: '1px solid #39363a' }}>
+          <Card style={{ backgroundColor: '#252326', border: 'none' }}>
             <CardContent className="p-3">
               <div className="flex items-center gap-4">
                 {/* Search */}
@@ -573,7 +578,7 @@ export function Files() {
           </Card>
 
           {/* Files List */}
-          <Card style={{ backgroundColor: '#252326', border: '1px solid #39363a' }}>
+          <Card style={{ backgroundColor: '#252326', border: 'none' }}>
             <CardContent className="p-0">
               {filteredFiles.length === 0 ? (
                 <div className="py-16 text-center">
@@ -773,6 +778,20 @@ export function Files() {
                             </button>
                           ) : null}
                         </div>
+
+                        {/* Report button */}
+                        <button
+                          onClick={() => {
+                            setReportFileId(file.id);
+                            setReportFileName(file.filename || file.name || '');
+                            setShowReportDrawer(true);
+                          }}
+                          className="p-1.5 rounded transition-colors hover:bg-white/10"
+                          style={{ color: '#9ca3af' }}
+                          title="View reports"
+                        >
+                          <FileText className="h-3.5 w-3.5" />
+                        </button>
                       </div>
                     ))}
                   </div>
@@ -832,27 +851,39 @@ export function Files() {
           </Card>
         </div>
       </div>
-
-      {/* Transcode Dialog */}
-      <TranscodeDialog
-        isOpen={showTranscodeDialog}
-        onClose={() => setShowTranscodeDialog(false)}
-        onConfirm={handleTranscodeConfirm}
-        isPending={queueMutation.isPending}
-        mode={transcodeDialogMode}
-        files={files}
-        selectedFiles={selectedFiles}
-      />
-
-      {/* Smart Transcode Dialog */}
-      <SmartTranscodeDialog
-        open={showSmartTranscodeDialog}
-        onOpenChange={setShowSmartTranscodeDialog}
-        files={files.filter((f: any) => selectedFiles.has(f.id))}
-        onConfirm={async (mode, presetId) => {
-          await smartTranscodeMutation.mutateAsync({ mode, presetId });
-        }}
-      />
     </div>
+
+    {/* Transcode Dialog - outside space-y-4 to avoid margin */}
+    <TranscodeDialog
+      isOpen={showTranscodeDialog}
+      onClose={() => setShowTranscodeDialog(false)}
+      onConfirm={handleTranscodeConfirm}
+      isPending={queueMutation.isPending}
+      mode={transcodeDialogMode}
+      files={files}
+      selectedFiles={selectedFiles}
+    />
+
+    {/* Smart Transcode Dialog - outside space-y-4 to avoid margin */}
+    <SmartTranscodeDialog
+      open={showSmartTranscodeDialog}
+      onOpenChange={setShowSmartTranscodeDialog}
+      files={files.filter((f: any) => selectedFiles.has(f.id))}
+      onConfirm={async (mode, presetId) => {
+        await smartTranscodeMutation.mutateAsync({ mode, presetId });
+      }}
+    />
+
+    {/* Report Drawer - outside space-y-4 to avoid margin */}
+    <ReportDrawer
+      fileId={reportFileId ?? ''}
+      fileName={reportFileName}
+      open={showReportDrawer && !!reportFileId}
+      onClose={() => {
+        setReportFileId(null);
+        setShowReportDrawer(false);
+      }}
+    />
+    </>
   );
 }

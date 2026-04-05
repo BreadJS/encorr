@@ -19,8 +19,8 @@ const navItems = [
   { path: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { path: '/nodes', label: 'Nodes', icon: Server },
   { path: '/mappings', label: 'Mappings', icon: FolderOpen },
-  { path: '/files', label: 'Files', icon: FileVideo },
   { path: '/library', label: 'Library', icon: Folder },
+  { path: '/files', label: 'Files', icon: FileVideo },
   { path: '/jobs', label: 'Jobs', icon: ListTodo },
   { path: '/presets', label: 'Presets', icon: Film },
   { path: '/settings', label: 'Settings', icon: Settings },
@@ -57,12 +57,12 @@ export function Layout({ children }: LayoutProps) {
         className="fixed left-0 top-0 z-10 h-full border-r transition-all duration-300 ease-in-out"
         style={{
           backgroundColor: '#282729',
-          borderColor: 'rgba(116, 198, 157, 0.2)',
+          borderColor: '#39363a',
           width: isCollapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_WIDTH,
         }}
       >
         {/* Header with logo and collapse button */}
-        <div className="flex h-16 items-center justify-end border-b px-4" style={{ borderColor: 'rgba(116, 198, 157, 0.2)' }}>
+        <div className="flex h-16 items-center justify-end border-b px-4" style={{ borderColor: '#39363a' }}>
           {!isCollapsed && (
             <div className="absolute left-4 flex items-center gap-2 transition-opacity duration-200">
               <img src={logo} alt="Encorr Logo" className="h-7 w-7" />

@@ -7,9 +7,10 @@ interface DialogProps {
   title: string;
   children: ReactNode;
   footer?: ReactNode;
+  size?: 'sm' | 'md' | 'lg';
 }
 
-export function Dialog({ open, onClose, title, children, footer }: DialogProps) {
+export function Dialog({ open, onClose, title, children, footer, size = 'md' }: DialogProps) {
   const [isClosing, setIsClosing] = useState(false);
   const [isVisible, setIsVisible] = useState(false);
 
@@ -46,8 +47,12 @@ export function Dialog({ open, onClose, title, children, footer }: DialogProps) 
 
       {/* Dialog */}
       <div
-        className={`relative w-full max-w-md rounded-lg shadow-lg ${isClosing ? 'animate-dialog-content-out' : 'animate-dialog-content-in'}`}
-        style={{ backgroundColor: '#252326', border: '1px solid #38363a' }}
+        className={`relative w-full rounded-lg shadow-lg flex flex-col max-h-[85vh] ${isClosing ? 'animate-dialog-content-out' : 'animate-dialog-content-in'}`}
+        style={{
+          backgroundColor: '#252326',
+          border: '1px solid #38363a',
+          maxWidth: size === 'lg' ? '42rem' : size === 'sm' ? '24rem' : '28rem',
+        }}
       >
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b" style={{ borderColor: '#38363a' }}>
@@ -61,7 +66,7 @@ export function Dialog({ open, onClose, title, children, footer }: DialogProps) 
         </div>
 
         {/* Body */}
-        <div className="p-4">
+        <div className="p-4 overflow-y-auto flex-1">
           {children}
         </div>
 

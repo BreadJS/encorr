@@ -694,6 +694,22 @@ export class EncorrWebSocketServer {
     this.sendMessage(ws, createAckMessage(message.id!));
   }
 
+  // Helper to resolve a file_id (from files table) to a library_file_id
+  private resolveLibraryFileId(fileId: string): string | null {
+    const file = this.db.getFileById(fileId);
+    if (!file?.folder_mapping_id) return null;
+
+    const mapping = this.db.getFolderMappingById(file.folder_mapping_id);
+    if (!mapping?.server_path?.startsWith('library:')) return null;
+
+    const fullPath = mapping.node_path && !mapping.node_path.includes('.mkv') && !mapping.node_path.includes('.mp4')
+      ? `${mapping.node_path}/${file.relative_path}`
+      : mapping.node_path || file.relative_path;
+
+    const libFile = this.db.getLibraryFileByFilepath(fullPath);
+    return libFile?.id ?? null;
+  }
+
   // Helper to format duration as HH:MM:SS
   private formatDuration(seconds: number): string {
     const hours = Math.floor(seconds / 3600);
@@ -777,6 +793,7 @@ export class EncorrWebSocketServer {
         this.db.createJobReport({
           job_id: payload.job_id,
           file_id: job.file_id,
+          library_file_id: this.resolveLibraryFileId(job.file_id),
           node_id: connection.nodeId ?? null,
           node_name: nodeRecord?.name ?? null,
           job_type: isAnalyze ? 'analyze' : 'transcode',
@@ -847,6 +864,7 @@ export class EncorrWebSocketServer {
         this.db.createJobReport({
           job_id: payload.job_id,
           file_id: job.file_id,
+          library_file_id: this.resolveLibraryFileId(job.file_id),
           node_id: connection.nodeId ?? null,
           node_name: nodeRecord?.name ?? null,
           job_type: isAnalyze ? 'analyze' : 'transcode',
@@ -1331,6 +1349,7 @@ export class EncorrWebSocketServer {
         this.db.createJobReport({
           job_id: jobId,
           file_id: job.file_id,
+          library_file_id: this.resolveLibraryFileId(job.file_id),
           node_id: job.node_id ?? null,
           node_name: nodeRecord?.name ?? null,
           job_type: isAnalyze ? 'analyze' : 'transcode',
@@ -1666,12 +1685,13 @@ export class EncorrWebSocketServer {
             this.logger.warn(`[GPU_SELECT] findAvailableGpuDevice returned null for node ${nodeWithGpu.name}`);
           }
         } else {
-          this.logger.warn(`[GPU_SELECT] No node with available GPU found for job ${job.id}`);
+          this.logger.warn(`[GPU_SELECT] No node with available GPU found for job ${job.id}, keeping in queue`);
         }
-        this.logger.warn(`No GPU workers available for GPU job ${job.id}, falling back to CPU`);
+        // Don't fall back to CPU for GPU jobs - keep them queued until GPU is available
+        continue;
       }
 
-      // Fall back to CPU workers
+      // CPU jobs - assign to CPU workers
       const nodeWithCpu = this.findNodeWithAvailableCpu(onlineNodes);
       if (nodeWithCpu) {
         if (this.assignJobToNodeWithRetry(nodeWithCpu, job, preset)) {

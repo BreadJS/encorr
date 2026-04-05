@@ -317,6 +317,7 @@ export function SmartTranscodeDialog({
       open={open}
       onClose={() => onOpenChange(false)}
       title="Smart Transcode"
+      size="lg"
       footer={
         <>
           <Button

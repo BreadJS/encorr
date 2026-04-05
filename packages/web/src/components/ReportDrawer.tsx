@@ -98,7 +98,7 @@ export function ReportDrawer({ fileId, fileName, open, onClose }: ReportDrawerPr
               Loading reports...
             </div>
           ) : reports.length === 0 ? (
-            <div className="flex items-center justify-center py-12 text-gray-400">
+            <div className="flex flex-col items-center justify-center py-12 text-gray-400">
               <FileText className="h-8 w-8 text-gray-600 mb-3" />
               <p>No reports yet</p>
               <p className="text-sm text-gray-500 mt-1">Reports will appear here after jobs are run</p>
