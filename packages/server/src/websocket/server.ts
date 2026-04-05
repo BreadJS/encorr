@@ -766,9 +766,40 @@ export class EncorrWebSocketServer {
       metadata: metadata,
     });
 
-    this.eventHandlers.jobCompleted?.(payload.job_id, metadata);
+    // Create job report
+    try {
+      const node = connection.nodeId ? this.db.getNodeById(connection.nodeId) : null;
+      const job = this.db.getJobById(payload.job_id);
+      if (job) {
+        const preset = this.db.getPresetById(job.preset_id);
+        const isAnalyze = !!payload.metadata;
+        const nodeRecord = connection.nodeId ? this.db.getAllNodes().find(n => n.id === connection.nodeId) : null;
+        this.db.createJobReport({
+          job_id: payload.job_id,
+          file_id: job.file_id,
+          node_id: connection.nodeId ?? null,
+          node_name: nodeRecord?.name ?? null,
+          job_type: isAnalyze ? 'analyze' : 'transcode',
+          preset_id: preset?.id ?? null,
+          preset_name: preset?.name ?? null,
+          status: 'completed',
+          ffmpeg_logs: payload.ffmpeg_logs ?? null,
+          node_logs: payload.decoder_info ?? null,
+          original_size: payload.stats?.original_size ?? null,
+          output_size: payload.stats?.transcoded_size ?? null,
+          duration_seconds: payload.stats?.duration_seconds ?? null,
+          avg_fps: payload.stats?.avg_fps ?? null,
+          started_at: job.started_at ?? null,
+          completed_at: Math.floor(Date.now() / 1000),
+          config: preset ? JSON.stringify(preset.config) : null,
+          metadata: JSON.stringify(payload.metadata || payload.stats || null),
+        });
+      }
+    } catch (reportErr) {
+      this.logger.error(`[REPORT] Failed to create report: ${reportErr instanceof Error ? reportErr.message : String(reportErr)}`);
+    }
 
-    // Broadcast updates to web clients
+    this.eventHandlers.jobCompleted?.(payload.job_id, metadata);    // Broadcast updates to web clients
     this.broadcastJobsUpdate();
     this.broadcastNodesUpdate();
 
@@ -805,6 +836,35 @@ export class EncorrWebSocketServer {
       message: `Job ${payload.job_id} failed: ${payload.error}`,
       metadata: payload.details,
     });
+
+    // Create job report for failure
+    try {
+      const job = this.db.getJobById(payload.job_id);
+      if (job) {
+        const preset = this.db.getPresetById(job.preset_id);
+        const nodeRecord = connection.nodeId ? this.db.getAllNodes().find(n => n.id === connection.nodeId) : null;
+        const isAnalyze = (preset?.config as any)?.action === 'analyze';
+        this.db.createJobReport({
+          job_id: payload.job_id,
+          file_id: job.file_id,
+          node_id: connection.nodeId ?? null,
+          node_name: nodeRecord?.name ?? null,
+          job_type: isAnalyze ? 'analyze' : 'transcode',
+          preset_id: preset?.id ?? null,
+          preset_name: preset?.name ?? null,
+          status: 'failed',
+          error_message: payload.error,
+          ffmpeg_logs: payload.ffmpeg_logs ?? null,
+          duration_seconds: null,
+          avg_fps: null,
+          started_at: job.started_at ?? null,
+          completed_at: Math.floor(Date.now() / 1000),
+          config: preset ? JSON.stringify(preset.config) : null,
+        });
+      }
+    } catch (reportErr) {
+      this.logger.error(`[REPORT] Failed to create failure report: ${reportErr instanceof Error ? reportErr.message : String(reportErr)}`);
+    }
 
     this.eventHandlers.jobFailed?.(payload.job_id, payload.error);
 
@@ -1261,7 +1321,31 @@ export class EncorrWebSocketServer {
 
     this.db.cancelJob(jobId);
 
-    // Broadcast updates to all connected clients
+    // Create job report for cancelled job
+    try {
+      const job = this.db.getJobById(jobId);
+      if (job) {
+        const preset = this.db.getPresetById(job.preset_id);
+        const nodeRecord = job.node_id ? this.db.getAllNodes().find(n => n.id === job.node_id) : null;
+        const isAnalyze = (preset?.config as any)?.action === 'analyze';
+        this.db.createJobReport({
+          job_id: jobId,
+          file_id: job.file_id,
+          node_id: job.node_id ?? null,
+          node_name: nodeRecord?.name ?? null,
+          job_type: isAnalyze ? 'analyze' : 'transcode',
+          preset_id: preset?.id ?? null,
+          preset_name: preset?.name ?? null,
+          status: 'cancelled',
+          error_message: reason ?? 'Cancelled by user',
+          started_at: job.started_at ?? null,
+          completed_at: Math.floor(Date.now() / 1000),
+          config: preset ? JSON.stringify(preset.config) : null,
+        });
+      }
+    } catch (err) {
+      this.logger.error(`Failed to create report for cancelled job ${jobId}:`, err instanceof Error ? err.message : String(err));
+    }    // Broadcast updates to all connected clients
     this.broadcastJobsUpdate();
     this.broadcastNodesUpdate();
   }

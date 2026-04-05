@@ -283,6 +283,12 @@ export const api = {
   getAllJobHistory: (limit?: number) =>
     request<any[]>(`/job-history${limit ? '?limit=' + limit : ''}`),
 
+  // Reports
+  getReportsForFile: (fileId: string, limit?: number) =>
+    request<any[]>(`/reports/${fileId}${limit ? '?limit=' + limit : ''}`),
+  getReport: (id: string) =>
+    request<any>(`/report/${id}`),
+
   // Logs
   getLogs: (params?: { level?: string; category?: string; limit?: number }) =>
     request<any[]>(`/logs${new URLSearchParams(params as any).toString() ? '?' + new URLSearchParams(params as any).toString() : ''}`),

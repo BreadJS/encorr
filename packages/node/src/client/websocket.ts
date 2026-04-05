@@ -385,11 +385,13 @@ export class WebSocketClient extends EventEmitter {
     transcoded_size: number;
     duration_seconds: number;
     avg_fps?: number;
-  }, outputPath: string): void {
+  }, outputPath: string, ffmpeg_logs?: string, decoder_info?: string): void {
     this.send(createMessage('JOB_COMPLETE', {
       job_id: jobId,
       stats,
       output_path: outputPath,
+      ffmpeg_logs,
+      decoder_info,
     }));
   }
 
@@ -404,19 +406,21 @@ export class WebSocketClient extends EventEmitter {
     fps: number;
     bitrate: number;
     size: number;
-  }, outputPath: string): void {
+  }, outputPath: string, ffmpeg_logs?: string): void {
     this.send(createMessage('JOB_COMPLETE', {
       job_id: jobId,
       metadata,
       output_path: outputPath,
+      ffmpeg_logs,
     }));
   }
 
-  sendJobError(jobId: string, error: string, retryPossible?: boolean): void {
+  sendJobError(jobId: string, error: string, retryPossible?: boolean, ffmpeg_logs?: string): void {
     this.send(createMessage('JOB_ERROR', {
       job_id: jobId,
       error,
       retry_possible: retryPossible ?? false,
+      ffmpeg_logs,
     }));
   }
 

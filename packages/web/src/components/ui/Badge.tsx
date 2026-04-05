@@ -18,7 +18,7 @@ export function StatusBadge({ status }: { status: string }) {
   // User-friendly status names
   const friendlyNames: Record<string, string> = {
     'pending': 'Needs Analysis',
-    'analyzed': 'Ready',
+    'analyzed': 'Transcodeable',
     'queued': 'Queued',
     'processing': 'Processing',
     'completed': 'Completed',

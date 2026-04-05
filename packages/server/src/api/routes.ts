@@ -1224,6 +1224,29 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     return sendSuccess(history);
   });
 
+  // Get reports for a file (by file_id or library_file_id)
+  fastify.get('/reports/:fileId', async (request, reply) => {
+    const { fileId } = request.params as { fileId: string };
+    const { limit } = request.query as { limit?: string };
+
+    const reportLimit = limit ? parseInt(limit, 10) : 50;
+    const reports = db.getJobReportsByFileId(fileId, reportLimit);
+
+    return sendSuccess(reports);
+  });
+
+  // Get a single report
+  fastify.get('/report/:id', async (request, reply) => {
+    const { id } = request.params as { id: string };
+
+    const report = db.getJobReportById(id);
+    if (!report) {
+      reply.status(404);
+      return sendError('Report not found');
+    }
+    return sendSuccess(report);
+  });
+
   // ========================================================================
   // Presets
   // ========================================================================

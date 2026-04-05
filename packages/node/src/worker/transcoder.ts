@@ -32,6 +32,8 @@ export interface TranscodeResult {
   avg_fps?: number;
   error?: string;
   output_path: string;
+  ffmpeg_logs?: string;
+  decoder_info?: string;
 }
 
 // ============================================================================
@@ -125,6 +127,7 @@ export class Transcoder {
     // Create temp file path in job directory
     const tempFileName = basename(options.destPath);
     const tempPath = join(jobDir, tempFileName);
+    let stderrOutput: string[] = []; // Collect stderr for reporting
 
     try {
       // Build FFmpeg command
@@ -151,7 +154,6 @@ export class Transcoder {
       let accumulatedFps: number | undefined = undefined;
       let accumulatedEta: number | undefined = undefined;
       let totalDuration: number | undefined = undefined;
-      let stderrOutput: string[] = []; // Collect stderr for error reporting
 
       // Parse output for progress
       proc.stderr?.on('data', (data: Buffer) => {
@@ -288,6 +290,7 @@ export class Transcoder {
         transcoded_size: transcoded_size,
         duration_seconds: duration,
         output_path: tempPath,
+        ffmpeg_logs: stderrOutput.slice(-500).join('\n'),
       };
 
     } catch (error) {
@@ -318,6 +321,7 @@ export class Transcoder {
         duration_seconds: 0,
         error: wasCancelled ? 'Cancelled by user' : (error instanceof Error ? error.message : String(error)),
         output_path: '',
+        ffmpeg_logs: stderrOutput.slice(-500).join('\n'),
       };
     }
   }

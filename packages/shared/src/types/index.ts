@@ -225,6 +225,42 @@ export interface JobHistory {
 }
 
 // ============================================================================
+// Job Reports
+// ============================================================================
+
+export type JobReportStatus = 'completed' | 'failed' | 'cancelled';
+export type JobReportType = 'analyze' | 'transcode';
+
+export interface JobReport {
+  id: string;
+  job_id: string;
+  file_id: string;
+  library_file_id: string | null;
+  node_id: string | null;
+  node_name: string | null;
+  job_type: JobReportType;
+  preset_id: string | null;
+  preset_name: string | null;
+  status: JobReportStatus;
+  error_message: string | null;
+  ffmpeg_logs: string | null;
+  node_logs: string | null;
+  original_size: number | null;
+  output_size: number | null;
+  original_codec: string | null;
+  output_codec: string | null;
+  original_resolution: string | null;
+  output_resolution: string | null;
+  duration_seconds: number | null;
+  avg_fps: number | null;
+  started_at: number | null;
+  completed_at: number | null;
+  config: string | null;
+  metadata: string | null;
+  created_at: number;
+}
+
+// ============================================================================
 // Presets
 // ============================================================================
 

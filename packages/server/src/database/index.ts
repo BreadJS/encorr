@@ -91,6 +91,47 @@ export class EncorrDatabase {
       this.logger.info('[MIGRATION] Adding output_path column to jobs table');
       this.db.exec('ALTER TABLE jobs ADD COLUMN output_path TEXT');
     }
+
+    // Create job_reports table if it doesn't exist
+    const tables = this.db.pragma('table_info(job_reports)') as any[];
+    if (tables.length === 0) {
+      this.logger.info('[MIGRATION] Creating job_reports table');
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS job_reports (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL,
+          file_id TEXT NOT NULL,
+          library_file_id TEXT,
+          node_id TEXT,
+          node_name TEXT,
+          job_type TEXT NOT NULL CHECK(job_type IN ('analyze', 'transcode')),
+          preset_id TEXT,
+          preset_name TEXT,
+          status TEXT NOT NULL CHECK(status IN ('completed', 'failed', 'cancelled')),
+          error_message TEXT,
+          ffmpeg_logs TEXT,
+          node_logs TEXT,
+          original_size INTEGER,
+          output_size INTEGER,
+          original_codec TEXT,
+          output_codec TEXT,
+          original_resolution TEXT,
+          output_resolution TEXT,
+          duration_seconds REAL,
+          avg_fps REAL,
+          started_at INTEGER,
+          completed_at INTEGER,
+          config TEXT,
+          metadata TEXT,
+          created_at INTEGER DEFAULT (strftime('%s', 'now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_job_reports_file ON job_reports(file_id);
+        CREATE INDEX IF NOT EXISTS idx_job_reports_library_file ON job_reports(library_file_id);
+        CREATE INDEX IF NOT EXISTS idx_job_reports_job ON job_reports(job_id);
+        CREATE INDEX IF NOT EXISTS idx_job_reports_status ON job_reports(status);
+        CREATE INDEX IF NOT EXISTS idx_job_reports_created ON job_reports(created_at);
+      `);
+    }
   }
 
   /**
@@ -1913,11 +1954,75 @@ export class EncorrDatabase {
       },
     };
   }
-}
 
-// ============================================================================
-// Singleton Instance
-// ============================================================================
+  // ==========================================================================
+  // Job Reports
+  // ==========================================================================
+
+  createJobReport(report: {
+    job_id: string;
+    file_id: string;
+    library_file_id?: string | null;
+    node_id?: string | null;
+    node_name?: string | null;
+    job_type: 'analyze' | 'transcode';
+    preset_id?: string | null;
+    preset_name?: string | null;
+    status: 'completed' | 'failed' | 'cancelled';
+    error_message?: string | null;
+    ffmpeg_logs?: string | null;
+    node_logs?: string | null;
+    original_size?: number | null;
+    output_size?: number | null;
+    original_codec?: string | null;
+    output_codec?: string | null;
+    original_resolution?: string | null;
+    output_resolution?: string | null;
+    duration_seconds?: number | null;
+    avg_fps?: number | null;
+    started_at?: number | null;
+    completed_at?: number | null;
+    config?: string | null;
+    metadata?: string | null;
+  }): string {
+    const id = uuidv4();
+    this.db.prepare(`
+      INSERT INTO job_reports (
+        id, job_id, file_id, library_file_id, node_id, node_name,
+        job_type, preset_id, preset_name, status, error_message,
+        ffmpeg_logs, node_logs, original_size, output_size,
+        original_codec, output_codec, original_resolution, output_resolution,
+        duration_seconds, avg_fps, started_at, completed_at, config, metadata
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id, report.job_id, report.file_id,
+      report.library_file_id ?? null, report.node_id ?? null, report.node_name ?? null,
+      report.job_type, report.preset_id ?? null, report.preset_name ?? null,
+      report.status, report.error_message ?? null,
+      report.ffmpeg_logs ?? null, report.node_logs ?? null,
+      report.original_size ?? null, report.output_size ?? null,
+      report.original_codec ?? null, report.output_codec ?? null,
+      report.original_resolution ?? null, report.output_resolution ?? null,
+      report.duration_seconds ?? null, report.avg_fps ?? null,
+      report.started_at ?? null, report.completed_at ?? null,
+      report.config ?? null, report.metadata ?? null
+    );
+    return id;
+  }
+
+  getJobReportsByFileId(fileId: string, limit = 50): any[] {
+    return this.db.prepare(`
+      SELECT * FROM job_reports
+      WHERE file_id = ? OR library_file_id = ?
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(fileId, fileId, limit);
+  }
+
+  getJobReportById(id: string): any | undefined {
+    return this.db.prepare('SELECT * FROM job_reports WHERE id = ?').get(id);
+  }
+}
 
 let dbInstance: EncorrDatabase | null = null;
 

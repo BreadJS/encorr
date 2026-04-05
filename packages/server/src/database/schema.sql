@@ -160,6 +160,44 @@ CREATE INDEX IF NOT EXISTS idx_job_history_status ON job_history(status);
 CREATE INDEX IF NOT EXISTS idx_job_history_created ON job_history(created_at);
 
 -- ============================================================================
+-- Job Reports Table (comprehensive job reports with logs)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS job_reports (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    file_id TEXT NOT NULL,
+    library_file_id TEXT,
+    node_id TEXT,
+    node_name TEXT,
+    job_type TEXT NOT NULL CHECK(job_type IN ('analyze', 'transcode')),
+    preset_id TEXT,
+    preset_name TEXT,
+    status TEXT NOT NULL CHECK(status IN ('completed', 'failed', 'cancelled')),
+    error_message TEXT,
+    ffmpeg_logs TEXT,
+    node_logs TEXT,
+    original_size INTEGER,
+    output_size INTEGER,
+    original_codec TEXT,
+    output_codec TEXT,
+    original_resolution TEXT,
+    output_resolution TEXT,
+    duration_seconds REAL,
+    avg_fps REAL,
+    started_at INTEGER,
+    completed_at INTEGER,
+    config TEXT,
+    metadata TEXT,
+    created_at INTEGER DEFAULT (strftime('%s', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_reports_file ON job_reports(file_id);
+CREATE INDEX IF NOT EXISTS idx_job_reports_library_file ON job_reports(library_file_id);
+CREATE INDEX IF NOT EXISTS idx_job_reports_job ON job_reports(job_id);
+CREATE INDEX IF NOT EXISTS idx_job_reports_status ON job_reports(status);
+CREATE INDEX IF NOT EXISTS idx_job_reports_created ON job_reports(created_at);
+
 -- ============================================================================
 -- Presets Table
 -- ============================================================================

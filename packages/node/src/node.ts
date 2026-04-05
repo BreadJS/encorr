@@ -355,7 +355,7 @@ export class EncorrNode {
           transcoded_size: result.transcoded_size,
           duration_seconds: result.duration_seconds,
           avg_fps: result.avg_fps,
-        }, result.output_path);
+        }, result.output_path, result.ffmpeg_logs, result.decoder_info);
       } else {
         // Check if this was a user cancellation
         const isCancelled = result.error === 'Cancelled by user';
@@ -365,7 +365,7 @@ export class EncorrNode {
           this.logger.error(`[JOB_ERROR] Job ${jobId} failed: ${result.error}`);
         }
 
-        this.wsClient.sendJobError(jobId, result.error || 'Unknown error', false);
+        this.wsClient.sendJobError(jobId, result.error || 'Unknown error', false, result.ffmpeg_logs);
       }
 
     } catch (error) {

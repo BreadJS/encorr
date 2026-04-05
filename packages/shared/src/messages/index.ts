@@ -211,6 +211,8 @@ export const JobCompletePayloadSchema = z.object({
     size: z.number(),
   }).optional(),
   output_path: z.string(),
+  ffmpeg_logs: z.string().optional(),
+  decoder_info: z.string().optional(),
 });
 
 export type JobCompletePayload = z.infer<typeof JobCompletePayloadSchema>;
@@ -221,6 +223,7 @@ export const JobErrorPayloadSchema = z.object({
   error: z.string(),
   retry_possible: z.boolean().default(false),
   details: z.record(z.unknown()).optional(),
+  ffmpeg_logs: z.string().optional(),
 });
 
 export type JobErrorPayload = z.infer<typeof JobErrorPayloadSchema>;
