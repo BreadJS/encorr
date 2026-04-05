@@ -837,19 +837,63 @@ export function Jobs() {
                             <span className="text-xs text-gray-400">System RAM</span>
                           </div>
                           <div className="flex flex-col items-start gap-1">
-                            <div className="flex items-center gap-2">
-                              <div className="w-20 h-2 bg-gray-700 rounded-full overflow-hidden">
-                                <div
-                                  className="h-full transition-all"
-                                  style={{ width: `${node.ram_usage || 0}%`, backgroundColor: '#74c69d' }}
-                                />
+                            {(() => {
+                              // Debug logging
+                              console.log('[Jobs] Full node object:', node);
+                              console.log('[Jobs] Node system_info:', node.system_info);
+                              console.log('[Jobs] Node ram_usage:', node.ram_usage);
+                              console.log('[Jobs] Node cpu_usage:', node.cpu_usage);
+
+                              return null;
+                            })()}
+                            {node.system_info?.ram_total ? (() => {
+                              // ram_usage might be bytes or percentage - detect based on value
+                              const totalBytes = node.system_info.ram_total;
+                              const ramUsage = node.ram_usage || 0;
+                              let usedBytes: number;
+                              let percentage: number;
+
+                              if (ramUsage > 100) {
+                                // ram_usage is in bytes
+                                usedBytes = ramUsage;
+                                percentage = (usedBytes / totalBytes) * 100;
+                              } else {
+                                // ram_usage is a percentage
+                                percentage = ramUsage;
+                                usedBytes = (totalBytes * percentage) / 100;
+                              }
+
+                              const usedGB = (usedBytes / (1024 * 1024 * 1024)).toFixed(2);
+                              const totalGB = (totalBytes / (1024 * 1024 * 1024)).toFixed(2);
+
+                              return (
+                                <>
+                                  <div className="flex items-center gap-2">
+                                    <div className="w-20 h-2 bg-gray-700 rounded-full overflow-hidden">
+                                      <div
+                                        className="h-full transition-all"
+                                        style={{ width: `${Math.min(percentage, 100)}%`, backgroundColor: '#74c69d' }}
+                                      />
+                                    </div>
+                                    <span className="text-xs text-gray-500">{Math.round(percentage)}%</span>
+                                  </div>
+                                  {percentage > 0 && (
+                                    <span className="text-xs text-gray-500">
+                                      {usedGB} GB / {totalGB} GB ({Math.round(percentage)}%)
+                                    </span>
+                                  )}
+                                </>
+                              );
+                            })() : (
+                              <div className="flex items-center gap-2">
+                                <div className="w-20 h-2 bg-gray-700 rounded-full overflow-hidden">
+                                  <div
+                                    className="h-full transition-all"
+                                    style={{ width: `${node.ram_usage || 0}%`, backgroundColor: '#74c69d' }}
+                                  />
+                                </div>
+                                <span className="text-xs text-gray-500">{node.ram_usage || 0}%</span>
                               </div>
-                              <span className="text-xs text-gray-500">{node.ram_usage || 0}%</span>
-                            </div>
-                            {node.system_info?.ram_total && node.ram_usage > 0 && (
-                              <span className="text-xs text-gray-500">
-                                {((node.system_info.ram_total * (node.ram_usage / 100)) / (1024 * 1024 * 1024)).toFixed(2)} GB / {(node.system_info.ram_total / (1024 * 1024 * 1024)).toFixed(2)} GB ({node.ram_usage}%)
-                              </span>
                             )}
                           </div>
                         </div>

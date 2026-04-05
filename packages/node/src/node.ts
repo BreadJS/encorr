@@ -603,7 +603,10 @@ export class EncorrNode {
 
       // Get current memory usage (using systeminformation - reasonably fast)
       const mem = await si.mem();
-      const ramPercent = Math.round((mem.used / mem.total) * 100);
+      // Use available memory to calculate actual used memory (excludes cache/buffers)
+      // mem.available is the memory actually available for applications
+      const actualUsed = mem.total - mem.available;
+      const ramPercent = Math.round((actualUsed / mem.total) * 100);
 
       // Get GPU usage data using vendor-specific tools (nvidia-smi, AMD sysfs)
       // nvidia-smi is very fast (~50ms) so we call it every second, no caching needed

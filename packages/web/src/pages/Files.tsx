@@ -614,7 +614,7 @@ export function Files() {
               ) : (
                 <>
                   {/* Table Header */}
-                  <div className="px-4 py-3 border-b border-[#39363a] flex items-center gap-2" style={{ backgroundColor: '#2a282c' }}>
+                  <div className="px-4 py-3 border-b border-[#39363a] flex items-center gap-2" style={{ backgroundColor: '#2a282c', borderTopLeftRadius: '0.5rem', borderTopRightRadius: '0.5rem' }}>
                     <div className="flex items-center justify-center w-8 flex-shrink-0">
                       <input
                         type="checkbox"
