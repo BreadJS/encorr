@@ -1,6 +1,6 @@
 # Encorr
 
-A user-friendly video transcoding application designed to save storage space by converting video files.
+A user friendly video transcoding application designed to save storage space by converting video files.
 
 ## Quick Start
 
