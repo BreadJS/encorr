@@ -475,7 +475,11 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
   });
 
   // Replace original file with transcoded version
-  fastify.post('/library-files/:id/replace', async (request, reply) => {
+  fastify.post('/library-files/:id/replace', {
+    schema: {
+      body: { type: 'object', properties: {}, additionalProperties: false }
+    }
+  }, async (request, reply) => {
     const { id } = request.params as { id: string };
 
     const file = db.getLibraryFileById(id);
@@ -558,7 +562,11 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
   });
 
   // Backup original file and replace with transcoded version
-  fastify.post('/library-files/:id/backup-replace', async (request, reply) => {
+  fastify.post('/library-files/:id/backup-replace', {
+    schema: {
+      body: { type: 'object', properties: {}, additionalProperties: false }
+    }
+  }, async (request, reply) => {
     const { id } = request.params as { id: string };
 
     const file = db.getLibraryFileById(id);
@@ -641,7 +649,11 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
   });
 
   // Cleanup original backup file (.org)
-  fastify.post('/library-files/:id/cleanup-backup', async (request, reply) => {
+  fastify.post('/library-files/:id/cleanup-backup', {
+    schema: {
+      body: { type: 'object', properties: {}, additionalProperties: false }
+    }
+  }, async (request, reply) => {
     const { id } = request.params as { id: string };
 
     const file = db.getLibraryFileById(id);
