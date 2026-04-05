@@ -116,6 +116,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     current_action TEXT,
     error_message TEXT,
     stats TEXT, -- JSON: Completion stats
+    output_path TEXT, -- Path to the transcoded output file
     started_at INTEGER,
     completed_at INTEGER,
     created_at INTEGER DEFAULT (strftime('%s', 'now')),

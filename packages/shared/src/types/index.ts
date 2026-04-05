@@ -191,6 +191,7 @@ export interface Job {
   current_action: string | null;
   error_message: string | null;
   stats: string | null;
+  output_path?: string | null;  // Path to the transcoded output file
   started_at: number | null;
   completed_at: number | null;
   created_at: number;

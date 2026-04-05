@@ -72,8 +72,25 @@ export class EncorrDatabase {
     const schema = readFileSync(schemaPath, 'utf-8');
     this.db.exec(schema);
 
+    // Run migrations to add new columns to existing databases
+    this.runMigrations();
+
     // Seed built-in presets
     this.seedBuiltinPresets();
+  }
+
+  /**
+   * Run database migrations to add new columns/tables to existing databases
+   */
+  private runMigrations(): void {
+    // Check if jobs table has output_path column, add it if missing
+    const columns = this.db.pragma('table_info(jobs)');
+    const hasOutputPath = columns.some((col: any) => col.name === 'output_path');
+
+    if (!hasOutputPath) {
+      this.logger.info('[MIGRATION] Adding output_path column to jobs table');
+      this.db.exec('ALTER TABLE jobs ADD COLUMN output_path TEXT');
+    }
   }
 
   /**
@@ -1497,6 +1514,7 @@ export class EncorrDatabase {
       current_action: row.current_action,
       error_message: row.error_message,
       stats: row.stats,
+      output_path: row.output_path ?? undefined,
       started_at: row.started_at,
       completed_at: row.completed_at,
       created_at: row.created_at,

@@ -931,13 +931,19 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     }
 
     // Get all online nodes for hardware capability detection
+    // Include both 'online' and 'busy' nodes (busy nodes are still connected and can accept jobs)
     const allNodes = db.getAllNodes();
-    const onlineNodes = allNodes.filter(node => node.status === 'online');
+    const onlineNodes = allNodes.filter(node => node.status === 'online' || node.status === 'busy');
 
     if (onlineNodes.length === 0) {
       reply.status(400);
       return sendError('No online nodes available for transcoding');
     }
+
+    // Track processed source files to prevent duplicates
+    // (different library files may point to the same physical file)
+    const processedSourcePaths = new Set<string>();
+    logger.info(`[SMART_TRANSCODE] Deduplication tracking initialized for ${file_ids.length} files`);
 
     // Process each file and create jobs
     const jobResults: any[] = [];
@@ -950,6 +956,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       let metadata = libFile?.metadata;
       let fileName = libFile?.filename || 'Unknown';
       let fileSize = libFile?.filesize || 0;
+      let sourcePath: string | undefined = libFile?.filepath;
 
       if (!libFile) {
         // Try regular files table
@@ -957,8 +964,9 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
         if (videoFile) {
           // Get metadata from folder mapping if available
           const mapping = db.getFolderMappingById(videoFile.folder_mapping_id);
+          let fullPath: string | undefined;
           if (mapping?.server_path?.startsWith('library:')) {
-            const fullPath = mapping.node_path && !mapping.node_path.includes('.mkv') && !mapping.node_path.includes('.mp4')
+            fullPath = mapping.node_path && !mapping.node_path.includes('.mkv') && !mapping.node_path.includes('.mp4')
               ? `${mapping.node_path}/${videoFile.relative_path}`
               : mapping.node_path || videoFile.relative_path;
 
@@ -972,6 +980,17 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
           }
           fileName = videoFile.relative_path || 'Unknown';
           fileSize = fileSize || videoFile.original_size || 0;
+
+          // For regular files, use the mapped path as the source path for deduplication
+          const regularFileSourcePath = fullPath || `${mapping?.node_path || ''}/${videoFile.relative_path}`;
+
+          // Check if we've already processed this source file (avoid duplicates)
+          if (processedSourcePaths.has(regularFileSourcePath)) {
+            logger.warn(`[SMART_TRANSCODE] Skipping duplicate source file: ${regularFileSourcePath} (file ${file_id})`);
+            continue;
+          }
+          processedSourcePaths.add(regularFileSourcePath);
+          logger.debug(`[SMART_TRANSCODE] Tracking source file: ${regularFileSourcePath}`);
 
           // Create job for regular file using createJob
           if (metadata) {
@@ -1036,6 +1055,18 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
 
       // For library files, use createJobForLibraryFile
       if (libFile) {
+        // Check if we've already processed this source file (avoid duplicates)
+        if (sourcePath && processedSourcePaths.has(sourcePath)) {
+          logger.warn(`[SMART_TRANSCODE] Skipping duplicate source file: ${sourcePath} (library file ${file_id})`);
+          continue;
+        }
+
+        // Mark this source file as processed
+        if (sourcePath) {
+          processedSourcePaths.add(sourcePath);
+          logger.debug(`[SMART_TRANSCODE] Tracking source file: ${sourcePath}`);
+        }
+
         let job;
         let presetId: string;
         let reason: string;

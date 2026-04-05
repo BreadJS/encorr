@@ -714,6 +714,16 @@ export class EncorrWebSocketServer {
     this.logger.debug(`Job complete payload keys: ${Object.keys(payload).join(', ')}`);
     this.logger.debug(`Has metadata: ${!!payload.metadata}, Has stats: ${!!payload.stats}`);
 
+    // Get job details before completion for logging
+    const jobBeforeComplete = this.db.getJobById(payload.job_id);
+    const presetBeforeComplete = jobBeforeComplete ? this.db.getPresetById(jobBeforeComplete.preset_id) : null;
+    const gpuDeviceId = presetBeforeComplete?.config?.gpu_device_id;
+
+    this.logger.info(`[JOB_COMPLETE] Job ${payload.job_id} details before completion:`);
+    this.logger.info(`[JOB_COMPLETE]   status: ${jobBeforeComplete?.status}`);
+    this.logger.info(`[JOB_COMPLETE]   gpu_device_id: ${gpuDeviceId}`);
+    this.logger.info(`[JOB_COMPLETE]   pendingGpuAssignments for node ${connection.nodeId}: [${Array.from(this.pendingGpuAssignments.get(connection.nodeId) || []).join(', ')}]`);
+
     // Check if this is an analyze job (has metadata) or transcode job (has stats)
     if (payload.metadata) {
       // Analyze job - update file metadata
@@ -729,6 +739,10 @@ export class EncorrWebSocketServer {
         duration_seconds: payload.stats.duration_seconds,
         avg_fps: payload.stats.avg_fps,
       }, payload.output_path);
+
+      // Verify the job was marked as completed
+      const jobAfterComplete = this.db.getJobById(payload.job_id);
+      this.logger.info(`[JOB_COMPLETE] Job ${payload.job_id} status after completion: ${jobAfterComplete?.status}`);
     } else {
       this.logger.warn(`Job complete has neither metadata nor stats! Keys: ${Object.keys(payload).join(', ')}`);
     }
@@ -1329,6 +1343,13 @@ export class EncorrWebSocketServer {
 
   // Public method to trigger job assignment immediately
   public assignJobsNow(): void {
+    // Log current state of pending GPU assignments before assigning
+    this.logger.info(`[GPU_STATE] Current pending GPU assignments:`);
+    for (const [nodeId, gpuSet] of this.pendingGpuAssignments.entries()) {
+      const node = this.db.getAllNodes().find(n => n.id === nodeId);
+      this.logger.info(`[GPU_STATE]   Node ${node?.name || nodeId} (${nodeId}): GPUs [${Array.from(gpuSet).join(', ')}]`);
+    }
+
     this.assignQueuedJobs();
   }
 
@@ -1352,10 +1373,10 @@ export class EncorrWebSocketServer {
     // Get pending GPU assignments for this node
     const pendingGpuDevices = this.pendingGpuAssignments.get(node.id) || new Set<number>();
 
-    this.logger.debug(`[WORKERS] Node ${node.name} (${node.id}):`);
-    this.logger.debug(`[WORKERS]   max_workers: ${JSON.stringify(maxWorkers)}`);
-    this.logger.debug(`[WORKERS]   activeJobs: ${activeJobs.length}, pendingAssignments: ${pendingCount}`);
-    this.logger.debug(`[WORKERS]   pendingGpuDevices: [${Array.from(pendingGpuDevices).join(', ')}]`);
+    this.logger.info(`[WORKERS] Node ${node.name} (${node.id}):`);
+    this.logger.info(`[WORKERS]   max_workers: ${JSON.stringify(maxWorkers)}`);
+    this.logger.info(`[WORKERS]   activeJobs: ${activeJobs.length}, pendingAssignments: ${pendingCount}`);
+    this.logger.info(`[WORKERS]   pendingGpuDevices: [${Array.from(pendingGpuDevices).join(', ')}]`);
 
     // Calculate available CPU workers
     const availableCpu = Math.max(0, (maxWorkers.cpu || 0) - activeJobs.length - pendingCount);
@@ -1375,21 +1396,20 @@ export class EncorrWebSocketServer {
       // Available slots for this GPU
       const available = Math.max(0, maxSlots - jobsOnThisGpu - pendingOnThisGpu);
 
-      this.logger.debug(`[WORKERS]   GPU ${gpuIndex}: max=${maxSlots}, jobs=${jobsOnThisGpu}, pending=${pendingOnThisGpu}, available=${available}`);
+      this.logger.info(`[WORKERS]   GPU ${gpuIndex}: max=${maxSlots}, jobs=${jobsOnThisGpu}, pending=${pendingOnThisGpu}, available=${available}`);
 
       return available;
     });
 
-    // Detailed logging
-    if (activeJobs.length > 0 || pendingCount > 0 || pendingGpuDevices.size > 0) {
-      this.logger.debug(`[WORKERS] Node ${node.name}: maxCpu=${maxWorkers.cpu || 0}, activeJobs=${activeJobs.length}, pending=${pendingCount}, availableCpu=${availableCpu}`);
-      this.logger.debug(`[WORKERS] Pending GPU devices: [${Array.from(pendingGpuDevices).join(', ')}]`);
+    // Detailed logging for active jobs
+    if (activeJobs.length > 0) {
+      this.logger.info(`[WORKERS] Active jobs for node ${node.name}:`);
       activeJobs.forEach(j => {
         const preset = this.db.getPresetById(j.preset_id);
         const gpuInfo = preset?.config?.encoding_type === 'gpu'
           ? `, GPU ${preset.config.gpu_device_id ?? 'default'}`
           : ', CPU';
-        this.logger.debug(`[WORKERS]   Active job: ${j.id}, status=${j.status}${gpuInfo}`);
+        this.logger.info(`[WORKERS]   Job ${j.id}: status=${j.status}${gpuInfo}`);
       });
     }
 
@@ -1425,6 +1445,25 @@ export class EncorrWebSocketServer {
     }
     if (allNodes.length > 0) {
       allNodes.forEach(n => this.logger.debug(`[JOB_ASSIGN] Node: ${n.name} (${n.id}), status: ${n.status}, max_workers: ${JSON.stringify(n.max_workers)}`));
+    }
+
+    // Log ALL jobs in database for each online node to help debug slot tracking
+    for (const node of onlineNodes) {
+      const allJobsForNode = this.db.getJobsByNode(node.id);
+      const jobsByStatus: Record<string, number> = {};
+      allJobsForNode.forEach(j => {
+        jobsByStatus[j.status] = (jobsByStatus[j.status] || 0) + 1;
+      });
+      this.logger.info(`[JOB_ASSIGN] Node ${node.name} (${node.id}) has ${allJobsForNode.length} total jobs: ${JSON.stringify(jobsByStatus)}`);
+
+      // List each job with its GPU assignment if applicable
+      allJobsForNode.forEach(j => {
+        const preset = this.db.getPresetById(j.preset_id);
+        const gpuInfo = preset?.config?.encoding_type === 'gpu' && preset.config.gpu_device_id !== undefined
+          ? `, GPU ${preset.config.gpu_device_id}`
+          : '';
+        this.logger.debug(`[JOB_ASSIGN]   Job ${j.id}: status=${j.status}${gpuInfo}`);
+      });
     }
 
     if (queuedJobs.length === 0) {
@@ -1507,6 +1546,10 @@ export class EncorrWebSocketServer {
       const usesGpu = preset?.config?.encoding_type === 'gpu';
 
       this.logger.info(`[JOB_ASSIGN_LOOP] Processing job ${job.id}, usesGpu=${usesGpu}, assignedCount=${assignedCount}`);
+      this.logger.info(`[GPU_STATE] Before processing job ${job.id}, pendingGpuAssignments:`);
+      for (const [nodeId, gpuSet] of this.pendingGpuAssignments.entries()) {
+        this.logger.info(`[GPU_STATE]   Node ${nodeId}: GPUs [${Array.from(gpuSet).join(', ')}]`);
+      }
 
       if (usesGpu) {
         // Find node with available GPU workers
@@ -1515,12 +1558,21 @@ export class EncorrWebSocketServer {
           // Log available GPUs on this node BEFORE finding one
           const availableBefore = this.getAvailableWorkers(nodeWithGpu);
           this.logger.info(`[GPU_SELECT] Node ${nodeWithGpu.name} available GPUs: [${availableBefore.gpus.map((slots, i) => `GPU${i}:${slots}`).join(', ')}]`);
+          this.logger.info(`[GPU_SELECT] Node ${nodeWithGpu.name} max_workers: ${JSON.stringify(nodeWithGpu.max_workers)}`);
 
           // Find specific GPU device on this node
           const gpuDeviceId = this.findAvailableGpuDevice(nodeWithGpu);
           this.logger.info(`[GPU_SELECT] Selected GPU device ${gpuDeviceId} for job ${job.id}`);
 
           if (gpuDeviceId !== null) {
+            // Double-check: is this GPU actually available?
+            // Re-check availability after selecting to catch race conditions
+            const availableAfter = this.getAvailableWorkers(nodeWithGpu);
+            if (availableAfter.gpus[gpuDeviceId] <= 0) {
+              this.logger.warn(`[GPU_SELECT] GPU ${gpuDeviceId} no longer available (race condition?), skipping job ${job.id}`);
+              continue;
+            }
+
             if (this.assignJobToNodeWithRetry(nodeWithGpu, job, preset, gpuDeviceId)) {
               assignedCount++;
               this.logger.info(`[JOB_ASSIGN_LOOP] Job ${job.id} assigned to GPU ${gpuDeviceId}, assignedCount now ${assignedCount}`);
