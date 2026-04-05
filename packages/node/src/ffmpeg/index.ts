@@ -105,7 +105,7 @@ export function findFFprobe(): string | null {
 
 export function getFFmpegVersion(ffmpegPath: string): string | null {
   try {
-    const output = execSync(`"${ffmpegPath}" -version`, { encoding: 'utf-8' });
+    const output = execSync(`"${ffmpegPath}" -version`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
     const match = output.match(/ffmpeg version ([\d.]+)/);
     return match ? match[1] : null;
   } catch {
@@ -115,7 +115,7 @@ export function getFFmpegVersion(ffmpegPath: string): string | null {
 
 export function getFFprobeVersion(ffprobePath: string): string | null {
   try {
-    const output = execSync(`"${ffprobePath}" -version`, { encoding: 'utf-8' });
+    const output = execSync(`"${ffprobePath}" -version`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
     const match = output.match(/ffprobe version ([\d.]+)/);
     return match ? match[1] : null;
   } catch {
@@ -132,7 +132,7 @@ export async function detectAvailableEncoders(ffmpegPath: string): Promise<FFmpe
 
   try {
     // Get list of available encoders from FFmpeg
-    const output = execSync(`"${ffmpegPath}" -encoders`, { encoding: 'utf-8' });
+    const output = execSync(`"${ffmpegPath}" -encoders`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
 
     // Check for CPU encoders
     if (output.includes('libx264')) {
@@ -228,7 +228,7 @@ export async function detectAvailableDecoders(ffmpegPath: string): Promise<FFmpe
 
   try {
     // Get list of available decoders from FFmpeg
-    const output = execSync(`"${ffmpegPath}" -decoders`, { encoding: 'utf-8' });
+    const output = execSync(`"${ffmpegPath}" -decoders`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
 
     // Check for NVIDIA hardware decoders (cuvid)
     if (output.includes('h264_cuvid')) {
@@ -342,7 +342,7 @@ export async function detectAvailableHwaccels(ffmpegPath: string): Promise<Hwacc
 
   try {
     // Get list of available hwaccels from FFmpeg
-    const output = execSync(`"${ffmpegPath}" -hwaccels`, { encoding: 'utf-8' });
+    const output = execSync(`"${ffmpegPath}" -hwaccels`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
 
     // Check for NVIDIA CUDA
     if (output.includes('cuda')) {
