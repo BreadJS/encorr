@@ -706,7 +706,17 @@ export class EncorrWebSocketServer {
       ? `${mapping.node_path}/${file.relative_path}`
       : mapping.node_path || file.relative_path;
 
-    const libFile = this.db.getLibraryFileByFilepath(fullPath);
+    let libFile = this.db.getLibraryFileByFilepath(fullPath);
+
+    // If not found by full path,  try to match by filename
+    // This handles cases where node_path (Docker path) differs from library filepath (host path)
+    if (!libFile) {
+      const filename = file.relative_path.split('/').pop() || file.relative_path;
+      const libraryId = mapping.server_path.replace('library:', '');
+      const libFiles = this.db.getLibraryFiles(libraryId);
+      libFile = libFiles.find(lf => lf.filename === filename || lf.filepath.endsWith(filename));
+    }
+
     return libFile?.id ?? null;
   }
 
@@ -831,6 +841,41 @@ export class EncorrWebSocketServer {
     if (!connection || !connection.nodeId) return;
 
     const payload = message.payload as JobErrorPayload;
+
+    // Check if this job was already cancelled - if so, don't overwrite with 'failed'
+    const existingJob = this.db.getJobById(payload.job_id);
+    const isCancellation = payload.error === 'Cancelled by user';
+
+    if (existingJob?.status === 'cancelled' && isCancellation) {
+      this.logger.info(`Job ${payload.job_id} was already cancelled, skipping error handling`);
+      // Still need to clean up active_jobs and update node status
+      this.db.updateNodeStatus(connection.nodeId, 'online');
+      const node = this.db.getAllNodes().find(n => n.id === connection.nodeId);
+      if (node && node.active_jobs) {
+        const updatedActiveJobs = node.active_jobs.filter(job => job.id !== payload.job_id);
+        this.db.updateNodeUsage(connection.nodeId!, { active_jobs: updatedActiveJobs });
+      }
+
+      // Clear pending assignments for cancelled job
+      const pending = this.pendingAssignments.get(connection.nodeId) || 0;
+      if (pending > 0) {
+        this.pendingAssignments.set(connection.nodeId, pending - 1);
+        this.logger.info(`[CANCEL] Cleared pending assignment for node ${connection.nodeId}, now ${pending - 1}`);
+      }
+
+      // Clear GPU device from pending tracking if applicable
+      const preset = existingJob.preset_id ? this.db.getPresetById(existingJob.preset_id) : null;
+      if (preset?.config?.encoding_type === 'gpu' && preset.config.gpu_device_id !== undefined) {
+        const pendingGpus = this.pendingGpuAssignments.get(connection.nodeId);
+        if (pendingGpus && pendingGpus.has(preset.config.gpu_device_id)) {
+          pendingGpus.delete(preset.config.gpu_device_id);
+          this.logger.info(`[CANCEL] Cleared GPU ${preset.config.gpu_device_id} from pending tracking for node ${connection.nodeId}`);
+        }
+      }
+
+      this.sendMessage(ws, createAckMessage(message.id!));
+      return;
+    }
 
     this.logger.error(`Job ${payload.job_id} failed on node ${connection.nodeId}: ${payload.error}`);
 
@@ -1339,6 +1384,26 @@ export class EncorrWebSocketServer {
 
     this.db.cancelJob(jobId);
 
+    // Clear pending assignments for this job's node
+    const preset = job.preset_id ? this.db.getPresetById(job.preset_id) : null;
+    const nodeId = job.node_id;
+
+    // Decrement pending assignment count
+    const pending = this.pendingAssignments.get(nodeId) || 0;
+    if (pending > 0) {
+      this.pendingAssignments.set(nodeId, pending - 1);
+      this.logger.info(`[CANCEL] Cleared pending assignment for node ${nodeId}, now ${pending - 1}`);
+    }
+
+    // Clear GPU device from pending tracking if applicable
+    if (preset?.config?.encoding_type === 'gpu' && preset.config.gpu_device_id !== undefined) {
+      const pendingGpus = this.pendingGpuAssignments.get(nodeId);
+      if (pendingGpus && pendingGpus.has(preset.config.gpu_device_id)) {
+        pendingGpus.delete(preset.config.gpu_device_id);
+        this.logger.info(`[CANCEL] Cleared GPU ${preset.config.gpu_device_id} from pending tracking for node ${nodeId}`);
+      }
+    }
+
     // Create job report for cancelled job
     try {
       const job = this.db.getJobById(jobId);
@@ -1346,6 +1411,7 @@ export class EncorrWebSocketServer {
         const preset = this.db.getPresetById(job.preset_id);
         const nodeRecord = job.node_id ? this.db.getAllNodes().find(n => n.id === job.node_id) : null;
         const isAnalyze = (preset?.config as any)?.action === 'analyze';
+        this.logger.info(`[REPORT] Creating cancelled report for job ${jobId}, file_id=${job.file_id}`);
         this.db.createJobReport({
           job_id: jobId,
           file_id: job.file_id,
@@ -1361,12 +1427,13 @@ export class EncorrWebSocketServer {
           completed_at: Math.floor(Date.now() / 1000),
           config: preset ? JSON.stringify(preset.config) : null,
         });
+        this.logger.info(`[REPORT] Successfully created cancelled report for job ${jobId}`);
+      } else {
+        this.logger.warn(`[REPORT] Job ${jobId} not found, cannot create cancelled report`);
       }
     } catch (err) {
       this.logger.error(`Failed to create report for cancelled job ${jobId}:`, err instanceof Error ? err.message : String(err));
-    }    // Broadcast updates to all connected clients
-    this.broadcastJobsUpdate();
-    this.broadcastNodesUpdate();
+    }
   }
 
   getConnectedNodeIds(): string[] {

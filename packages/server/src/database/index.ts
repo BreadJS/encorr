@@ -84,8 +84,8 @@ export class EncorrDatabase {
    */
   private runMigrations(): void {
     // Check if jobs table has output_path column, add it if missing
-    const columns = this.db.pragma('table_info(jobs)');
-    const hasOutputPath = columns.some((col: any) => col.name === 'output_path');
+    const columns = this.db.pragma('table_info(jobs)') as { name: string }[];
+    const hasOutputPath = columns.some((col) => col.name === 'output_path');
 
     if (!hasOutputPath) {
       this.logger.info('[MIGRATION] Adding output_path column to jobs table');

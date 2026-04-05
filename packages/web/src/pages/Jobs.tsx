@@ -830,11 +830,11 @@ export function Jobs() {
                           </div>
                         </div>
 
-                        {/* RAM */}
+                        {/* System RAM */}
                         <div className="text-left">
                           <div className="flex items-start gap-2 mb-1">
                             <HardDrive className="h-3 w-3 text-gray-400 mt-0.5" />
-                            <span className="text-xs text-gray-400">RAM</span>
+                            <span className="text-xs text-gray-400">System RAM</span>
                           </div>
                           <div className="flex flex-col items-start gap-1">
                             <div className="flex items-center gap-2">

@@ -4,7 +4,7 @@ import { Card, CardContent } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { TranscodeDialog } from '@/components/ui/TranscodeDialog';
 import { SmartTranscodeDialog } from '@/components/ui/SmartTranscodeDialog';
-import { RefreshCw, ChevronLeft, ChevronRight, Film, Folder, FolderOpen, Check, Search, Filter, Play, Scan, Database, Sparkles, Clock, Zap, X, AlertTriangle, FileText } from 'lucide-react';
+import { RefreshCw, ChevronLeft, ChevronRight, Film, Folder, FolderOpen, Check, Search, Filter, Play, Scan, Database, Sparkles, Clock, Zap, X, AlertTriangle, FileText, Ban } from 'lucide-react';
 import { ReportDrawer } from '@/components/ReportDrawer';
 import { useState, useMemo } from 'react';
 import { useWebSocket } from '@/hooks/useWebSocket';
@@ -105,6 +105,8 @@ export function Files() {
           displayProgress = 100;
         } else if (job.status === 'failed') {
           displayStatus = 'failed';
+        } else if (job.status === 'cancelled') {
+          displayStatus = 'cancelled';
         }
       } else if (file.status === 'analyzed' || file.status === 'imported') {
         displayStatus = 'ready';
@@ -127,12 +129,14 @@ export function Files() {
       processing: 0,
       completed: 0,
       failed: 0,
+      cancelled: 0,
     };
     filesWithJobStatus.forEach((file: any) => {
       if (file.displayStatus === 'ready') counts.ready++;
       else if (file.displayStatus === 'processing') counts.processing++;
       else if (file.displayStatus === 'completed') counts.completed++;
       else if (file.displayStatus === 'failed') counts.failed++;
+      else if (file.displayStatus === 'cancelled') counts.cancelled++;
     });
     return counts;
   }, [filesWithJobStatus]);
@@ -330,6 +334,15 @@ export function Files() {
       );
     }
 
+    if (status === 'cancelled') {
+      return (
+        <div className="flex items-center gap-2">
+          <Ban className="h-3.5 w-3.5 text-orange-400 flex-shrink-0" />
+          <span className="text-orange-400 text-xs">Cancelled</span>
+        </div>
+      );
+    }
+
     // ready (analyzed/imported)
     return (
       <div className="flex items-center gap-2">
@@ -355,7 +368,7 @@ export function Files() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold text-white">Library</h1>
+          <h1 className="text-3xl font-bold text-white">Files</h1>
           <p className="text-gray-400">All files with real-time job status</p>
         </div>
         <div className="flex items-center gap-2">
@@ -463,6 +476,16 @@ export function Files() {
           }`}
         >
           Failed ({statusCounts.failed})
+        </button>
+        <button
+          onClick={() => { setSelectedStatus('cancelled'); setCurrentPage(1); }}
+          className={`px-4 py-2 rounded-t-lg text-sm font-medium transition-colors ${
+            selectedStatus === 'cancelled'
+              ? 'bg-[#252326] text-white'
+              : 'text-gray-400 hover:text-white hover:bg-[#252326]/50'
+          }`}
+        >
+          Cancelled ({statusCounts.cancelled})
         </button>
 
         <div className="ml-auto flex items-center gap-2">
@@ -591,7 +614,7 @@ export function Files() {
               ) : (
                 <>
                   {/* Table Header */}
-                  <div className="px-4 py-3 border-b border-[#39363a] flex items-center gap-2" style={{ backgroundColor: '#1E1D1F' }}>
+                  <div className="px-4 py-3 border-b border-[#39363a] flex items-center gap-2" style={{ backgroundColor: '#2a282c' }}>
                     <div className="flex items-center justify-center w-8 flex-shrink-0">
                       <input
                         type="checkbox"
@@ -601,13 +624,13 @@ export function Files() {
                         style={{ accentColor: '#74c69d' }}
                       />
                     </div>
-                    <div className="flex-1 min-w-0 text-xs text-gray-400 uppercase font-medium">Filename</div>
-                    <div className="text-xs text-gray-400 uppercase font-medium w-16 flex-shrink-0">Fmt</div>
-                    <div className="text-xs text-gray-400 uppercase font-medium w-20 flex-shrink-0">Codec</div>
-                    <div className="text-xs text-gray-400 uppercase font-medium w-20 flex-shrink-0">Res</div>
-                    <div className="text-xs text-gray-400 uppercase font-medium w-20 flex-shrink-0">Size</div>
-                    <div className="text-xs text-gray-400 uppercase font-medium w-24 flex-shrink-0">Status</div>
-                    <div className="text-xs text-gray-400 uppercase font-medium w-12 flex-shrink-0">+</div>
+                    <div className="flex-1 min-w-0 text-xs text-gray-300 uppercase font-medium">Filename</div>
+                    <div className="text-xs text-gray-300 uppercase font-medium w-16 flex-shrink-0">Fmt</div>
+                    <div className="text-xs text-gray-300 uppercase font-medium w-28 flex-shrink-0">Codec</div>
+                    <div className="text-xs text-gray-300 uppercase font-medium w-20 flex-shrink-0">Res</div>
+                    <div className="text-xs text-gray-300 uppercase font-medium w-20 flex-shrink-0">Size</div>
+                    <div className="text-xs text-gray-300 uppercase font-medium w-24 flex-shrink-0">Status</div>
+                    <div className="text-xs text-gray-300 uppercase font-medium w-12 flex-shrink-0">+</div>
                   </div>
 
                   {/* File Rows */}
@@ -676,7 +699,7 @@ export function Files() {
                         </div>
 
                         {/* Codec */}
-                        <div className="w-20 flex-shrink-0">
+                        <div className="w-28 flex-shrink-0">
                           <span
                             className="text-xs px-1.5 py-0.5 rounded text-center block"
                             style={{ backgroundColor: getCodecBadgeColor(file.codec || file.video_codec || file.metadata?.video_codec), color: '#ffffff' }}
