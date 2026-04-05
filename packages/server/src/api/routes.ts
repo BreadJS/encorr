@@ -474,6 +474,258 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     return sendSuccess({ deleted: true });
   });
 
+  // Replace original file with transcoded version
+  fastify.post('/library-files/:id/replace', async (request, reply) => {
+    const { id } = request.params as { id: string };
+
+    const file = db.getLibraryFileById(id);
+    if (!file) {
+      reply.status(404);
+      return sendError('File not found');
+    }
+
+    // Get the latest completed transcode report for this file
+    const reports = db.getJobReportsByFileId(id, 'transcode');
+    const completedReports = reports.filter((r: any) => r.status === 'completed');
+
+    if (completedReports.length === 0) {
+      reply.status(400);
+      return sendError('No completed transcode found for this file');
+    }
+
+    // Get the most recent completed report
+    const latestReport = completedReports.sort((a: any, b: any) => {
+      const aTime = a.completed_at || a.created_at || 0;
+      const bTime = b.completed_at || b.created_at || 0;
+      return bTime - aTime;
+    })[0];
+
+    // Get the job to find the output path and node
+    const job = db.getJobById(latestReport.job_id);
+    if (!job || !job.output_path) {
+      reply.status(400);
+      return sendError('Transcoded file not found');
+    }
+
+    // Get the node that processed this job
+    const node = job.node_id ? db.getNodeById(job.node_id) : null;
+    if (!node) {
+      reply.status(400);
+      return sendError('Node that processed this job is not available');
+    }
+
+    // Check if the node is connected
+    if (!wsServer.isNodeConnected(node.id)) {
+      reply.status(400);
+      return sendError('Node is not connected. Please ensure the node is online.');
+    }
+
+    // Get the folder mapping for this library (if using mapped folders)
+    const mappings = db.getAllFolderMappings();
+    const mapping = mappings.find((m: any) => m.server_path === `library:${file.library_id}`);
+
+    // Determine the target path on the node
+    let targetPath = file.filepath;
+    if (mapping) {
+      // Using mapped folder - need to use the node path
+      // The server_path is `library:{library_id}` and we need to convert to node_path
+      const library = db.getLibraryById(file.library_id);
+      if (library) {
+        // Get the relative path from the library path
+        const { relative, resolve } = require('path');
+        const libraryPath = resolve(library.path);
+        const fullPath = resolve(file.filepath);
+        const relativePath = relative(libraryPath, fullPath);
+        targetPath = resolve(mapping.node_path, relativePath);
+      }
+    }
+
+    // Send file replace command to the node
+    wsServer.sendFileReplaceCommand(node.id, {
+      file_id: id,
+      operation: 'replace',
+      source_path: job.output_path,
+      target_path: targetPath,
+      original_filename: file.filename,
+    });
+
+    logger.info(`File replace command sent for file ${id} to node ${node.id}`);
+
+    return sendSuccess({
+      message: 'File replacement command sent to node',
+      node_id: node.id,
+    });
+  });
+
+  // Backup original file and replace with transcoded version
+  fastify.post('/library-files/:id/backup-replace', async (request, reply) => {
+    const { id } = request.params as { id: string };
+
+    const file = db.getLibraryFileById(id);
+    if (!file) {
+      reply.status(404);
+      return sendError('File not found');
+    }
+
+    // Get the latest completed transcode report for this file
+    const reports = db.getJobReportsByFileId(id, 'transcode');
+    const completedReports = reports.filter((r: any) => r.status === 'completed');
+
+    if (completedReports.length === 0) {
+      reply.status(400);
+      return sendError('No completed transcode found for this file');
+    }
+
+    // Get the most recent completed report
+    const latestReport = completedReports.sort((a: any, b: any) => {
+      const aTime = a.completed_at || a.created_at || 0;
+      const bTime = b.completed_at || b.created_at || 0;
+      return bTime - aTime;
+    })[0];
+
+    // Get the job to find the output path and node
+    const job = db.getJobById(latestReport.job_id);
+    if (!job || !job.output_path) {
+      reply.status(400);
+      return sendError('Transcoded file not found');
+    }
+
+    // Get the node that processed this job
+    const node = job.node_id ? db.getNodeById(job.node_id) : null;
+    if (!node) {
+      reply.status(400);
+      return sendError('Node that processed this job is not available');
+    }
+
+    // Check if the node is connected
+    if (!wsServer.isNodeConnected(node.id)) {
+      reply.status(400);
+      return sendError('Node is not connected. Please ensure the node is online.');
+    }
+
+    // Get the folder mapping for this library (if using mapped folders)
+    const mappings = db.getAllFolderMappings();
+    const mapping = mappings.find((m: any) => m.server_path === `library:${file.library_id}`);
+
+    // Determine the target path on the node
+    let targetPath = file.filepath;
+    if (mapping) {
+      // Using mapped folder - need to use the node path
+      // The server_path is `library:{library_id}` and we need to convert to node_path
+      const { relative, resolve } = require('path');
+      const library = db.getLibraryById(file.library_id);
+      if (library) {
+        // Get the relative path from the library path
+        const libraryPath = resolve(library.path);
+        const fullPath = resolve(file.filepath);
+        const relativePath = relative(libraryPath, fullPath);
+        targetPath = resolve(mapping.node_path, relativePath);
+      }
+    }
+
+    // Send file replace command to the node
+    wsServer.sendFileReplaceCommand(node.id, {
+      file_id: id,
+      operation: 'backup_replace',
+      source_path: job.output_path,
+      target_path: targetPath,
+      original_filename: file.filename,
+    });
+
+    logger.info(`File backup & replace command sent for file ${id} to node ${node.id}`);
+
+    return sendSuccess({
+      message: 'File backup & replace command sent to node',
+      node_id: node.id,
+    });
+  });
+
+  // Cleanup original backup file (.org)
+  fastify.post('/library-files/:id/cleanup-backup', async (request, reply) => {
+    const { id } = request.params as { id: string };
+
+    const file = db.getLibraryFileById(id);
+    if (!file) {
+      reply.status(404);
+      return sendError('File not found');
+    }
+
+    if (file.status !== 'backup_replaced') {
+      reply.status(400);
+      return sendError('File does not have a backup to clean up');
+    }
+
+    // Get the latest completed transcode report for this file
+    const reports = db.getJobReportsByFileId(id, 'transcode');
+    const completedReports = reports.filter((r: any) => r.status === 'completed');
+
+    if (completedReports.length === 0) {
+      reply.status(400);
+      return sendError('No completed transcode found for this file');
+    }
+
+    // Get the most recent completed report
+    const latestReport = completedReports.sort((a: any, b: any) => {
+      const aTime = a.completed_at || a.created_at || 0;
+      const bTime = b.completed_at || b.created_at || 0;
+      return bTime - aTime;
+    })[0];
+
+    // Get the job to find the node
+    const job = db.getJobById(latestReport.job_id);
+    if (!job) {
+      reply.status(400);
+      return sendError('Job information not found');
+    }
+
+    // Get the node that processed this job
+    const node = job.node_id ? db.getNodeById(job.node_id) : null;
+    if (!node) {
+      reply.status(400);
+      return sendError('Node that processed this job is not available');
+    }
+
+    // Check if the node is connected
+    if (!wsServer.isNodeConnected(node.id)) {
+      reply.status(400);
+      return sendError('Node is not connected. Please ensure the node is online.');
+    }
+
+    // Get the folder mapping for this library (if using mapped folders)
+    const mappings = db.getAllFolderMappings();
+    const mapping = mappings.find((m: any) => m.server_path === `library:${file.library_id}`);
+
+    // Determine the target path on the node (the .org backup file)
+    let targetPath = file.filepath + '.org';
+    if (mapping) {
+      // Using mapped folder - need to use the node path
+      const { relative, resolve } = require('path');
+      const library = db.getLibraryById(file.library_id);
+      if (library) {
+        const libraryPath = resolve(library.path);
+        const fullPath = resolve(file.filepath);
+        const relativePath = relative(libraryPath, fullPath);
+        targetPath = resolve(mapping.node_path, relativePath) + '.org';
+      }
+    }
+
+    // Send file cleanup command to the node
+    wsServer.sendFileReplaceCommand(node.id, {
+      file_id: id,
+      operation: 'cleanup_backup',
+      source_path: '', // Not needed for cleanup
+      target_path: targetPath,
+      original_filename: file.filename,
+    });
+
+    logger.info(`File cleanup backup command sent for file ${id} to node ${node.id}`);
+
+    return sendSuccess({
+      message: 'File cleanup backup command sent to node',
+      node_id: node.id,
+    });
+  });
+
   // Get all library files with pagination
   fastify.get('/library-files', async (request, reply) => {
     const { page = '1', per_page = '20', status, library_id } = request.query as {

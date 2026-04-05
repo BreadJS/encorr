@@ -218,6 +218,11 @@ export class EncorrNode {
     this.wsClient.on('scanFolder', async (payload) => {
       this.logger.warn('Received SCAN_FOLDER message (deprecated). Server should handle scanning.');
     });
+
+    // File replace
+    this.wsClient.on('fileReplace', async (payload) => {
+      await this.handleFileReplace(payload);
+    });
   }
 
   // ========================================================================
@@ -445,6 +450,92 @@ export class EncorrNode {
     }
 
     this.sendHeartbeat();
+  }
+
+  private async handleFileReplace(payload: {
+    file_id: string;
+    operation: 'replace' | 'backup_replace' | 'cleanup_backup';
+    source_path: string;
+    target_path: string;
+    original_filename: string;
+  }): Promise<void> {
+    const { file_id, operation, source_path, target_path, original_filename } = payload;
+
+    this.logger.info(`[FILE_REPLACE] ${operation} for file ${file_id}: ${original_filename}`);
+    this.logger.info(`[FILE_REPLACE]   source: ${source_path}`);
+    this.logger.info(`[FILE_REPLACE]   target: ${target_path}`);
+
+    try {
+      const { promises: fs } = require('fs');
+      const { resolve, dirname } = require('path');
+
+      // Verify source file exists (for replace operations)
+      if (operation === 'replace' || operation === 'backup_replace') {
+        const sourceExists = await fs.access(source_path).then(() => true).catch(() => false);
+        if (!sourceExists) {
+          throw new Error(`Source file not found: ${source_path}`);
+        }
+      }
+
+      // Verify target file exists (for cleanup operations)
+      if (operation === 'cleanup_backup') {
+        const targetExists = await fs.access(target_path).then(() => true).catch(() => false);
+        if (!targetExists) {
+          throw new Error(`Backup file not found: ${target_path}`);
+        }
+      }
+
+      // Perform the operation
+      if (operation === 'replace') {
+        // Direct replace: move transcoded file to original location
+        await fs.rename(source_path, target_path);
+        this.logger.info(`[FILE_REPLACE] Replaced original file with transcoded version`);
+      } else if (operation === 'backup_replace') {
+        // Backup original to .org, then move transcoded file to original location
+        const backupPath = target_path + '.org';
+
+        // Check if backup already exists
+        const backupExists = await fs.access(backupPath).then(() => true).catch(() => false);
+        if (backupExists) {
+          this.logger.warn(`[FILE_REPLACE] Backup file already exists: ${backupPath}, skipping backup creation`);
+          // Just remove the old backup and create a new one
+          await fs.unlink(backupPath);
+        }
+
+        // Rename original to .org
+        await fs.rename(target_path, backupPath);
+        this.logger.info(`[FILE_REPLACE] Backed up original to: ${backupPath}`);
+
+        // Move transcoded file to original location
+        await fs.rename(source_path, target_path);
+        this.logger.info(`[FILE_REPLACE] Moved transcoded file to: ${target_path}`);
+      } else if (operation === 'cleanup_backup') {
+        // Delete the .org backup file
+        await fs.unlink(target_path);
+        this.logger.info(`[FILE_REPLACE] Deleted backup file: ${target_path}`);
+      }
+
+      // Send success result
+      this.wsClient.send(createMessage('FILE_REPLACE_RESULT', {
+        file_id: file_id,
+        operation: operation,
+        success: true,
+        new_file_path: target_path,
+      }));
+
+      this.logger.info(`[FILE_REPLACE] Successfully completed ${operation} for file ${file_id}`);
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      this.logger.error(`[FILE_REPLACE] Failed to ${operation} for file ${file_id}: ${errorMsg}`);
+
+      // Send failure result
+      this.wsClient.send(createMessage('FILE_REPLACE_RESULT', {
+        file_id: file_id,
+        operation: operation,
+        success: false,
+        error: errorMsg,
+      }));
+    }
   }
 
   // ========================================================================

@@ -146,7 +146,7 @@ export interface LibraryFile {
 // Files
 // ============================================================================
 
-export type FileStatus = 'pending' | 'queued' | 'processing' | 'completed' | 'failed' | 'skipped' | 'analyzed';
+export type FileStatus = 'pending' | 'queued' | 'processing' | 'completed' | 'failed' | 'skipped' | 'analyzed' | 'backup_replaced';
 
 export interface VideoFile {
   id: string;

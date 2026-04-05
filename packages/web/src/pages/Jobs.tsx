@@ -350,7 +350,7 @@ export function Jobs() {
                       className="hover:bg-red-600"
                     >
                       <Trash2 className="mr-2 h-4 w-4" />
-                      Clear ({queue.length})
+                      Cancel ({queue.length})
                     </Button>
                   </>
                 )}
@@ -382,7 +382,7 @@ export function Jobs() {
 
           {/* Jobs Table */}
           <div
-            className="tab-content-transition max-h-[500px] overflow-y-auto overflow-hidden"
+            className="tab-content-transition h-[500px] overflow-y-auto overflow-hidden"
             style={{ opacity: tabVisible ? 1 : 0, transform: tabVisible ? 'translateY(0)' : 'translateY(4px)' }}
           >
             {displayedItems.length === 0 ? (
@@ -403,7 +403,9 @@ export function Jobs() {
                       <th className="px-4 py-3 font-medium" style={{ width: '100px' }}>Node</th>
                     )}
                     <th className="px-4 py-3 font-medium" style={{ width: '80px' }}>Progress</th>
-                    <th className="px-4 py-3 font-medium" style={{ width: '120px' }}>Action</th>
+                    {activeTab !== 'success' && (
+                      <th className="px-4 py-3 font-medium" style={{ width: '120px' }}>Action</th>
+                    )}
                   </tr>
                 </thead>
                 <tbody>
@@ -455,7 +457,7 @@ export function Jobs() {
                         {/* Node - only show for non-queue tabs */}
                         {activeTab !== 'queue' && (
                           <td className="px-4 py-3">
-                            <span className="text-sm text-gray-300">
+                            <span className={`text-gray-300 ${activeTab === 'queue' ? 'text-sm' : 'text-base'}`}>
                               {nodeName}
                             </span>
                           </td>
@@ -475,18 +477,22 @@ export function Jobs() {
                         </td>
 
                         {/* Action */}
-                        <td className="px-4 py-3">
-                          {(activeTab === 'queue' || activeTab === 'failed') && (
-                            <button
-                              onClick={() => deleteJobMutation.mutate(job.id)}
-                              className="h-8 w-8 rounded-full flex items-center justify-center transition-all hover:scale-110 active:scale-95"
-                              style={{ backgroundColor: '#ef4444', color: '#ffffff' }}
-                              title="Remove job"
-                            >
-                              <X className="h-3 w-3" />
-                            </button>
-                          )}
-                        </td>
+                        {activeTab !== 'success' && (
+                          <td className="px-4 py-3">
+                            {(activeTab === 'queue' || activeTab === 'failed') && (
+                              <button
+                                onClick={() => deleteJobMutation.mutate(job.id)}
+                                className="h-8 w-8 rounded-full flex items-center justify-center transition-all hover:scale-110 active:scale-95"
+                                style={{ backgroundColor: '#ef4444', color: '#ffffff' }}
+                                title="Remove job"
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            )}
+                          </td>
+                        )}
+                        {/* Empty cell for success tab to maintain spacing */}
+                        {activeTab === 'success' && <td></td>}
                       </tr>
                     );
                   })}
@@ -1047,11 +1053,11 @@ export function Jobs() {
         <Dialog
           open={showClearDialog}
           onClose={() => setShowClearDialog(false)}
-          title="Clear Queue"
+          title="Cancel Queue"
         >
           <div className="space-y-4">
             <p className="text-gray-300">
-              Are you sure you want to clear the entire queue? This will remove all queued and assigned jobs.
+              Are you sure you want to cancel the entire queue? This will remove all queued and assigned jobs.
             </p>
             <div className="flex items-center gap-3 justify-end">
               <Button
@@ -1064,7 +1070,7 @@ export function Jobs() {
                 onClick={confirmClearQueue}
                 style={{ backgroundColor: '#ef4444', color: '#ffffff' }}
               >
-                Clear Queue
+                Cancel Queue
               </Button>
             </div>
           </div>

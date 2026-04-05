@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS library_files (
     filesize INTEGER,
     format TEXT,
     duration INTEGER,
-    status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'queued', 'processing', 'completed', 'failed', 'skipped', 'analyzed')),
+    status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'queued', 'processing', 'completed', 'failed', 'skipped', 'analyzed', 'backup_replaced')),
     job_id TEXT,
     progress INTEGER DEFAULT 0 CHECK(progress >= 0 AND progress <= 100),
     error_message TEXT,

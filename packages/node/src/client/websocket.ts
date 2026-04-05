@@ -7,6 +7,7 @@ import type {
   HeartbeatPayload,
   JobAssignPayload,
   JobCancelPayload,
+  FileReplacePayload,
 } from '@encorr/shared';
 import {
   createMessage,
@@ -16,6 +17,7 @@ import {
   isPingMessage,
   isConfigUpdateMessage,
   isScanFolderMessage,
+  isFileReplaceMessage,
 } from '@encorr/shared';
 import type { Logger } from 'winston';
 
@@ -274,6 +276,13 @@ export class WebSocketClient extends EventEmitter {
       // Handle SCAN_FOLDER
       if (isScanFolderMessage(message)) {
         this.emit('scanFolder', message.payload);
+        this.send(createAckMessage(message.id!));
+        return;
+      }
+
+      // Handle FILE_REPLACE
+      if (isFileReplaceMessage(message)) {
+        this.emit('fileReplace', message.payload);
         this.send(createAckMessage(message.id!));
         return;
       }

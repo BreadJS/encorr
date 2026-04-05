@@ -21,6 +21,7 @@ export const MessageType = {
   PING: 'PING',
   CONFIG_UPDATE: 'CONFIG_UPDATE',
   SCAN_FOLDER: 'SCAN_FOLDER',
+  FILE_REPLACE: 'FILE_REPLACE',
 
   // Node -> Server
   REGISTER: 'REGISTER',
@@ -32,6 +33,7 @@ export const MessageType = {
   FILE_INFO: 'FILE_INFO',
   GPU_INFO: 'GPU_INFO',
   USAGE_UPDATE: 'USAGE_UPDATE',
+  FILE_REPLACE_RESULT: 'FILE_REPLACE_RESULT',
 
   // Server -> Web Client
   WEB_NODES_UPDATE: 'WEB_NODES_UPDATE',
@@ -339,6 +341,28 @@ export const ScanFolderPayloadSchema = z.object({
 
 export type ScanFolderPayload = z.infer<typeof ScanFolderPayloadSchema>;
 
+// FILE_REPLACE: Server requests node to replace/backup a file with transcoded version
+export const FileReplacePayloadSchema = z.object({
+  file_id: z.string(),
+  operation: z.enum(['replace', 'backup_replace', 'cleanup_backup']),
+  source_path: z.string(), // Path to transcoded file (in cache)
+  target_path: z.string(), // Path where the original file is located
+  original_filename: z.string(),
+});
+
+export type FileReplacePayload = z.infer<typeof FileReplacePayloadSchema>;
+
+// FILE_REPLACE_RESULT: Node reports result of file replace operation
+export const FileReplaceResultPayloadSchema = z.object({
+  file_id: z.string(),
+  operation: z.enum(['replace', 'backup_replace', 'cleanup_backup']),
+  success: z.boolean(),
+  error: z.string().optional(),
+  new_file_path: z.string().optional(), // Path after replacement (for status updates)
+});
+
+export type FileReplaceResultPayload = z.infer<typeof FileReplaceResultPayloadSchema>;
+
 // WEB_SUBSCRIBE: Web client subscribes to updates
 export const WebSubscribePayloadSchema = z.object({
   channels: z.array(z.enum(['nodes', 'jobs'])).optional(),
@@ -375,6 +399,7 @@ export type ServerToNodeMessage =
   | Message<PingPayload>
   | Message<ConfigUpdatePayload>
   | Message<ScanFolderPayload>
+  | Message<FileReplacePayload>
   | Message<AckPayload>
   | Message<ErrorPayload>;
 
@@ -388,6 +413,7 @@ export type NodeToServerMessage =
   | Message<FileInfoPayload>
   | Message<GPUInfoPayload>
   | Message<UsageUpdatePayload>
+  | Message<FileReplaceResultPayload>
   | Message<AckPayload>
   | Message<ErrorPayload>;
 
@@ -454,6 +480,8 @@ export const MessagePayloadValidators = {
   [MessageType.CONFIG_UPDATE]: ConfigUpdatePayloadSchema,
   [MessageType.JOB_CANCEL]: JobCancelPayloadSchema,
   [MessageType.SCAN_FOLDER]: ScanFolderPayloadSchema,
+  [MessageType.FILE_REPLACE]: FileReplacePayloadSchema,
+  [MessageType.FILE_REPLACE_RESULT]: FileReplaceResultPayloadSchema,
   [MessageType.WEB_SUBSCRIBE]: WebSubscribePayloadSchema,
   [MessageType.WEB_NODES_UPDATE]: WebNodesUpdatePayloadSchema,
   [MessageType.WEB_JOBS_UPDATE]: WebJobsUpdatePayloadSchema,
@@ -517,6 +545,14 @@ export function isScanFolderMessage(msg: Message): msg is Message<ScanFolderPayl
   return msg.type === MessageType.SCAN_FOLDER;
 }
 
+export function isFileReplaceMessage(msg: Message): msg is Message<FileReplacePayload> {
+  return msg.type === MessageType.FILE_REPLACE;
+}
+
+export function isFileReplaceResultMessage(msg: Message): msg is Message<FileReplaceResultPayload> {
+  return msg.type === MessageType.FILE_REPLACE_RESULT;
+}
+
 export function isJobProgressMessage(msg: Message): msg is Message<JobProgressPayload> {
   return msg.type === MessageType.JOB_PROGRESS;
 }
@@ -552,6 +588,7 @@ export function isServerToNodeMessage(msg: Message): msg is ServerToNodeMessage 
     MessageType.PING,
     MessageType.CONFIG_UPDATE,
     MessageType.SCAN_FOLDER,
+    MessageType.FILE_REPLACE,
     MessageType.ACK,
     MessageType.ERROR,
   ].includes(msg.type as any);
@@ -567,6 +604,7 @@ export function isNodeToServerMessage(msg: Message): msg is NodeToServerMessage 
     MessageType.JOB_ERROR,
     MessageType.FILE_INFO,
     MessageType.GPU_INFO,
+    MessageType.FILE_REPLACE_RESULT,
     MessageType.ACK,
     MessageType.ERROR,
   ].includes(msg.type as any);

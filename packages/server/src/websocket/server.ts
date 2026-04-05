@@ -14,6 +14,7 @@ import type {
   FileInfoPayload,
   GPUInfoPayload,
   UsageUpdatePayload,
+  FileReplacePayload,
   AckPayload,
 } from '@encorr/shared';
 import {
@@ -28,6 +29,7 @@ import {
   isJobErrorMessage,
   isFileInfoMessage,
   isGpuInfoMessage,
+  isFileReplaceResultMessage,
   isAckMessage,
   isErrorMessage,
   generateMessageId,
@@ -325,6 +327,9 @@ export class EncorrWebSocketServer {
           break;
         case 'FILE_INFO':
           this.handleFileInfo(ws, message as any);
+          break;
+        case 'FILE_REPLACE_RESULT':
+          this.handleFileReplaceResult(ws, message as any);
           break;
         case 'GPU_INFO':
           this.handleGpuInfo(ws, message as any);
@@ -977,6 +982,38 @@ export class EncorrWebSocketServer {
     this.sendMessage(ws, createAckMessage(message.id!));
   }
 
+  private handleFileReplaceResult(ws: WebSocket, message: NodeToServerMessage): void {
+    const connection = this.connections.get(ws);
+    if (!connection || !connection.nodeId) return;
+
+    const payload = message.payload as any; // FileReplaceResultPayload
+
+    this.logger.info(`File replace result for file ${payload.file_id}: ${payload.operation} - ${payload.success ? 'success' : 'failed'}`);
+
+    if (payload.success) {
+      // Update file status based on operation
+      if (payload.operation === 'backup_replace') {
+        // Set status to backup_replaced so user can cleanup later
+        this.db.updateLibraryFileStatus(payload.file_id, 'backup_replaced');
+      } else if (payload.operation === 'replace') {
+        // Keep status as completed (already was completed)
+        this.db.updateLibraryFileStatus(payload.file_id, 'completed');
+      } else if (payload.operation === 'cleanup_backup') {
+        // After cleanup, keep as completed
+        this.db.updateLibraryFileStatus(payload.file_id, 'completed');
+      }
+
+      this.logger.info(`File ${payload.file_id} status updated after ${payload.operation}`);
+    } else {
+      this.logger.error(`File ${payload.file_id} ${payload.operation} failed: ${payload.error}`);
+    }
+
+    // Broadcast updates to web clients
+    this.broadcastJobsUpdate();
+
+    this.sendMessage(ws, createAckMessage(message.id!));
+  }
+
   private handleGpuInfo(ws: WebSocket, message: NodeToServerMessage): void {
     const connection = this.connections.get(ws);
     if (!connection || !connection.nodeId) return;
@@ -1442,6 +1479,20 @@ export class EncorrWebSocketServer {
 
   isNodeConnected(nodeId: string): boolean {
     return this.connectionsByNodeId.has(nodeId);
+  }
+
+  sendFileReplaceCommand(
+    nodeId: string,
+    data: {
+      file_id: string;
+      operation: 'replace' | 'backup_replace' | 'cleanup_backup';
+      source_path: string;
+      target_path: string;
+      original_filename: string;
+    }
+  ): boolean {
+    const message = createMessage('FILE_REPLACE', data);
+    return this.sendToNode(nodeId, message);
   }
 
   // ========================================================================

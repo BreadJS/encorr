@@ -289,6 +289,20 @@ export const api = {
   getReport: (id: string) =>
     request<any>(`/report/${id}`),
 
+  // File Replacement
+  replaceOriginalFile: (fileId: string) =>
+    request<any>(`/library-files/${fileId}/replace`, {
+      method: 'POST',
+    }),
+  backupAndReplaceFile: (fileId: string) =>
+    request<any>(`/library-files/${fileId}/backup-replace`, {
+      method: 'POST',
+    }),
+  cleanupOriginalFile: (fileId: string) =>
+    request<any>(`/library-files/${fileId}/cleanup-backup`, {
+      method: 'POST',
+    }),
+
   // Logs
   getLogs: (params?: { level?: string; category?: string; limit?: number }) =>
     request<any[]>(`/logs${new URLSearchParams(params as any).toString() ? '?' + new URLSearchParams(params as any).toString() : ''}`),
