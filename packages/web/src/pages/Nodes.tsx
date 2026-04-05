@@ -29,6 +29,137 @@ export function Nodes() {
     return <div className="flex items-center justify-center h-64 text-gray-400">Loading...</div>;
   }
 
+  const onlineNodes = nodes?.filter((n: any) => n.connected) ?? [];
+  const offlineNodes = nodes?.filter((n: any) => !n.connected) ?? [];
+
+  const renderNode = (node: any) => {
+    const getGpuColor = (vendor: string) => {
+      const v = vendor?.toLowerCase() || '';
+      if (v.includes('nvidia')) return '#72B300';
+      if (v.includes('amd') || v.includes('advanced micro') || v.includes('radeon')) return '#D7002E';
+      if (v.includes('intel')) return '#0065AF';
+      if (v.includes('apple')) return '#999999';
+      return '#74c69d';
+    };
+
+    // Clean GPU name: extract bracket content like "[GeForce GTX 1080]" from
+    // "NVIDIA Corporation GP104 [GeForce GTX 1080]", otherwise strip known vendor prefixes
+    const cleanGpuName = (name: string) => {
+      if (!name) return 'Unknown GPU';
+      const bracketMatch = name.match(/\[([^\]]+)\]/);
+      if (bracketMatch) return bracketMatch[1];
+      return name
+        .replace(/^(NVIDIA Corporation|NVIDIA|Advanced Micro Devices, Inc\.|AMD|Intel Corporation|Intel|Apple)\s*/i, '');
+    };
+
+    return (
+      <Card key={node.id}>
+        <CardContent className="px-4 py-3">
+          <div className="flex items-center gap-4">
+            {/* Node name + status */}
+            <div className="flex items-center gap-2 w-[200px] shrink-0">
+              <Server className="h-4 w-4 text-gray-400 shrink-0" />
+              <span className="text-sm font-semibold text-white truncate">{node.name}</span>
+              <StatusBadge status={node.connected ? 'online' : 'offline'} />
+            </div>
+
+            {/* OS */}
+            <div className="flex items-center gap-1.5 w-[130px] shrink-0">
+              <HardDrive className="h-3.5 w-3.5 text-gray-500 shrink-0" />
+              <span className="text-xs text-gray-400 truncate">
+                {node.system_info?.os || 'Unknown'} {node.system_info?.os_version || ''}
+              </span>
+            </div>
+
+            {/* CPU + usage */}
+            <div className="flex items-center gap-1.5 w-[240px] shrink-0">
+              <Cpu className="h-3.5 w-3.5 text-gray-500 shrink-0" />
+              <span className="text-xs text-gray-400 truncate">{node.system_info?.cpu || 'Unknown'}</span>
+              <span className="text-xs text-gray-600 shrink-0">({node.system_info?.cpu_cores || '-'}c)</span>
+              {node.connected && node.cpu_usage !== undefined && (
+                <div className="flex items-center gap-1 shrink-0">
+                  <div className="w-16 h-1.5 bg-gray-700 rounded-full overflow-hidden">
+                    <div className="h-full transition-all" style={{ width: `${node.cpu_usage || 0}%`, backgroundColor: '#74c69d' }} />
+                  </div>
+                  <span className="text-xs text-gray-500 w-7 text-right">{node.cpu_usage || 0}%</span>
+                </div>
+              )}
+            </div>
+
+            {/* RAM + usage */}
+            <div className="flex items-center gap-1.5 w-[150px] shrink-0">
+              <HardDrive className="h-3.5 w-3.5 text-gray-500 shrink-0" />
+              <span className="text-xs text-gray-400 shrink-0">
+                {Math.round((node.system_info?.ram_total || 0) / 1024 / 1024 / 1024)} GB
+              </span>
+              {node.connected && node.ram_usage !== undefined && (
+                <div className="flex items-center gap-1 shrink-0">
+                  <div className="w-16 h-1.5 bg-gray-700 rounded-full overflow-hidden">
+                    <div className="h-full transition-all" style={{ width: `${node.ram_usage || 0}%`, backgroundColor: '#74c69d' }} />
+                  </div>
+                  <span className="text-xs text-gray-500 w-7 text-right">{node.ram_usage || 0}%</span>
+                </div>
+              )}
+            </div>
+
+            {/* GPUs */}
+            <div className="flex items-center gap-1.5 flex-1 min-w-0">
+              <Monitor className="h-3.5 w-3.5 text-gray-500 shrink-0" />
+              {node.system_info?.gpus && node.system_info.gpus.length > 0 ? (
+                <div className="flex flex-wrap gap-1.5 min-w-0">
+                  {node.system_info.gpus.map((gpu: any, idx: number) => {
+                    const vramGB = gpu.memory ? (gpu.memory / (1024 * 1024 * 1024)).toFixed(0) : null;
+                    const gpuUtil = gpu.utilizationGpu !== undefined ? gpu.utilizationGpu : 0;
+                    const gpuColor = getGpuColor(gpu.vendor);
+
+                    return (
+                      <div
+                        key={idx}
+                        className="flex items-center gap-1.5 px-2 py-0.5 rounded"
+                        style={{ backgroundColor: '#1E1D1F', border: '1px solid #38363a' }}
+                      >
+                        <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: gpuColor }} />
+                        <span className="text-xs text-white truncate">
+                          {cleanGpuName(gpu.name)}{vramGB ? ` (${vramGB}GB)` : ''}
+                        </span>
+                        {node.connected && (
+                          <div className="flex items-center gap-1 shrink-0">
+                            <div className="w-10 h-1 bg-gray-700 rounded-full overflow-hidden">
+                              <div className="h-full transition-all" style={{ width: `${gpuUtil}%`, backgroundColor: gpuColor }} />
+                            </div>
+                            <span className="text-xs text-gray-500 w-7 text-right">{gpuUtil}%</span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <span className="text-xs text-gray-600">No GPUs</span>
+              )}
+            </div>
+
+            {/* Delete */}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                if (confirm(`Remove node "${node.name}"?`)) {
+                  deleteMutation.mutate(node.id);
+                }
+              }}
+              disabled={deleteMutation.isPending}
+              style={{ borderColor: '#38363a', color: '#74c69d' }}
+              className="hover:bg-gray-800 shrink-0"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -38,228 +169,38 @@ export function Nodes() {
         </div>
       </div>
 
-      <div className="space-y-4">
-        {nodes?.map((node: any) => (
-          <Card key={node.id}>
-            <CardContent className="p-6">
-              <div className="flex items-start justify-between">
-                <div className="flex-1">
-                  <div className="flex items-center gap-4 mb-4">
-                    <div className="flex items-center gap-3">
-                      <Server className="h-6 w-6 text-gray-400" />
-                      <h3 className="text-xl font-semibold text-white">{node.name}</h3>
-                    </div>
-                    <StatusBadge status={node.connected ? 'online' : 'offline'} />
-                  </div>
+      {/* Online Nodes */}
+      {onlineNodes.length > 0 && (
+        <div>
+          <h2 className="text-sm font-medium text-gray-400 uppercase tracking-wide mb-2">
+            Online ({onlineNodes.length})
+          </h2>
+          <div className="space-y-2">{onlineNodes.map(renderNode)}</div>
+        </div>
+      )}
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                    {/* OS */}
-                    <div className="flex items-center gap-3">
-                      <div className="p-2 rounded-lg" style={{ backgroundColor: '#1E1D1F' }}>
-                        <HardDrive className="h-5 w-5 text-gray-400" />
-                      </div>
-                      <div>
-                        <p className="text-xs text-gray-500 uppercase tracking-wide">OS</p>
-                        <p className="text-sm text-white font-medium">{node.system_info?.os || 'Unknown'}</p>
-                        <p className="text-xs text-gray-500">{node.system_info?.os_version || ''}</p>
-                      </div>
-                    </div>
+      {/* Offline Nodes */}
+      {offlineNodes.length > 0 && (
+        <div>
+          <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wide mb-2">
+            Offline ({offlineNodes.length})
+          </h2>
+          <div className="space-y-2 opacity-60">{offlineNodes.map(renderNode)}</div>
+        </div>
+      )}
 
-                    {/* CPU */}
-                    <div className="flex items-center gap-3">
-                      <div className="p-2 rounded-lg" style={{ backgroundColor: '#1E1D1F' }}>
-                        <Cpu className="h-5 w-5 text-gray-400" />
-                      </div>
-                      <div className="flex-1">
-                        <p className="text-xs text-gray-500 uppercase tracking-wide">CPU</p>
-                        <p className="text-sm text-white font-medium">{node.system_info?.cpu || 'Unknown'}</p>
-                        <p className="text-xs text-gray-500">{node.system_info?.cpu_cores || '-'} cores</p>
-                        {node.connected && node.cpu_usage !== undefined && (
-                          <div className="mt-1 flex items-center gap-2">
-                            <div className="flex-1 h-1.5 bg-gray-700 rounded-full overflow-hidden">
-                              <div
-                                className="h-full transition-all"
-                                style={{ width: `${node.cpu_usage || 0}%`, backgroundColor: '#74c69d' }}
-                              />
-                            </div>
-                            <span className="text-xs text-gray-500 w-8 text-right">{node.cpu_usage || 0}%</span>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* RAM */}
-                    <div className="flex items-center gap-3">
-                      <div className="p-2 rounded-lg" style={{ backgroundColor: '#1E1D1F' }}>
-                        <HardDrive className="h-5 w-5 text-gray-400" />
-                      </div>
-                      <div className="flex-1">
-                        <p className="text-xs text-gray-500 uppercase tracking-wide">RAM</p>
-                        <p className="text-sm text-white font-medium">
-                          {Math.round((node.system_info?.ram_total || 0) / 1024 / 1024 / 1024)} GB
-                        </p>
-                        {node.connected && node.ram_usage !== undefined && (
-                          <>
-                            <div className="mt-1 flex items-center gap-2">
-                              <div className="flex-1 h-1.5 bg-gray-700 rounded-full overflow-hidden">
-                                <div
-                                  className="h-full transition-all"
-                                  style={{ width: `${node.ram_usage || 0}%`, backgroundColor: '#74c69d' }}
-                                />
-                              </div>
-                              <span className="text-xs text-gray-500 w-8 text-right">{node.ram_usage || 0}%</span>
-                            </div>
-                            {node.system_info?.ram_total && node.ram_usage > 0 && (
-                              <div className="text-xs text-gray-500 mt-0.5">
-                                {((node.system_info.ram_total * (node.ram_usage / 100)) / (1024 * 1024 * 1024)).toFixed(2)} GB / {(node.system_info.ram_total / (1024 * 1024 * 1024)).toFixed(2)} GB ({node.ram_usage}%)
-                              </div>
-                            )}
-                          </>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* GPUs */}
-                    <div className="flex items-center gap-3">
-                      <div className="p-2 rounded-lg" style={{ backgroundColor: '#1E1D1F' }}>
-                        <Monitor className="h-5 w-5 text-gray-400" />
-                      </div>
-                      <div className="flex-1">
-                        <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">GPUs</p>
-                        {node.system_info?.gpus && node.system_info.gpus.length > 0 ? (
-                          <div className="space-y-2">
-                            {node.system_info.gpus.map((gpu: any, idx: number) => {
-                              // Normalize vendor name for color matching
-                              const vendorLower = gpu.vendor?.toLowerCase() || '';
-                              const isNvidia = vendorLower.includes('nvidia');
-                              const isAMD = vendorLower.includes('amd') || vendorLower.includes('advanced micro') || vendorLower.includes('radeon');
-                              const isIntel = vendorLower.includes('intel');
-                              const isApple = vendorLower.includes('apple');
-
-                              // Format VRAM
-                              const vramGB = gpu.memory ? (gpu.memory / (1024 * 1024 * 1024)).toFixed(0) : null;
-
-                              // GPU utilization - use utilizationGpu directly from systeminformation
-                              const gpuUtil = gpu.utilizationGpu !== undefined ? gpu.utilizationGpu : 0;
-
-                              // VRAM info
-                              let vramInfo = null;
-                              if (gpu.memory && gpu.memoryUsed !== undefined && node.connected) {
-                                const usedGB = (gpu.memoryUsed / (1024 * 1024 * 1024)).toFixed(2);
-                                const totalGB = (gpu.memory / (1024 * 1024 * 1024)).toFixed(2);
-                                const vramPercent = Math.round((gpu.memoryUsed / gpu.memory) * 100);
-                                vramInfo = `${usedGB} GB / ${totalGB} GB (${vramPercent}%)`;
-                              }
-
-                              return (
-                                <div
-                                  key={idx}
-                                  className="flex items-center gap-2 px-2 py-1 rounded"
-                                  style={{ backgroundColor: '#1E1D1F', border: '1px solid #38363a' }}
-                                >
-                                  <div
-                                    className="w-2 h-2 rounded-full"
-                                    style={{
-                                      backgroundColor:
-                                        isNvidia ? '#72B300' :
-                                        isAMD ? '#D7002E' :
-                                        isIntel ? '#0065AF' :
-                                        isApple ? '#999999' :
-                                        '#74c69d'
-                                    }}
-                                  />
-                                  <div className="flex flex-col flex-1">
-                                    <div className="flex items-center justify-between">
-                                      <span className="text-sm text-white font-medium">
-                                        {(() => {
-                                          // Only add vendor prefix if name doesn't already start with vendor or common abbreviations
-                                          const nameLower = gpu.name?.toLowerCase() || '';
-                                          const vendorLower = gpu.vendor?.toLowerCase() || '';
-
-                                          // Check if vendor is already in name (including common abbreviations)
-                                          const vendorInName =
-                                            nameLower.startsWith(vendorLower) ||
-                                            (vendorLower.includes('nvidia') && nameLower.startsWith('nvidia')) ||
-                                            (vendorLower.includes('amd') || vendorLower.includes('advanced micro')) && nameLower.startsWith('amd') ||
-                                            (vendorLower.includes('intel') && nameLower.startsWith('intel')) ||
-                                            (vendorLower.includes('apple') && nameLower.startsWith('apple'));
-
-                                          const needsPrefix = vendorLower && !vendorInName;
-                                          return `${needsPrefix ? (gpu.vendor || '') + ' ' : ''}${gpu.name || 'Unknown GPU'} (${vramGB}GB)`;
-                                        })()}
-                                      </span>
-                                      {gpu.driver_version && node.connected && (
-                                        <span className="text-xs text-gray-500">Driver: {gpu.driver_version}</span>
-                                      )}
-                                    </div>
-                                    {node.connected && (
-                                      <div className="mt-1 space-y-1">
-                                        {/* GPU Utilization */}
-                                        <div className="flex items-center gap-2">
-                                          <span className="text-xs text-gray-500 w-16">GPU:</span>
-                                          <div className="flex-1 h-1.5 bg-gray-700 rounded-full overflow-hidden">
-                                            <div
-                                              className="h-full transition-all"
-                                              style={{
-                                                width: `${gpuUtil}%`,
-                                                backgroundColor: isNvidia ? '#72B300' : isAMD ? '#D7002E' : isIntel ? '#0065AF' : '#74c69d'
-                                              }}
-                                            />
-                                          </div>
-                                          <span className="text-xs text-gray-500 w-8 text-right">{gpuUtil}%</span>
-                                        </div>
-                                        {/* VRAM Usage */}
-                                        {vramInfo && (
-                                          <div className="text-xs text-gray-500">
-                                            {vramInfo}
-                                          </div>
-                                        )}
-                                      </div>
-                                    )}
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        ) : (
-                          <p className="text-sm text-gray-500">None detected</p>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    if (confirm(`Remove node "${node.name}"?`)) {
-                      deleteMutation.mutate(node.id);
-                    }
-                  }}
-                  disabled={deleteMutation.isPending}
-                  style={{ borderColor: '#38363a', color: '#74c69d' }}
-                  className="hover:bg-gray-800"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        ))}
-
-        {nodes?.length === 0 && (
-          <Card>
-            <CardContent className="py-12 text-center">
-              <Server className="mx-auto h-12 w-12 text-gray-600 mb-4" />
-              <p className="text-gray-400">No nodes registered yet</p>
-              <p className="text-sm text-gray-500 mt-2">
-                Add a node using the CLI: <code className="bg-gray-800 px-2 py-1 rounded text-gray-400">encorr-node start</code>
-              </p>
-            </CardContent>
-          </Card>
-        )}
-      </div>
+      {/* Empty State */}
+      {nodes?.length === 0 && (
+        <Card>
+          <CardContent className="py-12 text-center">
+            <Server className="mx-auto h-12 w-12 text-gray-600 mb-4" />
+            <p className="text-gray-400">No nodes registered yet</p>
+            <p className="text-sm text-gray-500 mt-2">
+              Add a node using the CLI: <code className="bg-gray-800 px-2 py-1 rounded text-gray-400">encorr-node start</code>
+            </p>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }
