@@ -489,8 +489,8 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     }
 
     // Get the latest completed transcode report for this file
-    const reports = db.getJobReportsByFileId(id, 'transcode');
-    const completedReports = reports.filter((r: any) => r.status === 'completed');
+    const reports = db.getJobReportsByFileId(id);
+    const completedReports = reports.filter((r: any) => r.status === 'completed' && r.job_type === 'transcode');
 
     if (completedReports.length === 0) {
       reply.status(400);
@@ -576,8 +576,8 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     }
 
     // Get the latest completed transcode report for this file
-    const reports = db.getJobReportsByFileId(id, 'transcode');
-    const completedReports = reports.filter((r: any) => r.status === 'completed');
+    const reports = db.getJobReportsByFileId(id);
+    const completedReports = reports.filter((r: any) => r.status === 'completed' && r.job_type === 'transcode');
 
     if (completedReports.length === 0) {
       reply.status(400);
@@ -668,8 +668,8 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     }
 
     // Get the latest completed transcode report for this file
-    const reports = db.getJobReportsByFileId(id, 'transcode');
-    const completedReports = reports.filter((r: any) => r.status === 'completed');
+    const reports = db.getJobReportsByFileId(id);
+    const completedReports = reports.filter((r: any) => r.status === 'completed' && r.job_type === 'transcode');
 
     if (completedReports.length === 0) {
       reply.status(400);
