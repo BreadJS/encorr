@@ -837,15 +837,6 @@ export function Jobs() {
                             <span className="text-xs text-gray-400">System RAM</span>
                           </div>
                           <div className="flex flex-col items-start gap-1">
-                            {(() => {
-                              // Debug logging
-                              console.log('[Jobs] Full node object:', node);
-                              console.log('[Jobs] Node system_info:', node.system_info);
-                              console.log('[Jobs] Node ram_usage:', node.ram_usage);
-                              console.log('[Jobs] Node cpu_usage:', node.cpu_usage);
-
-                              return null;
-                            })()}
                             {node.system_info?.ram_total ? (() => {
                               // ram_usage might be bytes or percentage - detect based on value
                               const totalBytes = node.system_info.ram_total;

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, formatBytes } from '@/utils/api';
 import { StatusBadge } from '@/components/ui/Badge';
-import { X, ChevronDown, ChevronRight, Clock, Cpu, HardDrive, Zap, FileText } from 'lucide-react';
+import { X, ChevronDown, ChevronRight, Clock, Cpu, HardDrive, Zap, FileText, Settings } from 'lucide-react';
 
 interface ReportDrawerProps {
   fileId: string;
@@ -48,6 +48,7 @@ export function ReportDrawer({ fileId, fileName, open, onClose }: ReportDrawerPr
   const [reports, setReports] = useState<ReportData[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedLogs, setExpandedLogs] = useState<Set<string>>(new Set());
+  const [activeTab, setActiveTab] = useState<'reports' | 'settings'>('reports');
 
   useEffect(() => {
     if (open && fileId) {
@@ -70,11 +71,11 @@ export function ReportDrawer({ fileId, fileName, open, onClose }: ReportDrawerPr
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
       {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/60" onClick={onClose} />
+      <div className="absolute inset-0 bg-black/60 animate-in fade-in duration-200" onClick={onClose} />
 
       {/* Drawer */}
       <div
-        className="absolute right-0 top-0 bottom-0 w-full max-w-xl flex flex-col"
+        className="absolute right-0 top-0 bottom-0 w-full max-w-xl flex flex-col animate-in slide-in-from-right duration-300 ease-out"
         style={{ backgroundColor: '#252326', borderLeft: '1px solid #38363a' }}
       >
         {/* Header */}
@@ -92,20 +93,49 @@ export function ReportDrawer({ fileId, fileName, open, onClose }: ReportDrawerPr
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto p-4">
-          {loading ? (
-            <div className="flex items-center justify-center py-12 text-gray-400">
-              Loading reports...
-            </div>
-          ) : reports.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-12 text-gray-400">
-              <FileText className="h-8 w-8 text-gray-600 mb-3" />
-              <p>No reports yet</p>
-              <p className="text-sm text-gray-500 mt-1">Reports will appear here after jobs are run</p>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {reports.map((report) => {
+        <div className="flex-1 flex flex-col overflow-hidden">
+          {/* Tabs */}
+          <div className="flex border-b" style={{ borderColor: '#38363a' }}>
+            <button
+              onClick={() => setActiveTab('reports')}
+              className={`px-4 py-3 text-sm font-medium transition-colors relative ${
+                activeTab === 'reports' ? 'text-white' : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              Reports
+              {activeTab === 'reports' && (
+                <div className="absolute bottom-0 left-0 right-0 h-0.5" style={{ backgroundColor: '#74c69d' }} />
+              )}
+            </button>
+            <button
+              onClick={() => setActiveTab('settings')}
+              className={`px-4 py-3 text-sm font-medium transition-colors relative ${
+                activeTab === 'settings' ? 'text-white' : 'text-gray-400 hover:text-white'
+              }`}
+              disabled={reports.length === 0}
+            >
+              Settings
+              {activeTab === 'settings' && (
+                <div className="absolute bottom-0 left-0 right-0 h-0.5" style={{ backgroundColor: '#74c69d' }} />
+              )}
+            </button>
+          </div>
+
+          {/* Tab Content */}
+          <div className="flex-1 overflow-y-auto p-4">
+            {loading ? (
+              <div className="flex items-center justify-center py-12 text-gray-400">
+                Loading reports...
+              </div>
+            ) : reports.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-12 text-gray-400">
+                <FileText className="h-8 w-8 text-gray-600 mb-3" />
+                <p>No reports yet</p>
+                <p className="text-sm text-gray-500 mt-1">Reports will appear here after jobs are run</p>
+              </div>
+            ) : activeTab === 'reports' ? (
+              <div className="space-y-3">
+                {reports.map((report) => {
                 const isExpanded = expandedLogs.has(report.id);
 
                 return (
@@ -133,56 +163,56 @@ export function ReportDrawer({ fileId, fileName, open, onClose }: ReportDrawerPr
                     </div>
 
                     {/* Report Details */}
-                    <div className="grid grid-cols-2 gap-x2 text-xs">
-                      {/* Node */}
-                      {report.node_name && (
-                        <div className="flex items-center gap-1.5">
-                          <Cpu className="h-3 w-3 text-gray-500" />
-                          <span className="text-gray-400 truncate">{report.node_name}</span>
-                        </div>
-                      )}
+                    <div className="space-y-1.5 text-xs">
+                      {/* Row 1: Node | Duration */}
+                      <div className="flex items-center gap-2">
+                        {report.node_name && (
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <Cpu className="h-3 w-3 text-gray-500 flex-shrink-0" />
+                            <span className="text-gray-400 truncate">{report.node_name}</span>
+                          </div>
+                        )}
+                        {report.duration_seconds != null && (
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <Clock className="h-3 w-3 text-gray-500 flex-shrink-0" />
+                            <span className="text-gray-400">{formatDuration(report.duration_seconds)}</span>
+                          </div>
+                        )}
+                      </div>
 
-                      {/* Duration */}
-                      {report.duration_seconds != null && (
-                        <div className="flex items-center gap-1.5">
-                          <Clock className="h-3 w-3 text-gray-500" />
-                          <span className="text-gray-400">{formatDuration(report.duration_seconds)}</span>
-                        </div>
-                      )}
+                      {/* Row 2: FPS | Size */}
+                      <div className="flex items-center gap-2">
+                        {report.avg_fps != null && (
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <Zap className="h-3 w-3 text-gray-500 flex-shrink-0" />
+                            <span className="text-gray-400">{report.avg_fps.toFixed(1)} fps</span>
+                          </div>
+                        )}
+                        {report.original_size != null && (
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <HardDrive className="h-3 w-3 text-gray-500 flex-shrink-0" />
+                            <span className="text-gray-400">
+                              {formatBytes(report.original_size)}
+                              {report.output_size != null && (
+                                <>
+                                  {' → '}
+                                  <span className="text-green-400">{formatBytes(report.output_size)}</span>
+                                  {report.output_size < report.original_size && (
+                                    <span className="text-gray-500">
+                                      {' (-'}{((1 - report.output_size / report.original_size) * 100).toFixed(0)}%{')'}
+                                    </span>
+                                  )}
+                                </>
+                              )}
+                            </span>
+                          </div>
+                        )}
+                      </div>
 
-                      {/* FPS */}
-                      {report.avg_fps != null && (
-                        <div className="flex items-center gap-1.5">
-                          <Zap className="h-3 w-3 text-gray-500" />
-                          <span className="text-gray-400">{report.avg_fps.toFixed(1)} fps</span>
-                        </div>
-                      )}
-
-                      {/* Size comparison */}
-                      {report.original_size != null && (
-                        <div className="flex items-center gap-1.5">
-                          <HardDrive className="h-3 w-3 text-gray-500" />
-                          <span className="text-gray-400">
-                            {formatBytes(report.original_size)}
-                            {report.output_size != null && (
-                              <>
-                                {' → '}
-                                <span className="text-green-400">{formatBytes(report.output_size)}</span>
-                                {report.output_size < report.original_size && (
-                                  <span className="text-gray-500">
-                                    {' (-'}{((1 - report.output_size / report.original_size) * 100).toFixed(0)}%{')'}
-                                  </span>
-                                )}
-                              </>
-                            )}
-                          </span>
-                        </div>
-                      )}
-
-                      {/* Time range */}
+                      {/* Row 3: Time range */}
                       {report.started_at && report.completed_at && (
                         <div className="flex items-center gap-1.5">
-                          <Clock className="h-3 w-3 text-gray-500" />
+                          <Clock className="h-3 w-3 text-gray-500 flex-shrink-0" />
                           <span className="text-gray-400">
                             {formatTimestamp(report.started_at)} → {formatTimestamp(report.completed_at)}
                           </span>
@@ -225,7 +255,151 @@ export function ReportDrawer({ fileId, fileName, open, onClose }: ReportDrawerPr
                 );
               })}
             </div>
-          )}
+            ) : (
+              /* Settings Tab */
+              <div className="space-y-3">
+                {reports
+                  .filter(report => report.config)
+                  .map((report) => {
+                    let config: any = null;
+                    try {
+                      config = typeof report.config === 'string' ? JSON.parse(report.config) : report.config;
+                    } catch {
+                      return null;
+                    }
+
+                    if (!config) return null;
+
+                    return (
+                      <div
+                        key={`settings-${report.id}`}
+                        className="rounded-lg p-4"
+                        style={{ backgroundColor: '#1E1D1F', border: '1px solid #38363a' }}
+                      >
+                        {/* Settings Header */}
+                        <div className="flex items-center justify-between mb-3">
+                          <div className="flex items-center gap-2">
+                            <Settings className="h-4 w-4 text-gray-400" />
+                            <span className="text-sm font-medium text-white">
+                              {report.preset_name || 'Transcode Settings'}
+                            </span>
+                          </div>
+                          <StatusBadge status={report.status} />
+                        </div>
+
+                        {/* Settings Details */}
+                        <div className="space-y-2 text-xs">
+                          {/* Video Codec */}
+                          {config.video_codec && (
+                            <div className="flex items-center justify-between py-1 border-b" style={{ borderColor: '#38363a' }}>
+                              <span className="text-gray-400">Video Codec</span>
+                              <span className="text-white font-medium">{config.video_codec}</span>
+                            </div>
+                          )}
+
+                          {/* Audio Codec */}
+                          {config.audio_codec && (
+                            <div className="flex items-center justify-between py-1 border-b" style={{ borderColor: '#38363a' }}>
+                              <span className="text-gray-400">Audio Codec</span>
+                              <span className="text-white font-medium">{config.audio_codec}</span>
+                            </div>
+                          )}
+
+                          {/* Bitrate */}
+                          {config.bitrate && (
+                            <div className="flex items-center justify-between py-1 border-b" style={{ borderColor: '#38363a' }}>
+                              <span className="text-gray-400">Bitrate</span>
+                              <span className="text-white font-medium">{config.bitrate}</span>
+                            </div>
+                          )}
+
+                          {/* CRF */}
+                          {config.crf !== undefined && (
+                            <div className="flex items-center justify-between py-1 border-b" style={{ borderColor: '#38363a' }}>
+                              <span className="text-gray-400">CRF (Quality)</span>
+                              <span className="text-white font-medium">{config.crf}</span>
+                            </div>
+                          )}
+
+                          {/* Preset */}
+                          {config.preset && (
+                            <div className="flex items-center justify-between py-1 border-b" style={{ borderColor: '#38363a' }}>
+                              <span className="text-gray-400">Encoder Preset</span>
+                              <span className="text-white font-medium">{config.preset}</span>
+                            </div>
+                          )}
+
+                          {/* Resolution */}
+                          {config.resolution && (
+                            <div className="flex items-center justify-between py-1 border-b" style={{ borderColor: '#38363a' }}>
+                              <span className="text-gray-400">Resolution</span>
+                              <span className="text-white font-medium">{config.resolution}</span>
+                            </div>
+                          )}
+
+                          {/* Container */}
+                          {config.container && (
+                            <div className="flex items-center justify-between py-1 border-b" style={{ borderColor: '#38363a' }}>
+                              <span className="text-gray-400">Container</span>
+                              <span className="text-white font-medium">{config.container}</span>
+                            </div>
+                          )}
+
+                          {/* Hardware Acceleration */}
+                          {config.hardware_acceleration && (
+                            <div className="flex items-center justify-between py-1 border-b" style={{ borderColor: '#38363a' }}>
+                              <span className="text-gray-400">Hardware Acceleration</span>
+                              <span className="text-white font-medium">{config.hardware_acceleration}</span>
+                            </div>
+                          )}
+
+                          {/* Pass */}
+                          {config.pass !== undefined && (
+                            <div className="flex items-center justify-between py-1 border-b" style={{ borderColor: '#38363a' }}>
+                              <span className="text-gray-400">Pass</span>
+                              <span className="text-white font-medium">{config.pass === 1 ? '1-Pass' : '2-Pass'}</span>
+                            </div>
+                          )}
+
+                          {/* Audio Channels */}
+                          {config.audio_channels && (
+                            <div className="flex items-center justify-between py-1 border-b" style={{ borderColor: '#38363a' }}>
+                              <span className="text-gray-400">Audio Channels</span>
+                              <span className="text-white font-medium">{config.audio_channels}</span>
+                            </div>
+                          )}
+
+                          {/* Sample Rate */}
+                          {config.audio_sample_rate && (
+                            <div className="flex items-center justify-between py-1">
+                              <span className="text-gray-400">Audio Sample Rate</span>
+                              <span className="text-white font-medium">{config.audio_sample_rate}</span>
+                            </div>
+                          )}
+
+                          {/* Raw JSON for debugging */}
+                          <details className="mt-3">
+                            <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-300">
+                              View Full Configuration
+                            </summary>
+                            <pre className="mt-2 p-2 rounded text-xs text-gray-400 overflow-x-auto" style={{ backgroundColor: '#1a191c' }}>
+                              {JSON.stringify(config, null, 2)}
+                            </pre>
+                          </details>
+                        </div>
+                      </div>
+                    );
+                  })}
+                {reports.filter(r => r.config).length === 0 && (
+                  <div className="flex flex-col items-center justify-center py-12 text-gray-400">
+                    <Settings className="h-8 w-8 text-gray-600 mb-3" />
+                    <p>No settings available</p>
+                    <p className="text-sm text-gray-500 mt-1">Settings will appear here after jobs complete</p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>

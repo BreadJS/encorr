@@ -11,8 +11,12 @@ import { useWebSocket } from '@/hooks/useWebSocket';
 import type { TranscodeMode } from '@encorr/shared';
 
 // Helper function to format duration as HH:MM:SS
-function formatDuration(seconds: number): string {
-  if (!seconds || seconds <= 0) return '—:--:--';
+function formatDuration(seconds: number | undefined, isAnalyzed: boolean = false): string {
+  // If not analyzed, show dashes
+  if (!isAnalyzed) return '--:--:--';
+
+  // If analyzed but no duration data, show dashes
+  if (!seconds || seconds <= 0) return '--:--:--';
 
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
@@ -67,6 +71,41 @@ export function Files() {
     refetchInterval: 5000, // Refetch jobs every 5s for active jobs
   });
 
+  // Fetch reports for each file to get correct transcode status
+  // This runs after filesData is available to avoid circular dependency
+  const { data: reportsByFileId = {} } = useQuery({
+    queryKey: ['reports-by-file', filesData?.items?.map((f: any) => f.id)],
+    queryFn: async () => {
+      if (!filesData?.items || filesData.items.length === 0) return {};
+
+      const fileIds = filesData.items.map((f: any) => f.id);
+      const reportsPromises = fileIds.map((fileId) =>
+        api.getReportsForFile(fileId, 5).catch(() => [])
+      );
+      const reportsArrays = await Promise.all(reportsPromises);
+
+      // Build map of file_id -> latest transcode report
+      const map: Record<string, any> = {};
+      fileIds.forEach((fileId, index) => {
+        const fileReports = reportsArrays[index] || [];
+        // Find latest transcode report
+        const transcodeReports = fileReports.filter((r: any) => r.job_type === 'transcode');
+        if (transcodeReports.length > 0) {
+          const latest = transcodeReports.sort((a: any, b: any) => {
+            const aTime = a.completed_at || a.created_at || 0;
+            const bTime = b.completed_at || b.created_at || 0;
+            return bTime - aTime; // Newest first
+          })[0];
+          map[fileId] = latest;
+        }
+      });
+
+      return map;
+    },
+    refetchInterval: 10000, // Refetch every 10s
+    enabled: !!(filesData?.items && filesData.items.length > 0),
+  });
+
   // Build folders list from libraries + "All Files"
   const folders = useMemo(() => {
     const allFilesCount = libraries.reduce((sum: number, lib: any) => sum + (lib.file_count || 0), 0);
@@ -89,37 +128,50 @@ export function Files() {
   // Combine library files with job information for unified view
   const filesWithJobStatus = useMemo(() => {
     return files.map((file: any) => {
-      // Find the job associated with this file (via file_id)
-      const job = jobs.find((j: any) => j.file_id === file.id);
+      // Find active job for real-time progress
+      const activeJob = jobs.find((j: any) =>
+        j.file_id === file.id && (j.status === 'assigned' || j.status === 'processing')
+      );
 
-      // Determine display status and progress
+      // Get latest transcode report for this file
+      const latestReport = reportsByFileId[file.id];
+
+      // Determine display status
       let displayStatus = file.status;
       let displayProgress = file.progress || 0;
 
-      if (job) {
-        if (job.status === 'assigned' || job.status === 'processing') {
-          displayStatus = 'processing';
-          displayProgress = job.progress || 0;
-        } else if (job.status === 'completed') {
+      // Priority 1: Active job (processing/assigned)
+      if (activeJob) {
+        displayStatus = 'processing';
+        displayProgress = activeJob.progress || 0;
+      }
+      // Priority 2: Latest transcode report overrides file status
+      else if (latestReport) {
+        displayStatus = latestReport.status;
+        displayProgress = latestReport.status === 'completed' ? 100 : 0;
+      }
+      // Priority 3: File status from backend
+      else {
+        // Map backend statuses to display statuses
+        if (file.status === 'completed') {
           displayStatus = 'completed';
           displayProgress = 100;
-        } else if (job.status === 'failed') {
-          displayStatus = 'failed';
-        } else if (job.status === 'cancelled') {
-          displayStatus = 'cancelled';
+        } else if (file.status === 'analyzed' || file.status === 'imported') {
+          displayStatus = 'ready';
+        } else if (file.status === 'pending') {
+          displayStatus = 'pending';
         }
-      } else if (file.status === 'analyzed' || file.status === 'imported') {
-        displayStatus = 'ready';
       }
 
       return {
         ...file,
         displayStatus,
         displayProgress,
-        job,
+        job: activeJob || latestReport,
+        outputSize: latestReport?.output_size || latestReport?.transcoded_size || null,
       };
     });
-  }, [files, jobs]);
+  }, [files, jobs, reportsByFileId]);
 
   // Count files by status for filter tabs
   const statusCounts = useMemo(() => {
@@ -569,11 +621,12 @@ export function Files() {
                     style={{ backgroundColor: '#1a181a', border: '1px solid #39363a' }}
                   >
                     <option value="all">All Statuses</option>
-                    <option value="pending">Pending</option>
-                    <option value="queued">Queued</option>
+                    <option value="ready">Transcodeable</option>
                     <option value="processing">Processing</option>
                     <option value="completed">Completed</option>
                     <option value="failed">Failed</option>
+                    <option value="cancelled">Cancelled</option>
+                    <option value="pending">Pending</option>
                   </select>
                 </div>
 
@@ -624,11 +677,12 @@ export function Files() {
                         style={{ accentColor: '#74c69d' }}
                       />
                     </div>
-                    <div className="flex-1 min-w-0 text-xs text-gray-300 uppercase font-medium">Filename</div>
+                    <div className="flex-1 min-w-0 pr-3 text-xs text-gray-300 uppercase font-medium">Filename</div>
                     <div className="text-xs text-gray-300 uppercase font-medium w-16 flex-shrink-0">Fmt</div>
                     <div className="text-xs text-gray-300 uppercase font-medium w-28 flex-shrink-0">Codec</div>
                     <div className="text-xs text-gray-300 uppercase font-medium w-20 flex-shrink-0">Res</div>
                     <div className="text-xs text-gray-300 uppercase font-medium w-20 flex-shrink-0">Size</div>
+                    <div className="text-xs text-gray-300 uppercase font-medium w-20 flex-shrink-0">New Size</div>
                     <div className="text-xs text-gray-300 uppercase font-medium w-24 flex-shrink-0">Status</div>
                     <div className="text-xs text-gray-300 uppercase font-medium w-12 flex-shrink-0">+</div>
                   </div>
@@ -638,7 +692,16 @@ export function Files() {
                     {filteredFiles.map((file: any) => (
                       <div
                         key={file.id}
-                        className={`px-4 py-3 flex items-center gap-2 transition-all ${
+                        onClick={(e) => {
+                          // Don't toggle if clicking on checkbox, buttons, or inputs
+                          if ((e.target as HTMLElement).tagName === 'INPUT' ||
+                              (e.target as HTMLElement).tagName === 'BUTTON' ||
+                              (e.target as HTMLElement).closest('button')) {
+                            return;
+                          }
+                          handleToggleFile(file.id);
+                        }}
+                        className={`px-4 py-3 flex items-center gap-2 transition-all cursor-pointer ${
                           selectedFiles.has(file.id) ? 'bg-white/5' : 'hover:bg-white/5'
                         }`}
                       >
@@ -664,7 +727,7 @@ export function Files() {
                           <div className="text-xs text-gray-500 mt-0.5 flex items-center gap-2">
                             <span className="truncate">{file.library_name || file.folder_name || 'Unknown'}</span>
                             <span className="flex-shrink-0">•</span>
-                            <span className="flex-shrink-0">{formatDuration(file.duration)}</span>
+                            <span className="flex-shrink-0">{formatDuration(file.duration, file.status === 'analyzed' || file.status === 'imported' || file.status === 'completed')}</span>
                           </div>
                           {/* Job info for processing files */}
                           {(file.displayStatus === 'processing' || file.displayStatus === 'failed') && file.job && (
@@ -723,6 +786,15 @@ export function Files() {
                           {formatBytes(file.filesize || file.file_size || file.size || 0)}
                         </div>
 
+                        {/* New Size (only if transcoded) */}
+                        <div className="w-20 flex-shrink-0 text-sm text-gray-400 truncate">
+                          {file.displayStatus === 'completed' && file.outputSize ? (
+                            <span className="text-green-400">{formatBytes(file.outputSize)}</span>
+                          ) : (
+                            <span className="text-gray-600">—</span>
+                          )}
+                        </div>
+
                         {/* Status */}
                         <div className="w-24 flex-shrink-0">
                           {getStatusDisplay(file)}
@@ -737,7 +809,7 @@ export function Files() {
                         </div>
 
                         {/* Actions */}
-                        <div className="w-auto flex-shrink-0 flex justify-center gap-1">
+                        <div className="w-12 flex-shrink-0 flex items-center justify-center gap-1">
                           {file.status === 'pending' ? (
                             // Needs analysis - show Analyze button
                             <button
@@ -800,21 +872,21 @@ export function Files() {
                               <RefreshCw className="h-3 w-3" />
                             </button>
                           ) : null}
-                        </div>
 
-                        {/* Report button */}
-                        <button
-                          onClick={() => {
-                            setReportFileId(file.id);
-                            setReportFileName(file.filename || file.name || '');
-                            setShowReportDrawer(true);
-                          }}
-                          className="p-1.5 rounded transition-colors hover:bg-white/10"
-                          style={{ color: '#9ca3af' }}
-                          title="View reports"
-                        >
-                          <FileText className="h-3.5 w-3.5" />
-                        </button>
+                          {/* Report button */}
+                          <button
+                            onClick={() => {
+                              setReportFileId(file.id);
+                              setReportFileName(file.filename || file.name || '');
+                              setShowReportDrawer(true);
+                            }}
+                            className="p-1 rounded transition-colors hover:bg-white/10"
+                            style={{ color: '#9ca3af' }}
+                            title="View reports"
+                          >
+                            <FileText className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
                       </div>
                     ))}
                   </div>
