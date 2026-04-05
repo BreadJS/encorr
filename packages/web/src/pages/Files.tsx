@@ -2,9 +2,8 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, formatBytes } from '@/utils/api';
 import { Card, CardContent } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
-import { TranscodeDialog } from '@/components/ui/TranscodeDialog';
 import { SmartTranscodeDialog } from '@/components/ui/SmartTranscodeDialog';
-import { RefreshCw, ChevronLeft, ChevronRight, Film, Folder, FolderOpen, Check, Search, Filter, Play, Scan, Database, Sparkles, Clock, Zap, X, AlertTriangle, FileText, Ban } from 'lucide-react';
+import { RefreshCw, ChevronLeft, ChevronRight, Film, Folder, FolderOpen, Check, Search, Filter, Scan, Sparkles, Clock, Zap, AlertTriangle, FileText, MoreVertical, Replace, Copy, X, Ban } from 'lucide-react';
 import { ReportDrawer } from '@/components/ReportDrawer';
 import { useState, useMemo } from 'react';
 import { useWebSocket } from '@/hooks/useWebSocket';
@@ -34,8 +33,6 @@ export function Files() {
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
-  const [showTranscodeDialog, setShowTranscodeDialog] = useState(false);
-  const [transcodeDialogMode, setTranscodeDialogMode] = useState<'all' | 'selected'>('selected');
   const [showSmartTranscodeDialog, setShowSmartTranscodeDialog] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   const [perPage] = useState(50);
@@ -193,19 +190,6 @@ export function Files() {
     return counts;
   }, [filesWithJobStatus]);
 
-  // Queue mutation
-  const queueMutation = useMutation({
-    mutationFn: ({ fileIds, presetId }: { fileIds: string[]; presetId: string }) =>
-      api.createJob({ file_ids: fileIds, preset_id: presetId }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['files'] });
-      queryClient.invalidateQueries({ queryKey: ['jobs'] });
-      queryClient.invalidateQueries({ queryKey: ['libraries'] });
-      setSelectedFiles(new Set());
-      setShowTranscodeDialog(false);
-    },
-  });
-
   // Analyze mutation - only scans files, does not queue for transcoding
   const analyzeMutation = useMutation({
     mutationFn: async () => {
@@ -229,30 +213,6 @@ export function Files() {
       queryClient.invalidateQueries({ queryKey: ['jobs'] });
       queryClient.invalidateQueries({ queryKey: ['libraries'] });
       setSelectedFiles(new Set());
-    },
-  });
-
-  // Analyze single file mutation
-  const analyzeSingleMutation = useMutation({
-    mutationFn: async (fileId: string) => {
-      await api.createJob({ file_ids: [fileId], preset_id: 'builtin-analyze' });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['files'] });
-      queryClient.invalidateQueries({ queryKey: ['jobs'] });
-      queryClient.invalidateQueries({ queryKey: ['libraries'] });
-    },
-  });
-
-  // Transcode single file mutation
-  const transcodeSingleMutation = useMutation({
-    mutationFn: async ({ fileId, presetId }: { fileId: string; presetId: string }) => {
-      await api.createJob({ file_ids: [fileId], preset_id: presetId });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['files'] });
-      queryClient.invalidateQueries({ queryKey: ['jobs'] });
-      queryClient.invalidateQueries({ queryKey: ['libraries'] });
     },
   });
 
@@ -311,27 +271,6 @@ export function Files() {
     } else {
       setSelectedFiles(new Set(filteredFiles.map(f => f.id)));
     }
-  };
-
-  const handleTranscodeConfirm = (presetId: string) => {
-    if (transcodeDialogMode === 'all') {
-      // Transcode all ready files (analyzed or imported)
-      const readyFileIds = filesWithJobStatus
-        .filter((f: any) => f.displayStatus === 'ready')
-        .map((f: any) => f.id);
-      queueMutation.mutate({ fileIds: readyFileIds, presetId });
-    } else {
-      // Transcode selected ready files
-      const readyFileIds = filesWithJobStatus
-        .filter((f: any) => selectedFiles.has(f.id) && f.displayStatus === 'ready')
-        .map((f: any) => f.id);
-      queueMutation.mutate({ fileIds: readyFileIds, presetId });
-    }
-  };
-
-  const handleOpenTranscodeDialog = (mode: 'all' | 'selected') => {
-    setTranscodeDialogMode(mode);
-    setShowTranscodeDialog(true);
   };
 
   const getCodecBadgeColor = (codec?: string) => {
@@ -418,12 +357,12 @@ export function Files() {
     <>
     <div className="space-y-4">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold text-white">Files</h1>
-          <p className="text-gray-400">All files with real-time job status</p>
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div className="min-w-0">
+          <h1 className="text-2xl sm:text-3xl font-bold text-white">Files</h1>
+          <p className="text-gray-400 text-sm sm:text-base">All files with real-time job status</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {selectedFiles.size > 0 && (
             <>
               <span className="text-sm text-gray-400">
@@ -432,38 +371,84 @@ export function Files() {
             </>
           )}
 
+          {/* File Management Buttons - show when completed files are selected */}
+          {(() => {
+            const completedSelectedCount = Array.from(selectedFiles).filter(id =>
+              filesWithJobStatus.find((f: any) => f.id === id && f.displayStatus === 'completed')
+            ).length;
+
+            return completedSelectedCount > 0 ? (
+              <>
+                <div className="h-6 w-px bg-gray-500 mx-2 hidden sm:block" />
+                <Button
+                  onClick={() => {
+                    console.log('Bulk replace original files for:', Array.from(selectedFiles));
+                  }}
+                  style={{ borderColor: '#39363a', color: '#ffffff' }}
+                  className="border flex items-center gap-2 animate-in slide-in-from-left-2 fade-in duration-300 text-sm"
+                  title="Replace original files with transcoded versions"
+                >
+                  <Replace className="h-4 w-4" />
+                  <span className="hidden sm:inline">Replace Original</span>
+                  <span className="sm:hidden">Replace</span> ({completedSelectedCount})
+                </Button>
+                <Button
+                  onClick={() => {
+                    console.log('Bulk backup and replace files for:', Array.from(selectedFiles));
+                  }}
+                  style={{ borderColor: '#39363a', color: '#ffffff' }}
+                  className="border flex items-center gap-2 animate-in slide-in-from-left-2 fade-in duration-300 delay-100 text-sm"
+                  title="Rename originals to .org and put new files in place"
+                >
+                  <Copy className="h-4 w-4" />
+                  <span className="hidden sm:inline">Backup & Replace</span>
+                  <span className="sm:hidden">Backup</span> ({completedSelectedCount})
+                </Button>
+                <div className="h-6 w-px bg-gray-500 mx-2 hidden sm:block" />
+              </>
+            ) : null;
+          })()}
+
           {/* Analyze All / Analyze Selected Button */}
           <Button
             onClick={() => selectedFiles.size > 0 ? analyzeSelectedMutation.mutate() : analyzeMutation.mutate()}
             disabled={analyzeMutation.isPending || analyzeSelectedMutation.isPending}
             style={{ borderColor: '#39363a', color: '#ffffff' }}
-            className="border flex items-center gap-2"
+            className="border flex items-center gap-2 text-sm"
             title={selectedFiles.size > 0 ? 'Analyze selected files' : 'Scan for new video files'}
           >
             <Scan className={`h-4 w-4 ${analyzeMutation.isPending || analyzeSelectedMutation.isPending ? 'animate-spin' : ''}`} />
-            {analyzeMutation.isPending || analyzeSelectedMutation.isPending ? 'Scanning...' : selectedFiles.size > 0 ? `Analyze Selected (${selectedFiles.size})` : 'Analyze All'}
+            <span className="hidden sm:inline">
+              {analyzeMutation.isPending || analyzeSelectedMutation.isPending ? 'Scanning...' : selectedFiles.size > 0 ? `Analyze Selected (${selectedFiles.size})` : 'Analyze All'}
+            </span>
+            <span className="sm:hidden">{analyzeMutation.isPending || analyzeSelectedMutation.isPending ? 'Scanning...' : selectedFiles.size > 0 ? `Analyze` : 'Scan'}</span>
           </Button>
 
-          {/* Transcode All / Transcode Selected Button */}
+          {/* Smart Transcode / Transcode All Button */}
           <Button
-            onClick={() => handleOpenTranscodeDialog(selectedFiles.size > 0 ? 'selected' : 'all')}
-            style={{ backgroundColor: '#9C27B0', color: '#ffffff' }}
-            className="flex items-center gap-2"
-          >
-            <Database className="h-4 w-4" />
-            {selectedFiles.size > 0 ? `Transcode Selected (${selectedFiles.size})` : `Transcode All (${filesWithJobStatus.filter((f: any) => f.displayStatus === 'ready').length})`}
-          </Button>
-
-          {/* Smart Transcode Button */}
-          <Button
-            onClick={() => setShowSmartTranscodeDialog(true)}
-            disabled={selectedFiles.size === 0}
+            onClick={() => {
+              if (selectedFiles.size > 0) {
+                setShowSmartTranscodeDialog(true);
+              } else {
+                // Select all ready files and open smart transcode
+                const readyFileIds = filesWithJobStatus
+                  .filter((f: any) => f.displayStatus === 'ready')
+                  .map((f: any) => f.id);
+                setSelectedFiles(new Set(readyFileIds));
+                setShowSmartTranscodeDialog(true);
+              }
+            }}
             style={{ backgroundColor: '#74c69d', color: '#ffffff' }}
-            className="flex items-center gap-2"
-            title="Smart Transcode - automatically optimize settings for your files"
+            className="flex items-center gap-2 text-sm"
+            title={selectedFiles.size > 0 ? 'Smart Transcode - automatically optimize settings for your files' : 'Smart Transcode all transcodeable files'}
           >
             <Sparkles className="h-4 w-4" />
-            Smart Transcode ({selectedFiles.size})
+            <span className="hidden sm:inline">
+              {selectedFiles.size > 0 ? `Transcode Selected (${selectedFiles.size})` : `Transcode All (${filesWithJobStatus.filter((f: any) => f.displayStatus === 'ready').length})`}
+            </span>
+            <span className="sm:hidden">
+              {selectedFiles.size > 0 ? `Transcode (${selectedFiles.size})` : `Transcode All`}
+            </span>
           </Button>
 
           <Button
@@ -478,78 +463,80 @@ export function Files() {
       </div>
 
       {/* Status Filter Tabs */}
-      <div className="flex items-center gap-2 border-b border-[#39363a] pb-2">
-        <button
-          onClick={() => { setSelectedStatus('all'); setCurrentPage(1); }}
-          className={`px-4 py-2 rounded-t-lg text-sm font-medium transition-colors ${
-            selectedStatus === 'all'
-              ? 'bg-[#252326] text-white'
-              : 'text-gray-400 hover:text-white hover:bg-[#252326]/50'
-          }`}
-        >
-          All ({statusCounts.all})
-        </button>
-        <button
-          onClick={() => { setSelectedStatus('ready'); setCurrentPage(1); }}
-          className={`px-4 py-2 rounded-t-lg text-sm font-medium transition-colors ${
-            selectedStatus === 'ready'
-              ? 'bg-[#252326] text-white'
-              : 'text-gray-400 hover:text-white hover:bg-[#252326]/50'
-          }`}
-        >
-          Transcodeable ({statusCounts.ready})
-        </button>
-        <button
-          onClick={() => { setSelectedStatus('processing'); setCurrentPage(1); }}
-          className={`px-4 py-2 rounded-t-lg text-sm font-medium transition-colors ${
-            selectedStatus === 'processing'
-              ? 'bg-[#252326] text-white'
-              : 'text-gray-400 hover:text-white hover:bg-[#252326]/50'
-          }`}
-        >
-          Processing ({statusCounts.processing})
-        </button>
-        <button
-          onClick={() => { setSelectedStatus('completed'); setCurrentPage(1); }}
-          className={`px-4 py-2 rounded-t-lg text-sm font-medium transition-colors ${
-            selectedStatus === 'completed'
-              ? 'bg-[#252326] text-white'
-              : 'text-gray-400 hover:text-white hover:bg-[#252326]/50'
-          }`}
-        >
-          Completed ({statusCounts.completed})
-        </button>
-        <button
-          onClick={() => { setSelectedStatus('failed'); setCurrentPage(1); }}
-          className={`px-4 py-2 rounded-t-lg text-sm font-medium transition-colors ${
-            selectedStatus === 'failed'
-              ? 'bg-[#252326] text-white'
-              : 'text-gray-400 hover:text-white hover:bg-[#252326]/50'
-          }`}
-        >
-          Failed ({statusCounts.failed})
-        </button>
-        <button
-          onClick={() => { setSelectedStatus('cancelled'); setCurrentPage(1); }}
-          className={`px-4 py-2 rounded-t-lg text-sm font-medium transition-colors ${
-            selectedStatus === 'cancelled'
-              ? 'bg-[#252326] text-white'
-              : 'text-gray-400 hover:text-white hover:bg-[#252326]/50'
-          }`}
-        >
-          Cancelled ({statusCounts.cancelled})
-        </button>
+      <div className="flex items-center gap-2 border-b border-[#39363a] pb-2 overflow-x-auto">
+        <div className="flex items-center gap-2 min-w-max sm:min-w-0">
+          <button
+            onClick={() => { setSelectedStatus('all'); setCurrentPage(1); }}
+            className={`px-3 sm:px-4 py-2 rounded-t-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
+              selectedStatus === 'all'
+                ? 'bg-[#252326] text-white'
+                : 'text-gray-400 hover:text-white hover:bg-[#252326]/50'
+            }`}
+          >
+            All ({statusCounts.all})
+          </button>
+          <button
+            onClick={() => { setSelectedStatus('ready'); setCurrentPage(1); }}
+            className={`px-3 sm:px-4 py-2 rounded-t-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
+              selectedStatus === 'ready'
+                ? 'bg-[#252326] text-white'
+                : 'text-gray-400 hover:text-white hover:bg-[#252326]/50'
+            }`}
+          >
+            Transcodeable ({statusCounts.ready})
+          </button>
+          <button
+            onClick={() => { setSelectedStatus('processing'); setCurrentPage(1); }}
+            className={`px-3 sm:px-4 py-2 rounded-t-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
+              selectedStatus === 'processing'
+                ? 'bg-[#252326] text-white'
+                : 'text-gray-400 hover:text-white hover:bg-[#252326]/50'
+            }`}
+          >
+            Processing ({statusCounts.processing})
+          </button>
+          <button
+            onClick={() => { setSelectedStatus('completed'); setCurrentPage(1); }}
+            className={`px-3 sm:px-4 py-2 rounded-t-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
+              selectedStatus === 'completed'
+                ? 'bg-[#252326] text-white'
+                : 'text-gray-400 hover:text-white hover:bg-[#252326]/50'
+            }`}
+          >
+            Completed ({statusCounts.completed})
+          </button>
+          <button
+            onClick={() => { setSelectedStatus('failed'); setCurrentPage(1); }}
+            className={`px-3 sm:px-4 py-2 rounded-t-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
+              selectedStatus === 'failed'
+                ? 'bg-[#252326] text-white'
+                : 'text-gray-400 hover:text-white hover:bg-[#252326]/50'
+            }`}
+          >
+            Failed ({statusCounts.failed})
+          </button>
+          <button
+            onClick={() => { setSelectedStatus('cancelled'); setCurrentPage(1); }}
+            className={`px-3 sm:px-4 py-2 rounded-t-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
+              selectedStatus === 'cancelled'
+                ? 'bg-[#252326] text-white'
+                : 'text-gray-400 hover:text-white hover:bg-[#252326]/50'
+            }`}
+          >
+            Cancelled ({statusCounts.cancelled})
+          </button>
 
-        <div className="ml-auto flex items-center gap-2">
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-            <input
-              type="text"
-              placeholder="Search files..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-10 pr-4 py-2 bg-[#1a181b] border border-[#39363a] rounded-lg text-white text-sm placeholder:text-gray-500 focus:outline-none focus:border-[#74c69d] w-64"
-            />
+          <div className="ml-auto flex items-center gap-2 pl-2 sm:pl-0">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+              <input
+                type="text"
+                placeholder="Search files..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="pl-10 pr-4 py-2 bg-[#1a181b] border border-[#39363a] rounded-lg text-white text-sm placeholder:text-gray-500 focus:outline-none focus:border-[#74c69d] w-48 sm:w-64"
+              />
+            </div>
           </div>
         </div>
       </div>
@@ -558,7 +545,7 @@ export function Files() {
 
       <div className="flex gap-4 overflow-hidden">
         {/* Sidebar - Folder Navigation */}
-        <Card style={{ backgroundColor: '#252326', border: 'none', width: '240px', flexShrink: 0 }}>
+        <Card className="hidden lg:block" style={{ backgroundColor: '#252326', border: 'none', width: '240px', flexShrink: 0 }}>
           <CardContent className="p-0">
             <div className="p-4 border-b border-[#39363a]">
               <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wide">Folders</h3>
@@ -666,8 +653,10 @@ export function Files() {
                 </div>
               ) : (
                 <>
-                  {/* Table Header */}
-                  <div className="px-4 py-3 border-b border-[#39363a] flex items-center gap-2" style={{ backgroundColor: '#2a282c', borderTopLeftRadius: '0.5rem', borderTopRightRadius: '0.5rem' }}>
+                  <div className="overflow-x-auto -mx-4 sm:mx-0">
+                    <div className="min-w-full sm:min-w-0">
+                      {/* Table Header */}
+                      <div className="px-4 py-3 border-b border-[#39363a] flex items-center gap-2" style={{ backgroundColor: '#2a282c', borderTopLeftRadius: '0.5rem', borderTopRightRadius: '0.5rem' }}>
                     <div className="flex items-center justify-center w-8 flex-shrink-0">
                       <input
                         type="checkbox"
@@ -680,6 +669,7 @@ export function Files() {
                     <div className="flex-1 min-w-0 pr-3 text-xs text-gray-300 uppercase font-medium">Filename</div>
                     <div className="text-xs text-gray-300 uppercase font-medium w-16 flex-shrink-0">Fmt</div>
                     <div className="text-xs text-gray-300 uppercase font-medium w-28 flex-shrink-0">Codec</div>
+                    <div className="text-xs text-gray-300 uppercase font-medium w-28 flex-shrink-0">New Codec</div>
                     <div className="text-xs text-gray-300 uppercase font-medium w-20 flex-shrink-0">Res</div>
                     <div className="text-xs text-gray-300 uppercase font-medium w-20 flex-shrink-0">Size</div>
                     <div className="text-xs text-gray-300 uppercase font-medium w-20 flex-shrink-0">New Size</div>
@@ -771,6 +761,32 @@ export function Files() {
                           </span>
                         </div>
 
+                        {/* New Codec (from transcode report) */}
+                        <div className="w-28 flex-shrink-0">
+                          {(() => {
+                            if (file.displayStatus === 'completed' && file.job?.config) {
+                              let config: any = null;
+                              try {
+                                config = typeof file.job.config === 'string' ? JSON.parse(file.job.config) : file.job.config;
+                              } catch {
+                                return <span className="text-gray-600 text-xs px-1.5 py-0.5 text-center block">—</span>;
+                              }
+                              const newCodec = config.video_codec || file.job.metadata?.video_codec;
+                              if (newCodec) {
+                                return (
+                                  <span
+                                    className="text-xs px-1.5 py-0.5 rounded text-center block"
+                                    style={{ backgroundColor: getCodecBadgeColor(newCodec), color: '#ffffff' }}
+                                  >
+                                    {newCodec.toUpperCase()}
+                                  </span>
+                                );
+                              }
+                            }
+                            return <span className="text-gray-600 text-xs px-1.5 py-0.5 text-center block">—</span>;
+                          })()}
+                        </div>
+
                         {/* Resolution */}
                         <div className="w-20 flex-shrink-0">
                           <span
@@ -810,67 +826,46 @@ export function Files() {
 
                         {/* Actions */}
                         <div className="w-12 flex-shrink-0 flex items-center justify-center gap-1">
-                          {file.status === 'pending' ? (
-                            // Needs analysis - show Analyze button
-                            <button
-                              onClick={() => analyzeSingleMutation.mutate(file.id)}
-                              disabled={analyzeSingleMutation.isPending}
-                              className="px-2 py-1 text-xs rounded transition-colors"
-                              style={{ backgroundColor: '#38363a', color: '#ffffff' }}
-                              title="Analyze file to get metadata"
-                            >
-                              <Scan className="h-3 w-3 inline mr-1" />
-                              Analyze
-                            </button>
-                          ) : file.status === 'analyzed' ? (
-                            // Analyzed - show Transcode button with preset dropdown
+                          {/* File actions dropdown for completed files */}
+                          {file.displayStatus === 'completed' ? (
                             <div className="relative group">
                               <button
-                                className="px-2 py-1 text-xs rounded transition-colors"
-                                style={{ backgroundColor: '#74c69d', color: '#ffffff' }}
-                                title="Transcode this file"
+                                className="p-1 rounded transition-colors hover:bg-white/10"
+                                style={{ color: '#9ca3af' }}
+                                title="File actions"
                               >
-                                <Play className="h-3 w-3 inline mr-1" />
-                                Transcode
+                                <MoreVertical className="h-3.5 w-3.5" />
                               </button>
-                              {/* Preset Dropdown */}
-                              <div className="absolute left-0 top-full mt-1 w-48 rounded-lg shadow-xl opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity z-50">
+                              {/* Dropdown menu */}
+                              <div className="absolute right-0 top-full mt-1 w-48 rounded-lg shadow-xl opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity z-50">
                                 <div style={{ backgroundColor: '#252326', border: '1px solid #39363a' }}>
                                   <div className="p-1">
-                                    {['High Quality H.265 (CPU)', 'Fast H.264 (CPU)', 'Maximum Compression H.265 (CPU)'].map((preset) => (
-                                      <button
-                                        key={preset}
-                                        onClick={() => {
-                                          const presetId = preset === 'High Quality H.265 (CPU)' ? 'builtin-high-quality-h265-cpu' :
-                                            preset === 'Fast H.264 (CPU)' ? 'builtin-fast-h264-cpu' : 'builtin-max-compression-h265-cpu';
-                                          transcodeSingleMutation.mutate({ fileId: file.id, presetId });
-                                        }}
-                                        className="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-white/5 rounded transition-colors"
-                                      >
-                                        {preset}
-                                      </button>
-                                    ))}
+                                    <button
+                                      onClick={() => {
+                                        // TODO: Implement replace original file
+                                        console.log('Replace original file:', file.id);
+                                      }}
+                                      className="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-white/5 rounded transition-colors flex items-center gap-2"
+                                      title="Replace original file with transcoded version"
+                                    >
+                                      <Replace className="h-4 w-4" />
+                                      Replace Original
+                                    </button>
+                                    <button
+                                      onClick={() => {
+                                        // TODO: Implement backup and replace
+                                        console.log('Backup and replace:', file.id);
+                                      }}
+                                      className="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-white/5 rounded transition-colors flex items-center gap-2"
+                                      title="Rename original to .org and put new file in place"
+                                    >
+                                      <Copy className="h-4 w-4" />
+                                      Backup & Replace
+                                    </button>
                                   </div>
                                 </div>
                               </div>
                             </div>
-                          ) : file.displayStatus === 'processing' ? (
-                            // Processing - show progress
-                            <span className="text-xs text-blue-400">{file.displayProgress.toFixed(1)}%</span>
-                          ) : file.displayStatus === 'completed' ? (
-                            // Completed - show check
-                            <Check className="h-4 w-4 text-[#74c69d]" />
-                          ) : file.displayStatus === 'failed' ? (
-                            // Failed - show retry button
-                            <button
-                              onClick={() => analyzeSingleMutation.mutate(file.id)}
-                              disabled={analyzeSingleMutation.isPending}
-                              className="px-2 py-1 text-xs rounded transition-colors"
-                              style={{ backgroundColor: '#dc2626', color: '#ffffff' }}
-                              title="Retry analysis"
-                            >
-                              <RefreshCw className="h-3 w-3" />
-                            </button>
                           ) : null}
 
                           {/* Report button */}
@@ -890,74 +885,65 @@ export function Files() {
                       </div>
                     ))}
                   </div>
-
-                  {/* Pagination */}
-                  {totalPages > 1 && (
-                    <div className="px-4 py-3 border-t border-[#39363a] flex items-center justify-between">
-                      <div className="text-sm text-gray-400">
-                        Showing {totalFiles > 0 ? (currentPage - 1) * perPage + 1 : 0} to {Math.min(currentPage * perPage, totalFiles)} of {totalFiles} files
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <Button
-                          size="sm"
-                          onClick={() => setCurrentPage(1)}
-                          disabled={currentPage === 1}
-                          style={{ borderColor: '#39363a', color: '#ffffff' }}
-                          className="border"
-                        >
-                          First
-                        </Button>
-                        <Button
-                          size="sm"
-                          onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
-                          disabled={currentPage === 1}
-                          style={{ borderColor: '#39363a', color: '#ffffff' }}
-                          className="border"
-                        >
-                          <ChevronLeft className="h-4 w-4" />
-                        </Button>
-                        <span className="px-3 text-sm text-gray-400">
-                          Page {currentPage} of {totalPages}
-                        </span>
-                        <Button
-                          size="sm"
-                          onClick={() => setCurrentPage(Math.min(totalPages, currentPage + 1))}
-                          disabled={currentPage === totalPages}
-                          style={{ borderColor: '#39363a', color: '#ffffff' }}
-                          className="border"
-                        >
-                          <ChevronRight className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          size="sm"
-                          onClick={() => setCurrentPage(totalPages)}
-                          disabled={currentPage === totalPages}
-                          style={{ borderColor: '#39363a', color: '#ffffff' }}
-                          className="border"
-                        >
-                          Last
-                        </Button>
-                      </div>
                     </div>
-                  )}
+                  </div>
                 </>
+              )}
+
+              {/* Pagination */}
+              {totalPages > 1 && (
+                <div className="px-4 py-3 border-t border-[#39363a] flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 sm:gap-0">
+                  <div className="text-sm text-gray-400">
+                    Showing {totalFiles > 0 ? (currentPage - 1) * perPage + 1 : 0} to {Math.min(currentPage * perPage, totalFiles)} of {totalFiles} files
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      size="sm"
+                      onClick={() => setCurrentPage(1)}
+                      disabled={currentPage === 1}
+                      style={{ borderColor: '#39363a', color: '#ffffff' }}
+                      className="border"
+                    >
+                      First
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
+                      disabled={currentPage === 1}
+                      style={{ borderColor: '#39363a', color: '#ffffff' }}
+                      className="border"
+                    >
+                      <ChevronLeft className="h-4 w-4" />
+                    </Button>
+                    <span className="px-3 text-sm text-gray-400">
+                      Page {currentPage} of {totalPages}
+                    </span>
+                    <Button
+                      size="sm"
+                      onClick={() => setCurrentPage(Math.min(totalPages, currentPage + 1))}
+                      disabled={currentPage === totalPages}
+                      style={{ borderColor: '#39363a', color: '#ffffff' }}
+                      className="border"
+                    >
+                      <ChevronRight className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={() => setCurrentPage(totalPages)}
+                      disabled={currentPage === totalPages}
+                      style={{ borderColor: '#39363a', color: '#ffffff' }}
+                      className="border"
+                    >
+                      Last
+                    </Button>
+                  </div>
+                </div>
               )}
             </CardContent>
           </Card>
         </div>
       </div>
     </div>
-
-    {/* Transcode Dialog - outside space-y-4 to avoid margin */}
-    <TranscodeDialog
-      isOpen={showTranscodeDialog}
-      onClose={() => setShowTranscodeDialog(false)}
-      onConfirm={handleTranscodeConfirm}
-      isPending={queueMutation.isPending}
-      mode={transcodeDialogMode}
-      files={files}
-      selectedFiles={selectedFiles}
-    />
 
     {/* Smart Transcode Dialog - outside space-y-4 to avoid margin */}
     <SmartTranscodeDialog
