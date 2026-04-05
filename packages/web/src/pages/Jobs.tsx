@@ -5,7 +5,7 @@ import { StatusBadge } from '@/components/ui/Badge';
 import { Dialog } from '@/components/ui/Dialog';
 import { RefreshCw, Cpu, HardDrive, Zap, Pause, Play, Trash2, ChevronLeft, ChevronRight, X, Settings, Plus, Minus, AlertTriangle, Scan, Film } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useMemo, useState, Fragment as ReactFragment } from 'react';
+import { useMemo, useState, useCallback, useRef, Fragment as ReactFragment } from 'react';
 import { useWebSocket } from '@/hooks/useWebSocket';
 
 export function Jobs() {
@@ -14,6 +14,20 @@ export function Jobs() {
   // Tab state
   const [activeTab, setActiveTab] = useState<'queue' | 'failed' | 'success'>('queue');
   const [isQueuePaused, setIsQueuePaused] = useState(false);
+
+  // Tab transition state
+  const [tabVisible, setTabVisible] = useState(true);
+  const fadeTimer = useRef<ReturnType<typeof setTimeout>>();
+
+  const switchTab = useCallback((tab: 'queue' | 'failed' | 'success') => {
+    if (tab === activeTab) return;
+    if (fadeTimer.current) clearTimeout(fadeTimer.current);
+    setTabVisible(false);
+    fadeTimer.current = setTimeout(() => {
+      setActiveTab(tab);
+      setTabVisible(true);
+    }, 120);
+  }, [activeTab]);
 
   // Queue pagination state
   const [queuePage, setQueuePage] = useState(1);
@@ -275,7 +289,7 @@ export function Jobs() {
           {/* Tabs */}
           <div className="flex border-b border-[#39363a]" style={{ backgroundColor: '#242325', borderTopLeftRadius: '0.5rem', borderTopRightRadius: '0.5rem' }}>
             <button
-              onClick={() => setActiveTab('queue')}
+              onClick={() => switchTab('queue')}
               className={`px-6 py-3 text-sm font-medium transition-colors relative ${
                 activeTab === 'queue' ? 'text-white' : 'text-gray-400 hover:text-white'
               }`}
@@ -286,7 +300,7 @@ export function Jobs() {
               )}
             </button>
             <button
-              onClick={() => setActiveTab('failed')}
+              onClick={() => switchTab('failed')}
               className={`px-6 py-3 text-sm font-medium transition-colors relative ${
                 activeTab === 'failed' ? 'text-white' : 'text-gray-400 hover:text-white'
               }`}
@@ -297,7 +311,7 @@ export function Jobs() {
               )}
             </button>
             <button
-              onClick={() => setActiveTab('success')}
+              onClick={() => switchTab('success')}
               className={`px-6 py-3 text-sm font-medium transition-colors relative ${
                 activeTab === 'success' ? 'text-white' : 'text-gray-400 hover:text-white'
               }`}
@@ -310,59 +324,67 @@ export function Jobs() {
 
             {/* Tab controls */}
             <div className="ml-auto flex items-center gap-2 pr-4">
-              {activeTab === 'queue' && (
-                <>
+              <div
+                className="tab-content-transition flex items-center gap-2"
+                style={{ opacity: tabVisible ? 1 : 0, transform: tabVisible ? 'translateY(0)' : 'translateY(4px)' }}
+              >
+                {activeTab === 'queue' && (
+                  <>
+                    <Button
+                      onClick={() => setIsQueuePaused(!isQueuePaused)}
+                      size="sm"
+                      style={{
+                        borderColor: isQueuePaused ? '#f59e0b' : '#38363a',
+                        color: '#ffffff',
+                        backgroundColor: isQueuePaused ? 'rgba(245, 158, 11, 0.2)' : 'transparent'
+                      }}
+                      className="border hover:bg-gray-800"
+                    >
+                      {isQueuePaused ? <Play className="mr-2 h-4 w-4" /> : <Pause className="mr-2 h-4 w-4" />}
+                      {isQueuePaused ? 'Resume Queue' : 'Pause Queue'}
+                    </Button>
+                    <Button
+                      onClick={handleClearQueue}
+                      size="sm"
+                      style={{ backgroundColor: '#ef4444', color: '#ffffff' }}
+                      className="hover:bg-red-600"
+                    >
+                      <Trash2 className="mr-2 h-4 w-4" />
+                      Clear ({queue.length})
+                    </Button>
+                  </>
+                )}
+                {activeTab === 'failed' && (
                   <Button
-                    onClick={() => setIsQueuePaused(!isQueuePaused)}
-                    size="sm"
-                    style={{
-                      borderColor: isQueuePaused ? '#f59e0b' : '#38363a',
-                      color: '#ffffff',
-                      backgroundColor: isQueuePaused ? 'rgba(245, 158, 11, 0.2)' : 'transparent'
-                    }}
-                    className="border hover:bg-gray-800"
-                  >
-                    {isQueuePaused ? <Play className="mr-2 h-4 w-4" /> : <Pause className="mr-2 h-4 w-4" />}
-                    {isQueuePaused ? 'Resume Queue' : 'Pause Queue'}
-                  </Button>
-                  <Button
-                    onClick={handleClearQueue}
+                    onClick={handleClearFailed}
                     size="sm"
                     style={{ backgroundColor: '#ef4444', color: '#ffffff' }}
                     className="hover:bg-red-600"
                   >
                     <Trash2 className="mr-2 h-4 w-4" />
-                    Clear ({queue.length})
+                    Clear ({failed.length})
                   </Button>
-                </>
-              )}
-              {activeTab === 'failed' && (
-                <Button
-                  onClick={handleClearFailed}
-                  size="sm"
-                  style={{ backgroundColor: '#ef4444', color: '#ffffff' }}
-                  className="hover:bg-red-600"
-                >
-                  <Trash2 className="mr-2 h-4 w-4" />
-                  Clear ({failed.length})
-                </Button>
-              )}
-              {activeTab === 'success' && (
-                <Button
-                  onClick={handleClearSuccess}
-                  size="sm"
-                  style={{ backgroundColor: '#ef4444', color: '#ffffff' }}
-                  className="hover:bg-red-600"
-                >
-                  <Trash2 className="mr-2 h-4 w-4" />
-                  Clear ({success.length})
-                </Button>
-              )}
+                )}
+                {activeTab === 'success' && (
+                  <Button
+                    onClick={handleClearSuccess}
+                    size="sm"
+                    style={{ backgroundColor: '#ef4444', color: '#ffffff' }}
+                    className="hover:bg-red-600"
+                  >
+                    <Trash2 className="mr-2 h-4 w-4" />
+                    Clear ({success.length})
+                  </Button>
+                )}
+              </div>
             </div>
           </div>
 
           {/* Jobs Table */}
-          <div className="max-h-[500px] overflow-y-auto overflow-hidden">
+          <div
+            className="tab-content-transition max-h-[500px] overflow-y-auto overflow-hidden"
+            style={{ opacity: tabVisible ? 1 : 0, transform: tabVisible ? 'translateY(0)' : 'translateY(4px)' }}
+          >
             {displayedItems.length === 0 ? (
               <div className="py-16 text-center">
                 <div className="text-gray-500">
