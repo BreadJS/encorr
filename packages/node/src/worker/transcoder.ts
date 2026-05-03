@@ -434,7 +434,7 @@ export class Transcoder {
       return config.video_codec === 'h265' ? 'hevc_qsv' : 'h264_qsv';
     }
     if (config.gpu_type === 'amd') {
-      return config.video_codec === 'h265' ? 'hevc_amf' : 'h264_amf';
+      return config.video_codec === 'h265' ? 'hevc_vaapi' : 'h264_vaapi';
     }
 
     return 'unknown';

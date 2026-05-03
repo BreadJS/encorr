@@ -2,7 +2,7 @@ import { existsSync } from 'fs';
 import { platform } from 'os';
 import { join } from 'path';
 import { execSync } from 'child_process';
-import type { FFmpegEncoderInfo, FFmpegDecoderInfo, HwaccelInfo, EncoderType, GPUVendor, VideoCodec } from '@encorr/shared';
+import type { FFmpegEncoderInfo, FFmpegDecoderInfo, HwaccelInfo, EncoderType, GPUVendor, VideoCodec, GPUInfo } from '@encorr/shared';
 
 // Re-export types for convenience
 export type { FFmpegEncoderInfo, FFmpegDecoderInfo, HwaccelInfo, EncoderType, GPUVendor, VideoCodec };
@@ -127,92 +127,42 @@ export function getFFprobeVersion(ffprobePath: string): string | null {
 // FFmpeg Encoder Detection
 // ============================================================================
 
-export async function detectAvailableEncoders(ffmpegPath: string): Promise<FFmpegEncoderInfo[]> {
+export async function detectAvailableEncoders(ffmpegPath: string, gpus?: GPUInfo[]): Promise<FFmpegEncoderInfo[]> {
   const encoders: FFmpegEncoderInfo[] = [];
 
   try {
-    // Get list of available encoders from FFmpeg
     const output = execSync(`"${ffmpegPath}" -encoders`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
 
-    // Check for CPU encoders
-    if (output.includes('libx264')) {
-      encoders.push({
-        type: 'cpu',
-        encoder_name: 'libx264',
-        codec: 'h264',
-        available: true,
-      });
-    }
-    if (output.includes('libx265')) {
-      encoders.push({
-        type: 'cpu',
-        encoder_name: 'libx265',
-        codec: 'h265',
-        available: true,
-      });
+    // Check what physical hardware we actually have
+    // If gpus is undefined, we default to true to be safe, but ideally your system passes the GPU list
+    const hasNvidia = !gpus || gpus.some(g => g.vendor.toLowerCase().includes('nvidia'));
+    const hasAmd = !gpus || gpus.some(g => g.vendor.toLowerCase().includes('amd'));
+    const hasIntel = !gpus || gpus.some(g => g.vendor.toLowerCase().includes('intel'));
+
+    // CPU encoders (always available)
+    if (output.includes('libx264')) encoders.push({ type: 'cpu', encoder_name: 'libx264', codec: 'h264', available: true });
+    if (output.includes('libx265')) encoders.push({ type: 'cpu', encoder_name: 'libx265', codec: 'h265', available: true });
+
+    // NVIDIA encoders
+    if (hasNvidia) {
+      if (output.includes('h264_nvenc')) encoders.push({ type: 'gpu', gpu_type: 'nvidia', encoder_name: 'h264_nvenc', codec: 'h264', available: true });
+      if (output.includes('hevc_nvenc')) encoders.push({ type: 'gpu', gpu_type: 'nvidia', encoder_name: 'hevc_nvenc', codec: 'h265', available: true });
     }
 
-    // Check for NVIDIA encoders
-    if (output.includes('h264_nvenc')) {
-      encoders.push({
-        type: 'gpu',
-        gpu_type: 'nvidia',
-        encoder_name: 'h264_nvenc',
-        codec: 'h264',
-        available: true,
-      });
-    }
-    if (output.includes('hevc_nvenc')) {
-      encoders.push({
-        type: 'gpu',
-        gpu_type: 'nvidia',
-        encoder_name: 'hevc_nvenc',
-        codec: 'h265',
-        available: true,
-      });
+    // Intel encoders
+    if (hasIntel) {
+      if (output.includes('h264_qsv')) encoders.push({ type: 'gpu', gpu_type: 'intel', encoder_name: 'h264_qsv', codec: 'h264', available: true });
+      if (output.includes('hevc_qsv')) encoders.push({ type: 'gpu', gpu_type: 'intel', encoder_name: 'hevc_qsv', codec: 'h265', available: true });
     }
 
-    // Check for Intel encoders
-    if (output.includes('h264_qsv')) {
-      encoders.push({
-        type: 'gpu',
-        gpu_type: 'intel',
-        encoder_name: 'h264_qsv',
-        codec: 'h264',
-        available: true,
-      });
-    }
-    if (output.includes('hevc_qsv')) {
-      encoders.push({
-        type: 'gpu',
-        gpu_type: 'intel',
-        encoder_name: 'hevc_qsv',
-        codec: 'h265',
-        available: true,
-      });
-    }
-
-    // Check for AMD encoders
-    if (output.includes('h264_amf')) {
-      encoders.push({
-        type: 'gpu',
-        gpu_type: 'amd',
-        encoder_name: 'h264_amf',
-        codec: 'h264',
-        available: true,
-      });
-    }
-    if (output.includes('hevc_amf')) {
-      encoders.push({
-        type: 'gpu',
-        gpu_type: 'amd',
-        encoder_name: 'hevc_amf',
-        codec: 'h265',
-        available: true,
-      });
+    // AMD encoders
+    if (hasAmd) {
+      if (output.includes('h264_vaapi')) encoders.push({ type: 'gpu', gpu_type: 'amd', encoder_name: 'h264_vaapi', codec: 'h264', available: true });
+      if (output.includes('hevc_vaapi')) encoders.push({ type: 'gpu', gpu_type: 'amd', encoder_name: 'hevc_vaapi', codec: 'h265', available: true });
+      if (output.includes('h264_amf')) encoders.push({ type: 'gpu', gpu_type: 'amd', encoder_name: 'h264_amf', codec: 'h264', available: true });
+      if (output.includes('hevc_amf')) encoders.push({ type: 'gpu', gpu_type: 'amd', encoder_name: 'hevc_amf', codec: 'h265', available: true });
     }
   } catch (error) {
-    // If encoder detection fails, return empty array
     console.error('Failed to detect FFmpeg encoders:', error);
   }
 
@@ -223,110 +173,41 @@ export async function detectAvailableEncoders(ffmpegPath: string): Promise<FFmpe
 // FFmpeg Decoder Detection
 // ============================================================================
 
-export async function detectAvailableDecoders(ffmpegPath: string): Promise<FFmpegDecoderInfo[]> {
+export async function detectAvailableDecoders(ffmpegPath: string, gpus?: GPUInfo[]): Promise<FFmpegDecoderInfo[]> {
   const decoders: FFmpegDecoderInfo[] = [];
 
   try {
-    // Get list of available decoders from FFmpeg
     const output = execSync(`"${ffmpegPath}" -decoders`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
 
-    // Check for NVIDIA hardware decoders (cuvid)
-    if (output.includes('h264_cuvid')) {
-      decoders.push({
-        type: 'gpu',
-        gpu_type: 'nvidia',
-        decoder_name: 'h264_cuvid',
-        codec: 'h264',
-        available: true,
-      });
-    }
-    if (output.includes('hevc_cuvid')) {
-      decoders.push({
-        type: 'gpu',
-        gpu_type: 'nvidia',
-        decoder_name: 'hevc_cuvid',
-        codec: 'h265',
-        available: true,
-      });
-    }
-    if (output.includes('mpeg2_cuvid')) {
-      decoders.push({
-        type: 'gpu',
-        gpu_type: 'nvidia',
-        decoder_name: 'mpeg2_cuvid',
-        codec: 'mpeg2',
-        available: true,
-      });
+    const hasNvidia = !gpus || gpus.some(g => g.vendor.toLowerCase().includes('nvidia'));
+    const hasAmd = !gpus || gpus.some(g => g.vendor.toLowerCase().includes('amd'));
+    const hasIntel = !gpus || gpus.some(g => g.vendor.toLowerCase().includes('intel'));
+
+    // NVIDIA hardware decoders (cuvid)
+    if (hasNvidia) {
+      if (output.includes('h264_cuvid')) decoders.push({ type: 'gpu', gpu_type: 'nvidia', decoder_name: 'h264_cuvid', codec: 'h264', available: true });
+      if (output.includes('hevc_cuvid')) decoders.push({ type: 'gpu', gpu_type: 'nvidia', decoder_name: 'hevc_cuvid', codec: 'h265', available: true });
+      if (output.includes('mpeg2_cuvid')) decoders.push({ type: 'gpu', gpu_type: 'nvidia', decoder_name: 'mpeg2_cuvid', codec: 'mpeg2', available: true });
     }
 
-    // Check for Intel hardware decoders (qsv)
-    if (output.includes('h264_qsv')) {
-      decoders.push({
-        type: 'gpu',
-        gpu_type: 'intel',
-        decoder_name: 'h264_qsv',
-        codec: 'h264',
-        available: true,
-      });
-    }
-    if (output.includes('hevc_qsv')) {
-      decoders.push({
-        type: 'gpu',
-        gpu_type: 'intel',
-        decoder_name: 'hevc_qsv',
-        codec: 'h265',
-        available: true,
-      });
-    }
-    if (output.includes('mpeg2_qsv')) {
-      decoders.push({
-        type: 'gpu',
-        gpu_type: 'intel',
-        decoder_name: 'mpeg2_qsv',
-        codec: 'mpeg2',
-        available: true,
-      });
+    // Intel hardware decoders (qsv)
+    if (hasIntel) {
+      if (output.includes('h264_qsv')) decoders.push({ type: 'gpu', gpu_type: 'intel', decoder_name: 'h264_qsv', codec: 'h264', available: true });
+      if (output.includes('hevc_qsv')) decoders.push({ type: 'gpu', gpu_type: 'intel', decoder_name: 'hevc_qsv', codec: 'h265', available: true });
+      if (output.includes('mpeg2_qsv')) decoders.push({ type: 'gpu', gpu_type: 'intel', decoder_name: 'mpeg2_qsv', codec: 'mpeg2', available: true });
     }
 
-    // Check for AMD hardware decoders (d3d11va, dxva2 - these use hwaccel, not explicit decoders)
-    // AMD GPU decoding is typically done through hwaccel, not explicit decoder names
-    // But we still add entries for completeness
-    decoders.push({
-      type: 'gpu',
-      gpu_type: 'amd',
-      decoder_name: 'h264_d3d11va',
-      codec: 'h264',
-      available: true, // Assume available if hwaccel is available
-    });
-    decoders.push({
-      type: 'gpu',
-      gpu_type: 'amd',
-      decoder_name: 'hevc_d3d11va',
-      codec: 'h265',
-      available: true,
-    });
+    // AMD hardware decoders
+    if (hasAmd) {
+      if (output.includes('h264_vaapi')) decoders.push({ type: 'gpu', gpu_type: 'amd', decoder_name: 'h264_vaapi', codec: 'h264', available: true });
+      if (output.includes('hevc_vaapi')) decoders.push({ type: 'gpu', gpu_type: 'amd', decoder_name: 'hevc_vaapi', codec: 'h265', available: true });
+    }
 
     // CPU decoders are always available
-    decoders.push({
-      type: 'cpu',
-      decoder_name: 'h264',
-      codec: 'h264',
-      available: true,
-    });
-    decoders.push({
-      type: 'cpu',
-      decoder_name: 'hevc',
-      codec: 'h265',
-      available: true,
-    });
-    decoders.push({
-      type: 'cpu',
-      decoder_name: 'mpeg2video',
-      codec: 'mpeg2',
-      available: true,
-    });
+    decoders.push({ type: 'cpu', decoder_name: 'h264', codec: 'h264', available: true });
+    decoders.push({ type: 'cpu', decoder_name: 'hevc', codec: 'h265', available: true });
+    decoders.push({ type: 'cpu', decoder_name: 'mpeg2video', codec: 'mpeg2', available: true });
   } catch (error) {
-    // If decoder detection fails, return empty array
     console.error('Failed to detect FFmpeg decoders:', error);
   }
 
@@ -337,75 +218,51 @@ export async function detectAvailableDecoders(ffmpegPath: string): Promise<FFmpe
 // FFmpeg Hwaccel Detection
 // ============================================================================
 
-export async function detectAvailableHwaccels(ffmpegPath: string): Promise<HwaccelInfo[]> {
+export async function detectAvailableHwaccels(ffmpegPath: string, gpus?: GPUInfo[]): Promise<HwaccelInfo[]> {
   const hwaccels: HwaccelInfo[] = [];
 
   try {
-    // Get list of available hwaccels from FFmpeg
     const output = execSync(`"${ffmpegPath}" -hwaccels`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
 
-    // Check for NVIDIA CUDA
-    if (output.includes('cuda')) {
-      hwaccels.push({
-        name: 'cuda',
-        available: true,
-        gpu_type: 'nvidia',
-      });
+    const hasNvidia = !gpus || gpus.some(g => g.vendor.toLowerCase().includes('nvidia'));
+    const hasAmd = !gpus || gpus.some(g => g.vendor.toLowerCase().includes('amd'));
+    const hasIntel = !gpus || gpus.some(g => g.vendor.toLowerCase().includes('intel'));
+
+    // NVIDIA
+    if (hasNvidia) {
+      if (output.includes('cuda')) hwaccels.push({ name: 'cuda', available: true, gpu_type: 'nvidia' });
+      if (output.includes('vdpau')) hwaccels.push({ name: 'vdpau', available: true, gpu_type: 'nvidia' });
     }
 
-    // Check for Intel QSV
-    if (output.includes('qsv')) {
-      hwaccels.push({
-        name: 'qsv',
-        available: true,
-        gpu_type: 'intel',
-      });
+    // Intel
+    if (hasIntel && output.includes('qsv')) {
+      hwaccels.push({ name: 'qsv', available: true, gpu_type: 'intel' });
     }
 
-    // Check for Direct3D 11 Video Acceleration (Windows, AMD/NVIDIA)
-    if (output.includes('d3d11va')) {
-      hwaccels.push({
-        name: 'd3d11va',
-        available: true,
-        gpu_type: 'amd', // Also works with NVIDIA on Windows
-      });
+    // AMD / Windows Universal
+    if (hasAmd || hasNvidia || hasIntel) {
+      if (output.includes('d3d11va')) hwaccels.push({ name: 'd3d11va', available: true, gpu_type: 'amd' }); // Works across vendors on Win
+      if (output.includes('dxva2')) hwaccels.push({ name: 'dxva2', available: true, gpu_type: 'amd' });
     }
 
-    // Check for DXVA2 (Windows, older)
-    if (output.includes('dxva2')) {
-      hwaccels.push({
-        name: 'dxva2',
-        available: true,
-        gpu_type: 'amd',
-      });
-    }
-
-    // Check for VideoToolbox (macOS)
+    // Mac
     if (output.includes('videotoolbox')) {
-      hwaccels.push({
-        name: 'videotoolbox',
-        available: true,
-      });
+      hwaccels.push({ name: 'videotoolbox', available: true });
     }
 
-    // Check for VAAPI (Linux)
+    // Linux VAAPI (AMD / Intel)
     if (output.includes('vaapi')) {
-      hwaccels.push({
-        name: 'vaapi',
-        available: true,
-      });
-    }
-
-    // Check for VDPAU (Linux, NVIDIA)
-    if (output.includes('vdpau')) {
-      hwaccels.push({
-        name: 'vdpau',
-        available: true,
-        gpu_type: 'nvidia',
-      });
+      let vaapiGpuType: 'amd' | 'intel' | undefined = undefined;
+      if (hasAmd && !hasIntel) vaapiGpuType = 'amd';
+      else if (hasIntel && !hasAmd) vaapiGpuType = 'intel';
+      else if (hasAmd) vaapiGpuType = 'amd'; // Default to AMD if both exist
+      
+      // Only push VAAPI if AMD or Intel is actually present
+      if (hasAmd || hasIntel) {
+        hwaccels.push({ name: 'vaapi', available: true, gpu_type: vaapiGpuType });
+      }
     }
   } catch (error) {
-    // If hwaccel detection fails, return empty array
     console.error('Failed to detect FFmpeg hwaccels:', error);
   }
 
@@ -424,8 +281,11 @@ export interface FFmpegOptions {
 }
 
 export interface FFmpegConfig {
+  // Mode settings
+  audio_only?: boolean;
+
   // Video settings
-  video_codec: 'h264' | 'h265';
+  video_codec?: 'h264' | 'h265';
   encoding_type: EncoderType;
   gpu_type?: GPUVendor;
   gpu_device_id?: number; // Specific GPU device ID to use (for multi-GPU systems)
@@ -457,14 +317,22 @@ export interface FFmpegConfig {
 }
 
 function getFFmpegEncoder(config: FFmpegConfig): string {
+  if (config.audio_only) {
+    return 'none';
+  }
+
   const codec = config.video_codec;
   const type = config.encoding_type;
+  const plat = platform(); // Get the OS platform
+
+  if (!codec) {
+    throw new Error('Video codec is required for non-audio-only transcoding');
+  }
 
   if (type === 'cpu') {
     return codec === 'h264' ? 'libx264' : 'libx265';
   }
 
-  // GPU encoders
   const gpuType = config.gpu_type;
   if (!gpuType) {
     throw new Error('GPU encoding requires gpu_type to be specified');
@@ -475,13 +343,22 @@ function getFFmpegEncoder(config: FFmpegConfig): string {
   } else if (gpuType === 'intel') {
     return codec === 'h264' ? 'h264_qsv' : 'hevc_qsv';
   } else if (gpuType === 'amd') {
-    return codec === 'h264' ? 'h264_amf' : 'hevc_amf';
+    // Windows uses AMF, Linux uses VAAPI
+    if (plat === 'win32') {
+      return codec === 'h264' ? 'h264_amf' : 'hevc_amf';
+    } else {
+      return codec === 'h264' ? 'h264_vaapi' : 'hevc_vaapi';
+    }
   }
 
   throw new Error(`Unsupported GPU type: ${gpuType}`);
 }
 
 function getQualityParams(config: FFmpegConfig): string[] {
+  if (config.audio_only) {
+    return [];
+  }
+
   const params: string[] = [];
   const encoder = getFFmpegEncoder(config);
   const codec = config.video_codec;
@@ -505,14 +382,14 @@ function getQualityParams(config: FFmpegConfig): string[] {
     params.push('-global_quality', config.quality.toString());
     params.push('-preset', config.preset);
   }
-  // AMD AMF encoders
-  else if (encoder.includes('amf')) {
-    params.push('-qp', config.quality.toString());
-    if (config.preset === 'slow') {
-      params.push('-quality', 'slow');
-    } else if (config.preset === 'fast') {
-      params.push('-quality', 'speed');
-    }
+  // AMD VAAPI encoders (Linux)
+  else if (encoder.includes('vaapi')) {
+    // VAAPI uses QP (Quantization Parameter) where lower = better quality
+    // Map quality (1-100) to VAAPI QP range 10-50
+    const qp = Math.round(50 - (config.quality - 1) * 49 / 99);
+    params.push('-qp', qp.toString());
+    // VAAPI presets: ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow
+    params.push('-preset', config.preset);
   }
 
   return params;
@@ -522,9 +399,12 @@ export function buildFFmpegArgs(options: FFmpegOptions): string[] {
   const { input, output, config } = options;
   const args: string[] = [];
 
+  // Suppress auto-load warnings for unavailable hardware (e.g. NVIDIA libs on AMD system)
+  args.push('-hide_banner');
+
   // For GPU encoding with explicit decoder selection (true GPU-only pipeline)
   // This uses hardware decoder + GPU memory output format = complete GPU pipeline
-  if (config.encoding_type === 'gpu' && config.gpu_type && config.use_explicit_decoder && config.source_codec) {
+  if (!config.audio_only && config.encoding_type === 'gpu' && config.gpu_type && config.use_explicit_decoder && config.source_codec) {
     const sourceCodec = config.source_codec.toLowerCase();
 
     // Select the appropriate hardware decoder based on GPU type and source codec
@@ -556,19 +436,30 @@ export function buildFFmpegArgs(options: FFmpegOptions): string[] {
         hwaccelOutputFormat = 'qsv';
       }
     } else if (config.gpu_type === 'amd') {
-      // AMD uses hwaccel (d3d11va) rather than explicit decoders
-      // The decoder is selected automatically by hwaccel
+      // VAAPI does not use explicit named decoders like NVIDIA's cuvid.
+      // We explicitly leave hardwareDecoder undefined here so that the command 
+      // builder falls back to the standard useHwaccelDecode() method below.
+      hardwareDecoder = undefined;
+      hwaccelOutputFormat = undefined;
     }
 
     // If we have an explicit hardware decoder, use it BEFORE the input
     if (hardwareDecoder && hwaccelOutputFormat) {
       console.log(`[buildFFmpegArgs] Using explicit GPU decoder: ${hardwareDecoder} for ${config.gpu_type} ${sourceCodec.toUpperCase()} source`);
+      // Add hwaccel flags before the decoder for VAAPI
+      if (hwaccelOutputFormat === 'vaapi') {
+        args.push('-hwaccel', 'vaapi');
+        if (config.gpu_device_id !== undefined) {
+          // VAAPI render device path: /dev/dri/renderD128 for card0, renderD129 for card1, etc.
+          const renderIndex = 128 + config.gpu_device_id;
+          args.push('-hwaccel_device', `/dev/dri/renderD${renderIndex}`);
+        }
+        args.push('-hwaccel_output_format', 'vaapi');
+      }
       // Use -c:v decoder_name -i input (explicit decoder selection)
       // This forces FFmpeg to use the hardware decoder for decoding
       args.push('-c:v', hardwareDecoder);
       args.push('-i', input);
-      // Note: Not using -hwaccel_output_format here as it causes argument order issues
-      // The explicit decoder selection alone is sufficient to force GPU decoding
     } else {
       // Fallback to standard hwaccel method
       console.log(`[buildFFmpegArgs] No explicit decoder found for ${sourceCodec} on ${config.gpu_type}, using hwaccel`);
@@ -577,7 +468,7 @@ export function buildFFmpegArgs(options: FFmpegOptions): string[] {
     }
   } else {
     // Standard hardware acceleration (hint-based, may still use software decoding)
-    if (config.encoding_type === 'gpu' && config.gpu_type) {
+    if (!config.audio_only && config.encoding_type === 'gpu' && config.gpu_type) {
       useHwaccelDecode(args, config.gpu_type, config.gpu_device_id);
     }
 
@@ -585,68 +476,93 @@ export function buildFFmpegArgs(options: FFmpegOptions): string[] {
     args.push('-i', input);
   }
 
-  // Video encoder
-  const encoder = getFFmpegEncoder(config);
-  args.push('-c:v', encoder);
+  if (config.audio_only) {
+    // Audio only - skip video
+    args.push('-vn');
+  } else {
+    // Video encoder
+    const encoder = getFFmpegEncoder(config);
+    args.push('-c:v', encoder);
 
-  // Add GPU device selection for ENCODING (this is where -gpu belongs for NVENC)
-  // For Intel and AMD, device selection is handled via -init_hw_device during decode setup
-  if (config.encoding_type === 'gpu' && config.gpu_type === 'nvidia' && config.gpu_device_id !== undefined) {
-    // -gpu is an NVENC encoder option, must come after -i and before -c:v
-    // But since we already added -c:v, we need to insert it right after the encoder name
-    // FFmpeg allows encoder options after -c:v encoder_name
-    args.push('-gpu', config.gpu_device_id.toString());
-    console.log(`[buildFFmpegArgs] NVENC GPU device ${config.gpu_device_id} selected`);
-  }
+    // Add GPU device selection for ENCODING (this is where -gpu belongs for NVENC)
+    // For Intel and AMD, device selection is handled via -init_hw_device during decode setup
+    if (config.encoding_type === 'gpu' && config.gpu_type === 'nvidia' && config.gpu_device_id !== undefined) {
+      // -gpu is an NVENC encoder option, must come after -i and before -c:v
+      // But since we already added -c:v, we need to insert it right after the encoder name
+      // FFmpeg allows encoder options after -c:v encoder_name
+      args.push('-gpu', config.gpu_device_id.toString());
+      console.log(`[buildFFmpegArgs] NVENC GPU device ${config.gpu_device_id} selected`);
+    }
 
-  // Quality settings
-  args.push(...getQualityParams(config));
+    // Quality settings
+    args.push(...getQualityParams(config));
 
-  // Pixel format: For GPU encoders that don't support 10-bit, convert to 8-bit
-  // H.264 NVENC, Intel QSV H.264, AMD AMF H.264 only support 8-bit
-  const needs8BitConversion = (config.encoding_type === 'gpu' &&
-    config.video_codec === 'h264' &&
-    (config.gpu_type === 'nvidia' || config.gpu_type === 'intel' || config.gpu_type === 'amd'));
+    // Pixel format: For GPU encoders that don't support 10-bit, convert to 8-bit
+    // H.264 NVENC, Intel QSV H.264, AMD VAAPI H.264 only support 8-bit
+    const needs8BitConversion = (config.encoding_type === 'gpu' &&
+      config.video_codec === 'h264' &&
+      (config.gpu_type === 'nvidia' || config.gpu_type === 'intel' || config.gpu_type === 'amd'));
 
-  // Video filters for scaling and pixel format conversion
-  const filters: string[] = [];
+    // Video filters for scaling and pixel format conversion
+    const filters: string[] = [];
 
-  if (needs8BitConversion) {
-    filters.push('format=yuv420p'); // Convert to 8-bit before encoding
-  }
+    if (needs8BitConversion) {
+      // VAAPI requires format=vaapi:yuv420p to stay on GPU; others use software format
+      if (config.gpu_type === 'amd') {
+        filters.push('format=vaapi:yuv420p');
+      } else {
+        filters.push('format=yuv420p'); // Convert to 8-bit before encoding
+      }
+    }
 
-  if (config.deinterlace) {
-    filters.push('yadif=0:-1:0');
-  }
+    if (config.deinterlace) {
+      filters.push('yadif=0:-1:0');
+    }
 
-  if (config.max_width || config.max_height) {
-    filters.push(`scale=${config.max_width || -1}:${config.max_height || -1}`);
-  }
+    if (config.max_width || config.max_height) {
+      // VAAPI requires scale_vaapi to keep processing on GPU
+      if (config.gpu_type === 'amd' && config.encoding_type === 'gpu') {
+        filters.push(`scale_vaapi=${config.max_width || -1}:${config.max_height || -1}`);
+      } else {
+        filters.push(`scale=${config.max_width || -1}:${config.max_height || -1}`);
+      }
+    }
 
-  if (filters.length > 0) {
-    args.push('-vf', filters.join(','));
+    if (filters.length > 0) {
+      args.push('-vf', filters.join(','));
+    }
   }
 
   // Audio settings
   args.push('-c:a', config.audio_encoder);
-  args.push('-b:a', `${config.audio_bitrate}`);
-
-  // Subtitles
-  // MKV supports all subtitle types (text and bitmap), so we can preserve them all
-  // Use -c:s copy to copy subtitles without re-encoding (important for bitmap subtitles)
-  if (config.subtitles === 'all') {
-    args.push('-map', '0:v'); // Video
-    args.push('-map', '0:a'); // Audio
-    args.push('-map', '0:s?'); // All subtitles
-    args.push('-c:s', 'copy'); // Copy subtitles without re-encoding
-  } else if (config.subtitles === 'first') {
-    args.push('-map', '0:v');
-    args.push('-map', '0:a');
-    args.push('-map', '0:s:0?'); // First subtitle
-    args.push('-c:s', 'copy'); // Copy subtitle without re-encoding
-  } else if (config.subtitles === 'none') {
-    args.push('-sn'); // No subtitles
+  if (config.audio_bitrate > 0) {
+    args.push('-b:a', `${config.audio_bitrate}`);
   }
+
+  if (config.audio_only) {
+    // No subtitles for audio only
+    args.push('-sn');
+  } else {
+    // Subtitles
+    // MKV supports all subtitle types (text and bitmap), so we can preserve them all
+    // Use -c:s copy to copy subtitles without re-encoding (important for bitmap subtitles)
+    if (config.subtitles === 'all') {
+      args.push('-map', '0:v'); // Video
+      args.push('-map', '0:a'); // Audio
+      args.push('-map', '0:s?'); // All subtitles
+      args.push('-c:s', 'copy'); // Copy subtitles without re-encoding
+    } else if (config.subtitles === 'first') {
+      args.push('-map', '0:v');
+      args.push('-map', '0:a');
+      args.push('-map', '0:s:0?'); // First subtitle
+      args.push('-c:s', 'copy'); // Copy subtitle without re-encoding
+    } else if (config.subtitles === 'none') {
+      args.push('-sn'); // No subtitles
+    }
+  }
+
+  // Suppress auto-load warnings for unavailable hardware (e.g. NVIDIA libs on AMD system)
+  args.push('-hide_banner');
 
   // Extra arguments
   if (config.extra_args && config.extra_args.length > 0) {
@@ -661,8 +577,8 @@ export function buildFFmpegArgs(options: FFmpegOptions): string[] {
 
   // Log the generated command for debugging
   console.log(`[buildFFmpegArgs] Config:`, JSON.stringify(config, null, 2));
-  console.log(`[buildFFmpegArgs] Hardware decode: ${config.encoding_type === 'gpu' ? config.gpu_type : 'none (software)'}`);
-  if (config.encoding_type === 'gpu' && config.gpu_device_id !== undefined) {
+  console.log(`[buildFFmpegArgs] Hardware decode: ${(!config.audio_only && config.encoding_type === 'gpu') ? config.gpu_type : 'none (software)'}`);
+  if (!config.audio_only && config.encoding_type === 'gpu' && config.gpu_device_id !== undefined) {
     console.log(`[buildFFmpegArgs] GPU device ID: ${config.gpu_device_id}`);
   }
   console.log(`[buildFFmpegArgs] Explicit decoder: ${config.use_explicit_decoder ? 'enabled' : 'disabled'}`);
@@ -674,28 +590,36 @@ export function buildFFmpegArgs(options: FFmpegOptions): string[] {
 // Helper function to add hwaccel arguments for DECODING
 // Note: GPU device selection for ENCODING is handled separately in buildFFmpegArgs
 function useHwaccelDecode(args: string[], gpuType: GPUVendor, gpuDeviceId?: number): void {
+  const plat = platform();
+  
   switch (gpuType) {
     case 'nvidia':
       args.push('-hwaccel', 'cuda');
-      // For CUDA decoding with device selection (FFmpeg 6.0+)
       if (gpuDeviceId !== undefined) {
         args.push('-hwaccel_device', gpuDeviceId.toString());
       }
       break;
     case 'intel':
       args.push('-hwaccel', 'qsv');
-      // For Intel QSV with device selection
       if (gpuDeviceId !== undefined) {
-        // Initialize QSV device before using it
         args.push('-init_hw_device', `qsv=qsv:hw_${gpuDeviceId}`);
         args.push('-filter_hw_device', 'qsv');
       }
       break;
     case 'amd':
-      // AMD on Windows uses d3d11va
-      args.push('-hwaccel', 'd3d11va');
-      // AMD d3d11va doesn't have a simple device selection flag in FFmpeg
-      // The driver typically handles device selection
+      if (plat === 'win32') {
+        // Windows AMD hardware decode
+        args.push('-hwaccel', 'd3d11va');
+        if (gpuDeviceId !== undefined) {
+          args.push('-hwaccel_device', gpuDeviceId.toString());
+        }
+      } else {
+        // Linux AMD hardware decode
+        args.push('-hwaccel', 'vaapi');
+        const amdRenderId = gpuDeviceId !== undefined ? 128 + gpuDeviceId : 128;
+        args.push('-hwaccel_device', `/dev/dri/renderD${amdRenderId}`);
+        args.push('-hwaccel_output_format', 'vaapi');
+      }
       break;
   }
 }

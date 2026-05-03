@@ -32,6 +32,7 @@ export class GPUMonitor {
     // Separate GPUs by vendor for efficient querying
     const nvidiaGpus: Array<{ index: number; gpu: any }> = [];
     const amdGpus: Array<{ index: number; gpu: any }> = [];
+    const intelGpus: Array<{ index: number; gpu: any }> = [];
 
     for (let i = 0; i < gpus.length; i++) {
       const gpu = gpus[i];
@@ -41,8 +42,9 @@ export class GPUMonitor {
         nvidiaGpus.push({ index: i, gpu });
       } else if (vendor.includes('amd') || vendor.includes('radeon') || vendor.includes('ati')) {
         amdGpus.push({ index: i, gpu });
+      } else if (vendor.includes('intel')) {
+        intelGpus.push({ index: i, gpu });
       }
-      // Intel and others - skip for now
     }
 
     // Query all NVIDIA GPUs in a single nvidia-smi call
@@ -56,7 +58,6 @@ export class GPUMonitor {
           }
         }
       } catch (error: any) {
-        // Log error for debugging
         console.error('[GPUMonitor] Failed to get NVIDIA GPU usage:', error?.message || error);
       }
     }
@@ -68,6 +69,16 @@ export class GPUMonitor {
         if (data) results.set(index, data);
       } catch (error: any) {
         console.error('[GPUMonitor] Failed to get AMD GPU usage:', error?.message || error);
+      }
+    }
+
+    // Query Intel GPUs
+    for (const { index, gpu } of intelGpus) {
+      try {
+        const data = await this.getIntelGpuUsage(index);
+        if (data) results.set(index, data);
+      } catch (error: any) {
+        console.error('[GPUMonitor] Failed to get Intel GPU usage:', error?.message || error);
       }
     }
 
@@ -222,6 +233,9 @@ export class GPUMonitor {
     if (name.includes('amd') || name.includes('radeon') || name.includes('ati')) {
       return 'amd';
     }
+    if (name.includes('intel')) {
+      return 'intel';
+    }
     return 'unknown';
   }
 
@@ -263,6 +277,66 @@ export class GPUMonitor {
       return true;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Check if Intel GPU tools are available (Linux only)
+   */
+  static async isIntelAvailable(): Promise<boolean> {
+    if (process.platform !== 'linux') {
+      return false;
+    }
+
+    try {
+      await readFileAsync('/sys/class/drm/card0/device/gt_busy', 'utf8');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Get Intel GPU usage via sysfs (Linux only)
+   * Uses /sys/class/drm/cardN/device/gt_busy for GPU utilization
+   */
+  private async getIntelGpuUsage(gpuIndex: number): Promise<GPUUsageData | null> {
+    if (process.platform !== 'linux') {
+      return null;
+    }
+
+    try {
+      const cardNum = `card${gpuIndex}`;
+
+      // Read gt_busy (in units of 0.01 seconds) - read twice with 100ms gap for delta
+      const [busy1, tempStr] = await Promise.all([
+        readFileAsync(`/sys/class/drm/${cardNum}/device/gt_busy`, 'utf8').catch(() => null),
+        readFileAsync(`/sys/class/hwmon/hwmon${gpuIndex}/temp1_input`, 'utf8').catch(() => null),
+      ]);
+
+      if (!busy1) return null;
+
+      const data: GPUUsageData = {};
+
+      // Read again after short delay to calculate utilization
+      await new Promise(r => setTimeout(r, 100));
+      const [busy2] = await Promise.all([
+        readFileAsync(`/sys/class/drm/${cardNum}/device/gt_busy`, 'utf8').catch(() => null),
+      ]);
+
+      if (busy2) {
+        const delta = parseInt(busy2.trim()) - parseInt(busy1.trim());
+        // delta is in 0.01s units over 100ms window, so utilization = delta / 10
+        data.utilizationGpu = Math.min(100, Math.max(0, Math.round(delta / 10)));
+      }
+
+      if (tempStr) {
+        data.temperatureGpu = Math.round(parseInt(tempStr.trim()) / 1000);
+      }
+
+      return Object.keys(data).length > 0 ? data : null;
+    } catch {
+      return null;
     }
   }
 }

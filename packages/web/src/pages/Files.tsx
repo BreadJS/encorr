@@ -3,11 +3,23 @@ import { api, formatBytes } from '@/utils/api';
 import { Card, CardContent } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { SmartTranscodeDialog } from '@/components/ui/SmartTranscodeDialog';
-import { RefreshCw, ChevronLeft, ChevronRight, Film, Folder, FolderOpen, Check, Search, Filter, Scan, Sparkles, Clock, Zap, AlertTriangle, FileText, MoreVertical, Replace, Copy, X, Ban } from 'lucide-react';
+import { RefreshCw, ChevronLeft, ChevronRight, Film, Folder, FolderOpen, Check, Search, Filter, Scan, Sparkles, Clock, Zap, AlertTriangle, FileText, MoreVertical, Replace, Copy, X, Ban, Music } from 'lucide-react';
 import { ReportDrawer } from '@/components/ReportDrawer';
 import { useState, useMemo } from 'react';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import type { TranscodeMode } from '@encorr/shared';
+
+// Helper function to normalize codec names for display
+function formatCodec(codec: string): string {
+  const upper = codec.toUpperCase();
+  if (upper.includes('LIBMP3LAME')) return 'MP3';
+  if (upper.includes('LIBOPUS') || upper.includes('OPUS')) return 'OPUS';
+  if (upper.includes('LIBVORBIS') || upper.includes('VORBIS')) return 'VORBIS';
+  if (upper.includes('LIBFLAC') || upper.includes('FLAC')) return 'FLAC';
+  if (upper.includes('AAC') || upper.includes('M4A')) return 'AAC';
+  if (upper.includes('WAV') || upper.includes('PCM')) return 'WAV';
+  return upper;
+}
 
 // Helper function to format duration as HH:MM:SS
 function formatDuration(seconds: number | undefined, isAnalyzed: boolean = false): string {
@@ -312,6 +324,12 @@ export function Files() {
     if (codec.includes('h264') || codec.includes('avc')) return '#74c69d';
     if (codec.includes('av1')) return '#ff6b6b';
     if (codec.includes('vp9')) return '#5eb78a';
+    if (codec.includes('mp3') || codec.includes('mpga') || codec.includes('libmp3lame')) return '#e6a817';
+    if (codec.includes('aac') || codec.includes('m4a')) return '#c084fc';
+    if (codec.includes('flac')) return '#f472b6';
+    if (codec.includes('opus')) return '#38bdf8';
+    if (codec.includes('vorbis') || codec.includes('ogg')) return '#a3e635';
+    if (codec.includes('wav')) return '#fb923c';
     return '#6b7280';
   };
 
@@ -760,7 +778,11 @@ export function Files() {
                         {/* Filename */}
                         <div className="flex-1 min-w-0 pr-3">
                           <div className="flex items-center gap-2">
-                            <Film className="h-4 w-4 text-gray-600 flex-shrink-0" />
+                            {!file.metadata?.video_codec ? (
+                              <Music className="h-4 w-4 text-gray-600 flex-shrink-0" />
+                            ) : (
+                              <Film className="h-4 w-4 text-gray-600 flex-shrink-0" />
+                            )}
                             <span className="text-white text-sm truncate" title={file.filename || file.name}>
                               {file.filename || file.name}
                             </span>
@@ -806,9 +828,9 @@ export function Files() {
                         <div className="w-28 flex-shrink-0">
                           <span
                             className="text-xs px-1.5 py-0.5 rounded text-center block"
-                            style={{ backgroundColor: getCodecBadgeColor(file.codec || file.video_codec || file.metadata?.video_codec), color: '#ffffff' }}
+                            style={{ backgroundColor: getCodecBadgeColor(file.codec || file.video_codec || file.metadata?.video_codec || file.metadata?.audio_codecs?.[0] || file.original_codec), color: '#ffffff' }}
                           >
-                            {(file.codec || file.video_codec || (file.metadata?.video_codec) || '----').toUpperCase()}
+                            {formatCodec(file.codec || file.video_codec || (file.metadata?.video_codec) || (file.metadata?.audio_codecs?.[0]) || file.original_codec || '----')}
                           </span>
                         </div>
 
@@ -822,14 +844,14 @@ export function Files() {
                               } catch {
                                 return <span className="text-gray-600 text-xs px-1.5 py-0.5 text-center block">—</span>;
                               }
-                              const newCodec = config.video_codec || file.job.metadata?.video_codec;
+                              const newCodec = config.audio_encoder || config.video_codec || file.job.metadata?.audio_codecs?.[0] || file.job.metadata?.video_codec;
                               if (newCodec) {
                                 return (
                                   <span
                                     className="text-xs px-1.5 py-0.5 rounded text-center block"
                                     style={{ backgroundColor: getCodecBadgeColor(newCodec), color: '#ffffff' }}
                                   >
-                                    {newCodec.toUpperCase()}
+                                    {formatCodec(newCodec)}
                                   </span>
                                 );
                               }
@@ -838,14 +860,39 @@ export function Files() {
                           })()}
                         </div>
 
-                        {/* Resolution */}
-                        <div className="w-20 flex-shrink-0">
-                          <span
-                            className="text-xs px-1.5 py-0.5 rounded text-center block"
-                            style={{ backgroundColor: getResolutionBadgeColor(file.resolution || (file.metadata?.width ? `${file.metadata?.width}x${file.metadata?.height}` : null)), color: '#ffffff' }}
-                          >
-                            {file.resolution || (file.metadata?.width ? `${file.metadata?.width}x${file.metadata?.height}` : (file.width ? `${file.width}p` : '---'))}
-                          </span>
+                        {/* Resolution / Bitrate */}
+                        <div className="w-24 flex-shrink-0">
+                          {(() => {
+                            const isAudio = !file.metadata?.video_codec;
+                            // For audio files, try to get output bitrate from the report config
+                            if (isAudio && file.displayStatus === 'completed' && file.job?.config) {
+                              let config: any;
+                              try {
+                                config = typeof file.job.config === 'string' ? JSON.parse(file.job.config) : file.job.config;
+                              } catch {
+                                return <span className="text-gray-600 text-xs px-1.5 py-0.5 text-center block">---</span>;
+                              }
+                              if (config.audio_bitrate) {
+                                const kbps = Math.round(config.audio_bitrate / 1000);
+                                return (
+                                  <span
+                                    className="text-xs px-1.5 py-0.5 rounded text-center block"
+                                    style={{ backgroundColor: getCodecBadgeColor(config.audio_encoder || file.metadata?.audio_codecs?.[0] || ''), color: '#ffffff' }}
+                                  >
+                                    {kbps} kb/s
+                                  </span>
+                                );
+                              }
+                            }
+                            return (
+                              <span
+                                className="text-xs px-1.5 py-0.5 rounded text-center block"
+                                style={{ backgroundColor: getResolutionBadgeColor(file.resolution || (file.metadata?.width ? `${file.metadata?.width}x${file.metadata?.height}` : null)), color: '#ffffff' }}
+                              >
+                                {file.resolution || (file.metadata?.width ? `${file.metadata?.width}x${file.metadata?.height}` : (file.width ? `${file.width}p` : '---'))}
+                              </span>
+                            );
+                          })()}
                         </div>
 
                         {/* Size */}

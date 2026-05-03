@@ -1,18 +1,32 @@
 // FFmpeg preset configuration
 export interface PresetConfig {
-  video_codec: 'h264' | 'h265';
+  // Mode settings
+  audio_only?: boolean;
+
+  // Video settings
+  video_codec?: 'h264' | 'h265';
   encoding_type: 'cpu' | 'gpu';
   gpu_type?: 'nvidia' | 'intel' | 'amd';
   quality_mode: 'crf' | 'cq' | 'qp';
   quality: number;
   preset: 'ultrafast' | 'superfast' | 'veryfast' | 'faster' | 'fast' | 'medium' | 'slow' | 'slower';
-  container: 'mp4' | 'mkv';
-  audio_encoder: 'aac' | 'opus' | 'mp3' | 'copy';
+
+  // Output settings
+  container: string;
+
+  // Audio settings
+  audio_encoder: string;
   audio_bitrate: number;
+
+  // Subtitle settings
   subtitles: 'all' | 'first' | 'none';
+
+  // Filter settings
   max_width?: number;
   max_height?: number;
   deinterlace?: boolean;
+
+  // Advanced
   extra_args?: string[];
 }
 
@@ -40,6 +54,41 @@ export interface Preset {
 
 // Built-in presets (cannot be deleted) - FFmpeg compatible
 export const BUILTIN_PRESETS: Preset[] = [
+  // Audio Presets
+  {
+    id: 'builtin-audio-mp3-320',
+    name: 'MP3 High Quality (320kbps)',
+    description: 'Transcode audio to high quality MP3',
+    is_builtin: true,
+    config: {
+      audio_only: true,
+      encoding_type: 'cpu',
+      quality_mode: 'crf',
+      quality: 0,
+      preset: 'medium',
+      container: 'mp3',
+      audio_encoder: 'libmp3lame',
+      audio_bitrate: 320000,
+      subtitles: 'none',
+    },
+  },
+  {
+    id: 'builtin-audio-aac-256',
+    name: 'AAC High Quality (256kbps)',
+    description: 'Transcode audio to high quality AAC (M4A)',
+    is_builtin: true,
+    config: {
+      audio_only: true,
+      encoding_type: 'cpu',
+      quality_mode: 'crf',
+      quality: 0,
+      preset: 'medium',
+      container: 'm4a',
+      audio_encoder: 'aac',
+      audio_bitrate: 256000,
+      subtitles: 'none',
+    },
+  },
   // CPU Presets
   {
     id: 'builtin-high-quality-h265-cpu',
@@ -271,7 +320,7 @@ export function getPresetsForDropdown(): PresetDropdownOption[] {
     name: p.name,
     description: p.description,
     is_builtin: p.is_builtin,
-    codec: p.config.video_codec,
+    codec: p.config.video_codec || 'h264',
     type: p.config.encoding_type,
     gpu: p.config.gpu_type,
     quality: p.config.quality,

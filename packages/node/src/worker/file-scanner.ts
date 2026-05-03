@@ -1,23 +1,7 @@
 import { spawn } from 'child_process';
 import { extname } from 'path';
 import type { Logger } from 'winston';
-
-// ============================================================================
-// Types
-// ============================================================================
-
-export interface VideoMetadata {
-  container: string;
-  video_codec: string;
-  audio_codecs: string[];
-  subtitle_count: number;
-  duration: number;
-  width: number;
-  height: number;
-  fps: number;
-  bitrate: number;
-  size: number;
-}
+import type { VideoMetadata } from '@encorr/shared';
 
 // ============================================================================
 // File Analyzer
@@ -99,13 +83,18 @@ export class FileAnalyzer {
     const format = data.format || {};
     const streams = data.streams || [];
 
-    // Find video and audio streams
-    const videoStream = streams.find((s: any) => s.codec_type === 'video');
+    // Find video and audio streams (filter out attached picture / embedded album art)
+    const isRealVideoStream = (s: any) =>
+      s.codec_type === 'video' &&
+      !s.attached_pic &&
+      s.disposition?.attached_pic !== 1 &&
+      s.disposition?.embedded !== 1;
+    const videoStream = streams.find(isRealVideoStream);
     const audioStreams = streams.filter((s: any) => s.codec_type === 'audio');
     const subtitleStreams = streams.filter((s: any) => s.codec_type === 'subtitle');
 
     // Extract video codec
-    let videoCodec = 'unknown';
+    let videoCodec: string | undefined = undefined;
     if (videoStream) {
       videoCodec = videoStream.codec_name || videoStream.codec || 'unknown';
     }
@@ -125,6 +114,10 @@ export class FileAnalyzer {
       container = 'mov';
     } else if (containerLower.includes('mp4')) {
       container = 'mp4';
+    } else if (containerLower.includes('mp3')) {
+      container = 'mp3';
+    } else if (containerLower.includes('flac')) {
+      container = 'flac';
     } else {
       // Use first part before comma for other formats
       container = container.split(',')[0];
@@ -134,11 +127,11 @@ export class FileAnalyzer {
     const duration = parseFloat(format.duration || '0') || 0;
 
     // Dimensions
-    const width = videoStream?.width || 0;
-    const height = videoStream?.height || 0;
+    const width = videoStream?.width;
+    const height = videoStream?.height;
 
     // FPS
-    let fps = 0;
+    let fps: number | undefined = undefined;
     if (videoStream?.r_frame_rate) {
       const [num, den] = videoStream.r_frame_rate.split('/').map(Number);
       fps = den ? num / den : 0;
@@ -165,11 +158,12 @@ export class FileAnalyzer {
   }
 
   /**
-   * Check if a file is a video file based on its extension
+   * Check if a file is a media file based on its extension
    */
-  private isVideoFile(filename: string): boolean {
+  private isMediaFile(filename: string): boolean {
     const ext = extname(filename).toLowerCase();
-    const videoExtensions = new Set([
+    const mediaExtensions = new Set([
+      // Video
       '.mp4', '.mpg', '.mpeg', '.mp2', '.m2v', '.m4v', '.mv2',
       '.avi', '.divx', '.xvid', '.mkv', '.webm', '.flv', '.f4v',
       '.swf', '.vob', '.ogv', '.ogg', '.drc', '.gif', '.gifv',
@@ -178,7 +172,10 @@ export class FileAnalyzer {
       '.3gp', '.3g2', '.f4p', '.f4a', '.f4b', '.wmv', '.mxf',
       '.nsv', '.wtv', '.bik', '.smk', '.mka', '.m3u', '.m3u8',
       '.vro', '.flc', '.fli', '.dvr-ms', '.wtv', '.wmv',
+      // Audio
+      '.flac', '.mp3', '.wav', '.m4a', '.aac', '.ogg', '.wma',
+      '.aiff', '.alac', '.opus',
     ]);
-    return videoExtensions.has(ext);
+    return mediaExtensions.has(ext);
   }
 }

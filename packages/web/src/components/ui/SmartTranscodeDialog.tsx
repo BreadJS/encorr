@@ -130,6 +130,9 @@ export function SmartTranscodeDialog({
   const [nvidiaPresetId, setNvidiaPresetId] = useState<string>('');
   const [amdPresetId, setAmdPresetId] = useState<string>('');
   const [intelPresetId, setIntelPresetId] = useState<string>('');
+
+  // Track which vendor was last selected by the user
+  const [selectedGpuVendor, setSelectedGpuVendor] = useState<'nvidia' | 'amd' | 'intel' | null>(null);
   const [cpuPresetId, setCpuPresetId] = useState<string>('');
 
   // Fetch all presets (built-in + user) from API
@@ -164,28 +167,62 @@ export function SmartTranscodeDialog({
     return Array.from(presetMap.values());
   }, [apiPresets]);
 
-  // Group presets by encoding type and gpu type (handles both FFmpeg and HandBrake formats)
-  const gpuPresets = allPresets.filter(p => isGpuPreset(p));
-  const cpuPresets = allPresets.filter(p => !isGpuPreset(p) && p.id !== 'builtin-analyze');
+  // Determine if any files are audio-only (no video codec)
+  const hasAudioOnlyFiles = useMemo(() => {
+    return files.some(f => !f.metadata?.video_codec);
+  }, [files]);
 
-  // Group GPU presets by GPU type
-  const nvidiaPresets = gpuPresets.filter(p => getGpuType(p) === 'nvidia');
-  const amdPresets = gpuPresets.filter(p => getGpuType(p) === 'amd');
-  const intelPresets = gpuPresets.filter(p => getGpuType(p) === 'intel');
+  // Determine if any files are video
+  const hasVideoFiles = useMemo(() => {
+    return files.some(f => (f as any).metadata?.video_codec || (f as any).video_codec || (f as any).original_codec);
+  }, [files]);
+
+  // Helper to check if a preset is audio-only
+  const isAudioPreset = (p: any) => p.config?.audio_only === true;
+
+  // Helper to get presets filtered by mode and file types
+  const getPresetsForMode = (mode: TranscodeMode) => {
+    const all = allPresets.filter(p => p.id !== 'builtin-analyze');
+    if (mode === 'gpu') {
+      // GPU mode: video GPU presets + audio presets if audio files are selected
+      const videoGpu = all.filter(p => isGpuPreset(p) && !isAudioPreset(p));
+      if (hasAudioOnlyFiles) {
+        return [...videoGpu, ...all.filter(p => isAudioPreset(p))];
+      }
+      return videoGpu;
+    } else {
+      // CPU mode: video CPU presets + audio presets if audio files are selected
+      const videoCpu = all.filter(p => !isGpuPreset(p) && !isAudioPreset(p));
+      if (hasAudioOnlyFiles && !hasVideoFiles) {
+        return all.filter(p => isAudioPreset(p));
+      }
+      if (hasAudioOnlyFiles) {
+        return [...videoCpu, ...all.filter(p => isAudioPreset(p))];
+      }
+      return hasVideoFiles ? videoCpu : all.filter(p => isAudioPreset(p));
+    }
+  };
+
+  // Group GPU presets by GPU type (only video GPU presets)
+  const videoGpuPresets = allPresets.filter(p => isGpuPreset(p) && !isAudioPreset(p));
+  const nvidiaPresets = videoGpuPresets.filter(p => getGpuType(p) === 'nvidia');
+  const amdPresets = videoGpuPresets.filter(p => getGpuType(p) === 'amd');
+  const intelPresets = videoGpuPresets.filter(p => getGpuType(p) === 'intel');
 
   // Selected preset state
   const [selectedPresetId, setSelectedPresetId] = useState<string>('');
 
   // Auto-select default preset based on mode
   const getDefaultPresetForMode = (currentMode: TranscodeMode): string => {
+    const presets = getPresetsForMode(currentMode);
     if (currentMode === 'gpu') {
       // Default to NVIDIA H.265
       const nvidiaH265 = nvidiaPresets.find(p => getVideoCodec(p) === 'h265');
-      return nvidiaH265?.id || nvidiaPresets[0]?.id || '';
+      return nvidiaH265?.id || nvidiaPresets[0]?.id || presets[0]?.id || '';
     } else if (currentMode === 'cpu') {
-      // Default to High Quality H.265 CPU
-      const h265Cpu = cpuPresets.find(p => getVideoCodec(p) === 'h265');
-      return h265Cpu?.id || cpuPresets[0]?.id || '';
+      // Default to High Quality H.265 CPU or first audio preset
+      const h265Cpu = presets.find(p => getVideoCodec(p) === 'h265');
+      return h265Cpu?.id || presets[0]?.id || '';
     }
     return '';
   };
@@ -217,9 +254,15 @@ export function SmartTranscodeDialog({
                      || intelPresets[0];
     setIntelPresetId(intelH265?.id || '');
 
-    // CPU default
-    const cpuH265 = cpuPresets.find(p => getVideoCodec(p) === 'h265');
-    setCpuPresetId(cpuH265?.id || cpuPresets[0]?.id || '');
+    // CPU default - prefer video presets, fall back to audio presets
+    const cpuModePresets = getPresetsForMode('cpu');
+    const cpuH265 = cpuModePresets.find(p => getVideoCodec(p) === 'h265');
+    setCpuPresetId(cpuH265?.id || cpuModePresets[0]?.id || '');
+  };
+
+  // Track which vendor was last selected by the user
+  const handleVendorSelect = (vendor: 'nvidia' | 'amd' | 'intel') => {
+    setSelectedGpuVendor(vendor);
   };
 
   // Apply Quick Select Preset to vendor dropdowns
@@ -241,6 +284,8 @@ export function SmartTranscodeDialog({
 
   // Update selected preset when mode changes
   const handleModeChange = (newMode: TranscodeMode) => {
+    // GPU mode is only relevant for video transcoding
+    if (newMode === 'gpu' && !hasVideoFiles) return;
     setMode(newMode);
     setSelectedPresetId(getDefaultPresetForMode(newMode));
     // Initialize vendor presets if not already set
@@ -277,13 +322,18 @@ export function SmartTranscodeDialog({
   // Get the active preset ID to use for transcoding
   const getActivePresetId = (): string => {
     if (mode === 'gpu') {
-      // Prioritize based on which vendor has presets
+      // Use the vendor the user actually selected, not just whichever has a preset set
+      if (selectedGpuVendor === 'nvidia' && nvidiaPresetId) return nvidiaPresetId;
+      if (selectedGpuVendor === 'amd' && amdPresetId) return amdPresetId;
+      if (selectedGpuVendor === 'intel' && intelPresetId) return intelPresetId;
+      // Fallback: use whatever vendor has presets
       if (nvidiaPresetId) return nvidiaPresetId;
       if (amdPresetId) return amdPresetId;
       if (intelPresetId) return intelPresetId;
       return nvidiaPresets[0]?.id || '';
     } else if (mode === 'cpu') {
-      return cpuPresetId || cpuPresets[0]?.id || '';
+      const cpuModePresets = getPresetsForMode('cpu');
+      return cpuPresetId || cpuModePresets[0]?.id || '';
     }
     return selectedPresetId;
   };
@@ -301,13 +351,13 @@ export function SmartTranscodeDialog({
   };
 
   const getFilteredPresets = () => {
-    return mode === 'gpu' ? gpuPresets : cpuPresets;
+    return getPresetsForMode(mode);
   };
 
   // Get presets for each GPU type dropdown (no codec filtering for vendor dropdowns)
   const getFilteredGpuPresets = (gpuType: 'nvidia' | 'amd' | 'intel') => {
     // Return all presets for the vendor, without codec filtering
-    return gpuPresets.filter(p => getGpuType(p) === gpuType);
+    return videoGpuPresets.filter(p => getGpuType(p) === gpuType);
   };
 
   const currentPreset = getCurrentPreset();
@@ -388,11 +438,12 @@ export function SmartTranscodeDialog({
           </div>
 
           {/* GPU Mode with Preset Selection */}
-          <div
-            onClick={() => handleModeChange('gpu')}
-            className={`rounded-lg border p-4 transition-all cursor-pointer ${
-              mode === 'gpu' ? 'bg-primary/5' : 'hover:bg-white/5'
-            }`}
+          {hasVideoFiles && (
+            <div
+              onClick={() => handleModeChange('gpu')}
+              className={`rounded-lg border p-4 transition-all cursor-pointer ${
+                mode === 'gpu' ? 'bg-primary/5' : 'hover:bg-white/5'
+              }`}
             style={{
               borderColor: mode === 'gpu' ? theme.green : theme.border,
               backgroundColor: mode === 'gpu' ? `${theme.green}10` : undefined,
@@ -497,6 +548,7 @@ export function SmartTranscodeDialog({
                             onClick={() => {
                               setNvidiaPresetId(preset.id);
                               setNvidiaDropdownOpen(false);
+                              handleVendorSelect('nvidia');
                             }}
                             className={`w-full text-left px-3 py-2 text-xs transition-colors ${
                               nvidiaPresetId === preset.id
@@ -556,6 +608,7 @@ export function SmartTranscodeDialog({
                             onClick={() => {
                               setAmdPresetId(preset.id);
                               setAmdDropdownOpen(false);
+                              handleVendorSelect('amd');
                             }}
                             className={`w-full text-left px-3 py-2 text-xs transition-colors ${
                               amdPresetId === preset.id
@@ -615,6 +668,7 @@ export function SmartTranscodeDialog({
                             onClick={() => {
                               setIntelPresetId(preset.id);
                               setIntelDropdownOpen(false);
+                              handleVendorSelect('intel');
                             }}
                             className={`w-full text-left px-3 py-2 text-xs transition-colors ${
                               intelPresetId === preset.id
@@ -635,6 +689,7 @@ export function SmartTranscodeDialog({
               </div>
             )}
           </div>
+          )}
 
           {/* CPU Mode with Preset Selection */}
           <div

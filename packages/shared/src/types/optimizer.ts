@@ -30,8 +30,8 @@ export interface HwaccelInfo {
 
 export interface FileAnalysis {
   // Basic video properties
-  codec: string;
-  resolution: string;
+  codec?: string; // Optional for audio-only
+  resolution?: string; // Optional for audio-only
   bitrate: number;
   hasHdr: boolean;
   bitDepth: number;
@@ -39,13 +39,14 @@ export interface FileAnalysis {
   size: number;
 
   // Derived properties
-  width: number;
-  height: number;
-  fps: number;
+  width?: number; // Optional for audio-only
+  height?: number; // Optional for audio-only
+  fps?: number; // Optional for audio-only
   container: string;
+  audioOnly?: boolean;
 
   // Codec family (normalized)
-  codecFamily: 'h264' | 'h265' | 'other';
+  codecFamily: 'h264' | 'h265' | 'other' | 'audio';
 
   // Size category
   sizeCategory: 'small' | 'medium' | 'large' | 'xlarge';
