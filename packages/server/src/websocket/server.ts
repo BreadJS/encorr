@@ -135,6 +135,18 @@ export class EncorrWebSocketServer {
   // ========================================================================
 
   /**
+   * Detect GPU vendor from model name
+   */
+  private detectVendorFromName(name: string): string {
+    const n = name.toLowerCase();
+    if (n.includes('nvidia') || n.includes('geforce') || n.includes('quadro') || n.includes('tesla')) return 'nvidia';
+    if (n.includes('amd') || n.includes('radeon') || n.includes('ati')) return 'amd';
+    if (n.includes('intel')) return 'intel';
+    if (n.includes('apple') || n.includes('m1') || n.includes('m2') || n.includes('m3')) return 'apple';
+    return 'unknown';
+  }
+
+  /**
    * Filter out integrated GPUs from system_info
    * Keeps only discrete GPUs (NVIDIA, AMD discrete, etc.)
    */
@@ -155,6 +167,13 @@ export class EncorrWebSocketServer {
       // Filter out AMD integrated GPUs
       // Check for AMD/ATI/Radeon in vendor OR "advanced" (for "Advanced Micro Devices, Inc.")
       if (vendor.includes('amd') || vendor.includes('ati') || vendor.includes('radeon') || vendor.includes('advanced')) {
+        // Check for known discrete AMD model indicators first
+        const isDiscreteAmd = /rx\s*([2-9]\d|7\d\d|8\d\d|9\d\d)/i.test(name) ||
+                              /\bradeon\s+(hd|hx|xt|x|pro|vii)\b/i.test(name);
+        if (isDiscreteAmd) {
+          return true;
+        }
+
         // Remove special characters like (TM), (R), etc. then normalize whitespace
         const cleanName = name.replace(/[™®©\(tm\)\(r\)\(c\)]/gi, '').replace(/\s+/g, ' ').trim();
 
@@ -491,9 +510,9 @@ export class EncorrWebSocketServer {
     // The node has already filtered out integrated GPUs, so we trust the incoming data
     let gpuUsage: number[] | undefined;
 
-    if (node && node.system_info.gpus) {
+    if ((node && node.system_info.gpus) || (payload.gpus && payload.gpus.length > 0)) {
       // Filter out integrated GPUs from the existing database entry
-      const currentSystemInfo = { ...node.system_info };
+      const currentSystemInfo = node?.system_info ? { ...node.system_info } : { gpus: [] };
       const filteredSystemInfo = this.filterIntegratedGPUs(currentSystemInfo);
 
       // Update with live data from payload - rebuild GPU list entirely from payload
@@ -505,31 +524,33 @@ export class EncorrWebSocketServer {
         gpuUsage = payload.gpus.map(gpu => gpu.utilizationGpu ?? 0);
 
         // Rebuild GPU list by matching each incoming GPU with static info from DB
+        // Match by GPU name for accuracy
         const updatedGpus: any[] = [];
         const usedStaticIndices = new Set<number>();
 
-        for (const liveGpu of payload.gpus) {
-          // Find matching static GPU info from the filtered DB GPUs by vendor
-          const staticGpuIndex = filteredSystemInfo.gpus.findIndex((existingGpu: any, idx: number) => {
-            if (usedStaticIndices.has(idx)) return false; // Skip already matched
+        for (const liveGpu of payload.gpus as any) {
+          const liveName = (liveGpu._gpuName || '').toLowerCase();
 
-            const existingVendor = (existingGpu.vendor || '').toLowerCase();
-            const existingName = (existingGpu.name || '').toLowerCase();
+          // Find matching static GPU by name first, then fallback to vendor
+          let staticGpuIndex = -1;
+          if (liveName) {
+            staticGpuIndex = filteredSystemInfo.gpus.findIndex((gpu: any, idx: number) => {
+              if (usedStaticIndices.has(idx)) return false;
+              return (gpu.name || '').toLowerCase().includes(liveName) || liveName.includes((gpu.name || '').toLowerCase());
+            });
+          }
 
-            // NVIDIA GPUs match NVIDIA
-            if (existingVendor.includes('nvidia') || existingName.includes('nvidia') ||
-                existingName.includes('geforce') || existingName.includes('rtx') || existingName.includes('quadro')) {
-              return true;
-            }
-
-            // AMD GPUs match AMD
-            if (existingVendor.includes('amd') || existingName.includes('amd') ||
-                existingName.includes('radeon') || existingVendor.includes('ati')) {
-              return true;
-            }
-
-            return false;
-          });
+          if (staticGpuIndex < 0) {
+            // Fallback: match by vendor (first unused GPU of same vendor)
+            staticGpuIndex = filteredSystemInfo.gpus.findIndex((gpu: any, idx: number) => {
+              if (usedStaticIndices.has(idx)) return false;
+              const staticVendor = (gpu.vendor || '').toLowerCase();
+              const staticName = (gpu.name || '').toLowerCase();
+              if (staticVendor.includes('nvidia') || staticName.includes('nvidia') || staticName.includes('geforce')) return true;
+              if (staticVendor.includes('amd') || staticName.includes('amd') || staticName.includes('radeon')) return true;
+              return false;
+            });
+          }
 
           if (staticGpuIndex >= 0) {
             const staticGpu = filteredSystemInfo.gpus[staticGpuIndex];
@@ -548,8 +569,22 @@ export class EncorrWebSocketServer {
               clockMemory: liveGpu.clockMemory,
             });
           } else {
-            // No matching static GPU found - this shouldn't happen, but log it
-            this.logger.warn(`No matching static GPU found for live GPU data: ${JSON.stringify(liveGpu)}`);
+            // No static GPU matched - create a minimal entry from live data
+            const liveName = (liveGpu._gpuName || 'Unknown GPU').trim();
+            const vendor = this.detectVendorFromName(liveName);
+            this.logger.info(`[GPU] Created GPU entry from live data: ${liveName} (${vendor})`);
+            updatedGpus.push({
+              name: liveName || 'Unknown GPU',
+              vendor,
+              utilizationGpu: liveGpu.utilizationGpu,
+              utilizationMemory: liveGpu.utilizationMemory,
+              memoryUsed: liveGpu.memoryUsed,
+              memoryFree: liveGpu.memoryFree,
+              temperatureGpu: liveGpu.temperatureGpu,
+              powerDraw: liveGpu.powerDraw,
+              clockCore: liveGpu.clockCore,
+              clockMemory: liveGpu.clockMemory,
+            });
           }
         }
 
@@ -961,14 +996,16 @@ export class EncorrWebSocketServer {
       const mapping = this.db.getFolderMappingById(payload.folder_mapping_id);
       if (!mapping) continue;
 
+      const resolution = file.metadata.width && file.metadata.height ? `${file.metadata.width}x${file.metadata.height}` : 'N/A';
+
       const videoFile = this.db.upsertFile({
         folder_mapping_id: payload.folder_mapping_id,
         relative_path: file.relative_path,
         original_size: file.metadata.size,
         original_format: file.metadata.container,
-        original_codec: file.metadata.video_codec,
+        original_codec: file.metadata.video_codec || 'audio',
         duration: file.metadata.duration,
-        resolution: `${file.metadata.width}x${file.metadata.height}`,
+        resolution: resolution,
         metadata: file.metadata,
       });
 
@@ -1065,12 +1102,23 @@ export class EncorrWebSocketServer {
     if (payload.gpus && payload.gpus.length > 0) {
       const node = this.db.getAllNodes().find(n => n.id === connection.nodeId);
       if (node && node.system_info?.gpus) {
-        // Update each GPU with dynamic data from USAGE_UPDATE
-        node.system_info.gpus = node.system_info.gpus.map((gpu, index) => {
-          const updateData = payload.gpus![index];
-          if (updateData) {
-            return {
-              ...gpu,
+        // Match by GPU name, fallback to index
+        const updated = [...node.system_info.gpus];
+        const matched = new Set<number>();
+        for (const updateData of payload.gpus as any) {
+          const liveName = (updateData._gpuName || '').toLowerCase();
+          let idx = -1;
+          if (liveName) {
+            idx = updated.findIndex((gpu, i) => !matched.has(i) && (gpu.name || '').toLowerCase().includes(liveName));
+          }
+          if (idx < 0) {
+            // Fallback: first unmatched index
+            idx = updated.findIndex((_, i) => !matched.has(i));
+          }
+          if (idx >= 0 && !matched.has(idx)) {
+            matched.add(idx);
+            updated[idx] = {
+              ...updated[idx],
               utilizationGpu: updateData.utilizationGpu,
               utilizationMemory: updateData.utilizationMemory,
               temperatureGpu: updateData.temperatureGpu,
@@ -1080,8 +1128,8 @@ export class EncorrWebSocketServer {
               clockCore: updateData.clockCore,
             };
           }
-          return gpu;
-        });
+        }
+        node.system_info.gpus = updated;
         this.db.updateNodeSystemInfo(connection.nodeId, node.system_info);
       }
     }
@@ -2018,15 +2066,18 @@ export class EncorrWebSocketServer {
     // Determine destination path (only for transcode jobs, not analyze)
     let destPath: string | undefined;
     if (!isAnalyzeJob) {
+      // Use the preset's container format for the output extension
+      const containerExt = preset.config?.audio_only ? (preset.config.container || 'mp3') : (preset.config.container || 'mkv');
+      const encName = preset.config?.audio_only ? `_${containerExt}` : '_enc';
       if (mapping.server_path?.startsWith('library:')) {
         const basePath = useLibraryServerPath ? libraryServerPath! : mapping.node_path;
         if (basePath && (basePath.includes('.mkv') || basePath.includes('.mp4') || basePath.includes('.avi'))) {
-          destPath = basePath.replace(/\.[^.]+$/, '_enc.mkv');
+          destPath = basePath.replace(/\.[^.]+$/, encName) + '.' + containerExt;
         } else {
-          destPath = `${basePath}/${file.relative_path.replace(/\.[^.]+$/, '_enc.mkv')}`;
+          destPath = `${basePath}/${file.relative_path.replace(/\.[^.]+$/, encName)}.${containerExt}`;
         }
       } else {
-        destPath = `${mapping.node_path}/${file.relative_path.replace(/\.[^.]+$/, '_enc.mkv')}`;
+        destPath = `${mapping.node_path}/${file.relative_path.replace(/\.[^.]+$/, encName)}.${containerExt}`;
       }
     }
 

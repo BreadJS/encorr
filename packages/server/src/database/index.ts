@@ -140,6 +140,40 @@ export class EncorrDatabase {
    */
   private seedBuiltinPresets(): void {
     const builtinPresets = [
+      // Audio Presets
+      {
+        id: 'builtin-audio-mp3-320',
+        name: 'MP3 High Quality (320kbps)',
+        description: 'Transcode audio to high quality MP3',
+        config: {
+          audio_only: true,
+          encoding_type: 'cpu',
+          quality_mode: 'crf',
+          quality: 0,
+          preset: 'medium',
+          container: 'mp3',
+          audio_encoder: 'libmp3lame',
+          audio_bitrate: 320000,
+          subtitles: 'none',
+        },
+      },
+      {
+        id: 'builtin-audio-aac-256',
+        name: 'AAC High Quality (256kbps)',
+        description: 'Transcode audio to high quality AAC (M4A)',
+        config: {
+          audio_only: true,
+          encoding_type: 'cpu',
+          quality_mode: 'crf',
+          quality: 0,
+          preset: 'medium',
+          container: 'm4a',
+          audio_encoder: 'aac',
+          audio_bitrate: 256000,
+          subtitles: 'none',
+        },
+      },
+      // CPU Presets
       {
         id: 'builtin-high-quality-h265-cpu',
         name: 'High Quality H.265 (CPU)',
@@ -975,6 +1009,7 @@ export class EncorrDatabase {
       resolution: row.resolution,
       status: row.status,
       created_at: row.created_at,
+      metadata: row.metadata ? JSON.parse(row.metadata) : null,
     };
   }
 
@@ -1208,18 +1243,7 @@ export class EncorrDatabase {
     this.addToJobHistory(jobId, 'completed');
   }
 
-  completeAnalyzeJob(jobId: string, metadata: {
-    container: string;
-    video_codec: string;
-    audio_codecs: string[];
-    subtitle_count: number;
-    duration: number;
-    width: number;
-    height: number;
-    fps: number;
-    bitrate: number;
-    size: number;
-  }): void {
+  completeAnalyzeJob(jobId: string, metadata: VideoMetadata): void {
     const now = Math.floor(Date.now() / 1000);
 
     // First, get the file_id from the job
@@ -1248,11 +1272,14 @@ export class EncorrDatabase {
           status = 'analyzed'
       WHERE id = ?
     `);
+
+    const resolution = metadata.width && metadata.height ? `${metadata.width}x${metadata.height}` : 'N/A';
+
     fileStmt.run(
       metadata.container,
-      metadata.video_codec,
+      metadata.video_codec || 'audio',
       metadata.duration,
-      `${metadata.width}x${metadata.height}`,
+      resolution,
       JSON.stringify(metadata),
       job.file_id
     );

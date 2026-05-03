@@ -2,6 +2,8 @@ import { v4 as uuidv4 } from 'uuid';
 import * as os from 'os';
 import { existsSync } from 'fs';
 import { join } from 'path';
+import { spawn } from 'child_process';
+import { promisify } from 'util';
 import type { NodeConfig, SystemInfo, GPUInfo } from '@encorr/shared';
 import { createMessage, MessageType } from '@encorr/shared';
 import { WebSocketClient } from './client/websocket';
@@ -76,6 +78,11 @@ export class EncorrNode {
   private isRunning: boolean = false;
   private systemInfoUpdateInterval: NodeJS.Timeout | null = null;
 
+  // ====== QUEUE ADDITIONS ======
+  private jobQueue: Array<{ jobId: string; config: any; presetConfig: any }> = [];
+  private isProcessingQueue: boolean = false;
+  // =============================
+
   constructor(options: EncorrNodeOptions = {}) {
     // Load config from file or use defaults
     this.config = loadConfig();
@@ -149,6 +156,9 @@ export class EncorrNode {
       clearInterval(this.systemInfoUpdateInterval);
       this.systemInfoUpdateInterval = null;
     }
+
+    // Clear local queue
+    this.jobQueue = [];
 
     // Cancel active jobs
     for (const jobId of this.activeJobs.keys()) {
@@ -226,7 +236,7 @@ export class EncorrNode {
   }
 
   // ========================================================================
-  // Job Handling
+  // Job Handling & Queue Processing
   // ========================================================================
 
   private async handleJobAssigned(payload: any): Promise<void> {
@@ -235,6 +245,19 @@ export class EncorrNode {
     const config = job.config || {};
     const presetConfig = config.ffmpeg || {};
 
+    // ====== START OF OVERRIDE ======
+    // Intercept the server's config and force it to match our actual hardware
+    if (presetConfig.encoding_type === 'gpu') {
+      const hasNvidia = this.systemInfo.gpus?.some(g => g.vendor.toLowerCase().includes('nvidia'));
+      const hasAmd = this.systemInfo.gpus?.some(g => g.vendor.toLowerCase().includes('amd'));
+
+      if (presetConfig.gpu_type === 'nvidia' && !hasNvidia && hasAmd) {
+        this.logger.warn(`[OVERRIDE] Server assigned an NVIDIA job, but this node only has AMD. Forcing AMD parameters!`);
+        presetConfig.gpu_type = 'amd'; // This forces buildFFmpegArgs to use VAAPI/AMF instead of NVENC
+      }
+    }
+    // ====== END OF OVERRIDE ======
+
     this.logger.info(`[JOB_ASSIGN] Job assigned: ${jobId}`);
     this.logger.info(`[JOB_ASSIGN]   encoding_type: ${presetConfig.encoding_type}`);
     this.logger.info(`[JOB_ASSIGN]   gpu_type: ${presetConfig.gpu_type}`);
@@ -242,8 +265,6 @@ export class EncorrNode {
     this.logger.info(`[JOB_ASSIGN]   action: ${presetConfig.action || 'transcode'}`);
     this.logger.info(`[JOB_ASSIGN]   source: ${config.source_path}`);
     this.logger.info(`[JOB_ASSIGN]   dest: ${config.dest_path}`);
-
-    // Server controls concurrency, so we accept all assigned jobs
 
     // Validate source file exists
     const { existsSync } = require('fs');
@@ -257,51 +278,74 @@ export class EncorrNode {
     // Accept job
     this.wsClient.sendJobAccept(jobId, true);
 
-    // Use gpu_device_id from server - this is the specific GPU device to use
-    // Server has already load-balanced across available GPU devices
+    // Use gpu_device_id from server
     let gpuIndex: number | undefined = undefined;
     if (presetConfig.encoding_type === 'gpu' && presetConfig.gpu_device_id !== undefined) {
       gpuIndex = presetConfig.gpu_device_id;
       this.logger.info(`[JOB_ASSIGN] Using GPU device ${gpuIndex} (from server assignment)`);
     } else if (presetConfig.encoding_type === 'gpu' && presetConfig.gpu_type) {
-      // Fallback to old logic if gpu_device_id not provided
       if (presetConfig.gpu_type === 'nvidia') gpuIndex = 0;
       else if (presetConfig.gpu_type === 'intel') gpuIndex = 1;
       else if (presetConfig.gpu_type === 'amd') gpuIndex = 2;
       this.logger.warn(`[JOB_ASSIGN] No gpu_device_id provided, using fallback GPU ${gpuIndex} from gpu_type`);
     }
 
-    // Check if this is an analyze job
-    if (presetConfig.action === 'analyze') {
-      // Add to active jobs for analyze
-      this.activeJobs.set(jobId, {
-        id: jobId,
-        sourcePath: config.source_path,
-        destPath: config.dest_path,
-        config: presetConfig,
-        progress: 0,
-        currentAction: 'Analyzing...',
-        gpu: gpuIndex,
-      });
+    // Add to active jobs in a "Queued" state
+    this.activeJobs.set(jobId, {
+      id: jobId,
+      sourcePath: config.source_path,
+      destPath: config.dest_path,
+      config: presetConfig,
+      progress: 0,
+      currentAction: 'Queued',
+      gpu: gpuIndex,
+    });
 
-      // Run analyze job
-      this.runAnalyzeJob(jobId, config);
-    } else {
-      // Add to active jobs for transcode
-      this.activeJobs.set(jobId, {
-        id: jobId,
-        sourcePath: config.source_path,
-        destPath: config.dest_path,
-        config: presetConfig,
-        progress: 0,
-        currentAction: 'Starting...',
-        gpu: gpuIndex,
-      });
+    // ====== QUEUE ADDITION ======
+    // Push into our local queue and attempt to process
+    this.jobQueue.push({ jobId, config, presetConfig });
+    this.logger.info(`[QUEUE] Job ${jobId} added to local queue. Current queue length: ${this.jobQueue.length}`);
+    
+    this.processQueue();
+  }
 
-      // Start transcoding
-      this.runJob(jobId, config);
+  // ====== QUEUE PROCESSOR ======
+  private async processQueue(): Promise<void> {
+    // If we're already looping through jobs, don't start a second loop
+    if (this.isProcessingQueue || this.jobQueue.length === 0) {
+      return;
+    }
+
+    this.isProcessingQueue = true;
+
+    try {
+      // Loop while there are jobs in the queue
+      while (this.jobQueue.length > 0) {
+        const nextJob = this.jobQueue.shift();
+        if (!nextJob) continue;
+
+        const { jobId, config, presetConfig } = nextJob;
+        const activeJob = this.activeJobs.get(jobId);
+
+        // If the job was cancelled while waiting in the queue, skip it
+        if (!activeJob) continue;
+
+        if (presetConfig.action === 'analyze') {
+          activeJob.currentAction = 'Analyzing...';
+          // AWAIT ensures the node waits for analysis to finish before grabbing the next queue item
+          await this.runAnalyzeJob(jobId, config);
+        } else {
+          activeJob.currentAction = 'Starting...';
+          // AWAIT ensures the node waits for transcoding to finish before grabbing the next queue item
+          await this.runJob(jobId, config);
+        }
+      }
+    } finally {
+      // Done processing all queued jobs
+      this.isProcessingQueue = false;
     }
   }
+  // =============================
 
   private async runJob(jobId: string, config: any): Promise<void> {
     const activeJob = this.activeJobs.get(jobId);
@@ -328,18 +372,16 @@ export class EncorrNode {
           availableEncoders: this.systemInfo.ffmpeg_encoders,
         },
         (progress, action, eta, fps, ratio) => {
-          // Update progress - ALWAYS update fps, eta, and ratio (including undefined)
-          // The transcoder now accumulates values, so we trust what it sends
           activeJob.progress = progress;
           activeJob.currentAction = action;
-          activeJob.fps = fps;  // Always update (undefined is valid - means no FPS data yet)
-          activeJob.eta = eta;  // Always update (undefined is valid - means no ETA data yet)
-          activeJob.ratio = ratio;  // Always update (undefined is valid - means no ratio data yet)
+          activeJob.fps = fps;  
+          activeJob.eta = eta;  
+          activeJob.ratio = ratio; 
 
           // Send to server
           this.wsClient.sendJobProgress(jobId, progress, action, eta, fps, ratio);
 
-          // Log progress updates (every 10% or on action change to reduce spam)
+          // Log progress updates
           if (Math.floor(progress) % 10 === 0 || progress === 0) {
             const etaFormatted = eta ? formatDuration(eta) : undefined;
             this.logger.info(`[PROGRESS] Job ${jobId}: ${progress.toFixed(1)}% - ${action}${fps ? ` @ ${fps.toFixed(1)} fps` : ''}${ratio ? ` (Ratio: ${ratio})` : ''}${etaFormatted ? ` (ETA: ${etaFormatted})` : ''}`);
@@ -362,7 +404,6 @@ export class EncorrNode {
           avg_fps: result.avg_fps,
         }, result.output_path, result.ffmpeg_logs, result.decoder_info);
       } else {
-        // Check if this was a user cancellation
         const isCancelled = result.error === 'Cancelled by user';
         if (isCancelled) {
           this.logger.info(`[JOB_CANCELLED] Job ${jobId} was cancelled by user`);
@@ -374,7 +415,6 @@ export class EncorrNode {
       }
 
     } catch (error) {
-      // Check if this was a cancellation
       const isCancelled = error instanceof Error && error.message === 'CANCELLED';
       if (isCancelled) {
         this.logger.info(`[JOB_CANCELLED] Job ${jobId} was cancelled`);
@@ -406,12 +446,10 @@ export class EncorrNode {
         throw new Error('File analyzer not initialized');
       }
 
-      // Update progress to show we're analyzing
       activeJob.progress = 10;
       activeJob.currentAction = 'Analyzing file...';
       this.wsClient.sendJobProgress(jobId, 10, 'Analyzing file...', 0);
 
-      // Analyze the file with ffprobe
       const metadata = await this.fileAnalyzer.analyzeFile(activeJob.sourcePath);
 
       activeJob.progress = 90;
@@ -420,7 +458,6 @@ export class EncorrNode {
 
       this.logger.info(`Job ${jobId} analysis complete: ${JSON.stringify(metadata)}`);
 
-      // Send job complete with metadata
       this.wsClient.sendJobCompleteWithMetadata(jobId, metadata, activeJob.sourcePath);
 
     } catch (error: any) {
@@ -432,10 +469,7 @@ export class EncorrNode {
         false
       );
     } finally {
-      // Remove from active jobs
       this.activeJobs.delete(jobId);
-
-      // Send heartbeat
       this.sendHeartbeat();
     }
   }
@@ -445,6 +479,19 @@ export class EncorrNode {
 
     this.logger.info(`Job ${job_id} cancelled: ${reason || 'No reason provided'}`);
 
+    // ====== QUEUE CANCEL FIX ======
+    // Check if the job is still waiting in the local queue
+    const queueIndex = this.jobQueue.findIndex(j => j.jobId === job_id);
+    if (queueIndex !== -1) {
+      this.jobQueue.splice(queueIndex, 1);
+      this.activeJobs.delete(job_id);
+      this.logger.info(`[QUEUE] Job ${job_id} was removed from the wait queue before starting.`);
+      this.sendHeartbeat();
+      return; 
+    }
+    // ==============================
+
+    // If it's not in the queue, it must be running. Try to cancel it in the transcoder.
     if (this.transcoder.cancelJob(job_id)) {
       this.activeJobs.delete(job_id);
     }
@@ -487,35 +534,25 @@ export class EncorrNode {
 
       // Perform the operation
       if (operation === 'replace') {
-        // Direct replace: move transcoded file to original location
         await fs.rename(source_path, target_path);
         this.logger.info(`[FILE_REPLACE] Replaced original file with transcoded version`);
       } else if (operation === 'backup_replace') {
-        // Backup original to .org, then move transcoded file to original location
         const backupPath = target_path + '.org';
-
-        // Check if backup already exists
         const backupExists = await fs.access(backupPath).then(() => true).catch(() => false);
         if (backupExists) {
           this.logger.warn(`[FILE_REPLACE] Backup file already exists: ${backupPath}, skipping backup creation`);
-          // Just remove the old backup and create a new one
           await fs.unlink(backupPath);
         }
 
-        // Rename original to .org
         await fs.rename(target_path, backupPath);
         this.logger.info(`[FILE_REPLACE] Backed up original to: ${backupPath}`);
-
-        // Move transcoded file to original location
         await fs.rename(source_path, target_path);
         this.logger.info(`[FILE_REPLACE] Moved transcoded file to: ${target_path}`);
       } else if (operation === 'cleanup_backup') {
-        // Delete the .org backup file
         await fs.unlink(target_path);
         this.logger.info(`[FILE_REPLACE] Deleted backup file: ${target_path}`);
       }
 
-      // Send success result
       this.wsClient.send(createMessage('FILE_REPLACE_RESULT', {
         file_id: file_id,
         operation: operation,
@@ -528,7 +565,6 @@ export class EncorrNode {
       const errorMsg = error instanceof Error ? error.message : String(error);
       this.logger.error(`[FILE_REPLACE] Failed to ${operation} for file ${file_id}: ${errorMsg}`);
 
-      // Send failure result
       this.wsClient.send(createMessage('FILE_REPLACE_RESULT', {
         file_id: file_id,
         operation: operation,
@@ -556,7 +592,6 @@ export class EncorrNode {
 
     const status = this.activeJobs.size > 0 ? 'busy' : 'idle';
 
-    // Log heartbeat details
     this.logger.debug(`[HEARTBEAT] Sending: status=${status}, active_jobs_count=${activeJobsArray.length}`);
     if (activeJobsArray.length > 0) {
       activeJobsArray.forEach(job => {
@@ -568,25 +603,6 @@ export class EncorrNode {
   }
 
   private startPeriodicUpdates(): void {
-    // NOTE: Disabled the 5-second GPU_INFO interval since we're now sending
-    // all GPU data (including utilization) via heartbeat every second.
-    // The heartbeat already includes fresh GPU data from reportUsage().
-
-    // // Update GPU info every 5 seconds (static info only)
-    // this.systemInfoUpdateInterval = setInterval(async () => {
-    //   try {
-    //     const gpus = await this.detectGPUs();
-    //     if (gpus.length > 0) {
-    //       this.systemInfo.gpus = gpus;
-    //       // Send GPU update to server
-    //       this.wsClient.send(createMessage(MessageType.GPU_INFO, { gpus }));
-    //     }
-    //   } catch (error: any) {
-    //     this.logger.warn('Failed to update GPU info:', error.message);
-    //   }
-    // }, 5000);
-
-    // Update usage data (CPU, RAM, GPU VRAM) every second
     setInterval(async () => {
       if (!this.isRunning || !this.wsClient.connected) {
         return;
@@ -600,24 +616,21 @@ export class EncorrNode {
     }, 1000);
   }
 
-  // ========================================================================
+// ========================================================================
   // System Info
   // ========================================================================
 
   private async gatherSystemInfo(): Promise<SystemInfo> {
     const si = require('systeminformation');
 
-    // Get CPU, RAM, OS info
     const [cpu, mem, osInfo] = await Promise.all([
       si.cpu(),
       si.mem(),
       si.osInfo(),
     ]);
 
-    // Get GPUs
     const gpus = await this.detectGPUs();
 
-    // Detect FFmpeg and FFprobe
     const ffmpegDir = this.config.ffmpeg_dir;
     const ffmpegExe = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
     const ffprobeExe = process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe';
@@ -635,12 +648,10 @@ export class EncorrNode {
     const ffmpegVersion = getFFmpegVersion(ffmpegPath) || undefined;
     const ffprobeVersion = getFFprobeVersion(ffprobePath) || undefined;
 
-    // Detect available FFmpeg encoders, decoders, and hwaccels
-    const ffmpegEncoders = await detectAvailableEncoders(ffmpegPath);
-    const ffmpegDecoders = await detectAvailableDecoders(ffmpegPath);
-    const ffmpegHwaccels = await detectAvailableHwaccels(ffmpegPath);
+    const ffmpegEncoders = await detectAvailableEncoders(ffmpegPath, gpus);
+    const ffmpegDecoders = await detectAvailableDecoders(ffmpegPath, gpus);
+    const ffmpegHwaccels = await detectAvailableHwaccels(ffmpegPath, gpus);
 
-    // Log hardware detection results
     this.logger.info(`[HW_DETECTION] Encoders: ${ffmpegEncoders.map(e => `${e.encoder_name} (${e.type}${e.gpu_type ? ':' + e.gpu_type : ''})`).join(', ') || 'none'}`);
     this.logger.info(`[HW_DETECTION] Decoders: ${ffmpegDecoders.filter(d => d.type === 'gpu').map(d => `${d.decoder_name} (${d.gpu_type})`).join(', ') || 'none (CPU only)'}`);
     this.logger.info(`[HW_DETECTION] Hwaccels: ${ffmpegHwaccels.filter(h => h.available).map(h => h.name).join(', ') || 'none'}`);
@@ -665,8 +676,6 @@ export class EncorrNode {
     const si = require('systeminformation');
 
     try {
-      // Get CPU usage using os module (simple approach)
-      // Get CPU usage using os module (standard Stack Overflow approach)
       const cpus = os.cpus();
       let totalIdle = 0;
       let totalTick = 0;
@@ -690,17 +699,12 @@ export class EncorrNode {
         }
       }
 
-      this.cpuMeasureStart = currentMeasure; // Update for next iteration
+      this.cpuMeasureStart = currentMeasure; 
 
-      // Get current memory usage (using systeminformation - reasonably fast)
       const mem = await si.mem();
-      // Use available memory to calculate actual used memory (excludes cache/buffers)
-      // mem.available is the memory actually available for applications
       const actualUsed = mem.total - mem.available;
       const ramPercent = Math.round((actualUsed / mem.total) * 100);
 
-      // Get GPU usage data using vendor-specific tools (nvidia-smi, AMD sysfs)
-      // nvidia-smi is very fast (~50ms) so we call it every second, no caching needed
       let gpuData: any[] | undefined;
 
       if (this.systemInfo.gpus && this.systemInfo.gpus.length > 0) {
@@ -710,21 +714,21 @@ export class EncorrNode {
           if (gpuUsageMap.size > 0) {
             gpuData = [];
 
-            // Convert Map to array in GPU order
             for (let i = 0; i < this.systemInfo.gpus.length; i++) {
               const usage = gpuUsageMap.get(i);
               if (usage) {
-                gpuData.push(usage);
+                gpuData.push({
+                  ...usage,
+                  _gpuName: this.systemInfo.gpus[i].name,
+                });
               }
             }
 
-            // Detailed GPU logging - log every 10 seconds
             const shouldLog = Math.floor(Date.now() / 10000) % 2 === 0;
             if (shouldLog) {
               this.logger.debug(`[GPU] GPU usage data: ${JSON.stringify(gpuData)}`);
             }
           } else {
-            // Only warn occasionally
             if (Math.floor(Date.now() / 30000) % 2 === 0) {
               this.logger.warn('[GPU] GPU monitor returned empty map');
             }
@@ -734,8 +738,6 @@ export class EncorrNode {
         }
       }
 
-      // Send usage update via heartbeat with system_load and GPU data
-      // Include ALL job data (fps, eta, etc.) to preserve rich progress information
       this.wsClient.sendHeartbeat(
         this.activeJobs.size > 0 ? 'busy' : 'idle',
         Array.from(this.activeJobs.values()).map(job => ({
@@ -766,29 +768,81 @@ export class EncorrNode {
     try {
       const graphics = await si.graphics();
 
-      // Process controllers (GPUs)
+      let lspciAmdGpus: Array<{ model: string; vendor: string; vram?: number; bus?: string }> = [];
+      if (process.platform === 'linux') {
+        lspciAmdGpus = await this.detectGPUsViaLspci();
+      }
+      const usedLspci = new Set<number>();
+
+      this.logger.info(`[GPU] si.graphics() returned ${graphics.controllers?.length || 0} controller(s), lspci found ${lspciAmdGpus.length} AMD GPU(s)`);
+
       if (graphics.controllers && graphics.controllers.length > 0) {
         for (let i = 0; i < graphics.controllers.length; i++) {
           const controller = graphics.controllers[i];
+          const modelName = controller.model || '';
+          const vendor = (controller.vendor || '').toLowerCase();
 
-          // Skip virtual displays
-          if (this.isVirtualDisplay(controller.model || '')) {
-            this.logger.debug(`Skipping virtual display: ${controller.model}`);
+          const isAmd = vendor.includes('amd') || vendor.includes('advanced') || vendor.includes('radeon') ||
+            (controller.model && /amd|radeon|advanced micro/i.test(controller.model));
+
+          if (isAmd && process.platform === 'linux' && lspciAmdGpus.length > 0) {
+            let matchIdx = -1;
+
+            if (modelName && modelName.length >= 10) {
+              matchIdx = lspciAmdGpus.findIndex((g, j) => !usedLspci.has(j) &&
+                g.model.toLowerCase() === modelName.toLowerCase());
+              if (matchIdx < 0) {
+                matchIdx = lspciAmdGpus.findIndex((g, j) => !usedLspci.has(j) &&
+                  (modelName.toLowerCase().includes(g.model.toLowerCase()) || g.model.toLowerCase().includes(modelName.toLowerCase())));
+              }
+            }
+
+            if (matchIdx < 0 && controller.vram) {
+              let bestDist = Infinity;
+              for (let j = 0; j < lspciAmdGpus.length; j++) {
+                if (usedLspci.has(j)) continue;
+                const lspciVram = lspciAmdGpus[j].vram;
+                if (!lspciVram) continue;
+                const dist = Math.abs(controller.vram * 1024 - lspciVram);
+                if (dist < bestDist) {
+                  bestDist = dist;
+                  matchIdx = j;
+                }
+              }
+            }
+
+            const freeIdx = matchIdx >= 0 ? matchIdx : lspciAmdGpus.findIndex((_, j) => !usedLspci.has(j));
+            if (freeIdx >= 0) {
+              usedLspci.add(freeIdx);
+              this.logger.info(`[GPU] AMD controller from si.graphics() -> lspci: ${lspciAmdGpus[freeIdx].model}`);
+              gpus.push({
+                name: lspciAmdGpus[freeIdx].model,
+                vendor: lspciAmdGpus[freeIdx].vendor,
+                memory: controller.vram ? controller.vram * 1024 * 1024 : undefined,
+                driver_version: controller.driverVersion,
+              });
+              continue;
+            }
+          }
+
+          if (this.isVirtualDisplay(modelName)) {
+            this.logger.debug(`Skipping virtual display: ${modelName}`);
             continue;
           }
 
-          // Skip integrated graphics (Intel HD, AMD integrated, etc.)
           if (this.isIntegratedGPU(controller)) {
-            this.logger.debug(`Skipping integrated GPU: ${controller.model || controller.name || 'Unknown'}`);
+            this.logger.debug(`Skipping integrated GPU: ${modelName}`);
+            continue;
+          }
+
+          if (!modelName && !controller.vram && !controller.vendor) {
+            this.logger.debug(`Skipping GPU with no data`);
             continue;
           }
 
           const vramMB = controller.vram;
-          // systeminformation returns VRAM in megabytes (MB), not bytes
           const vramFreeMB = (controller as any).memoryFree;
           const vramUsedMB = (controller as any).memoryUsed;
-
-          // Capture utilization metrics
           const utilizationGpu = (controller as any).utilizationGpu;
           const utilizationMemory = (controller as any).utilizationMemory;
           const temperatureGpu = (controller as any).temperatureGpu;
@@ -798,11 +852,11 @@ export class EncorrNode {
           const clockMemory = (controller as any).clockMemory;
 
           gpus.push({
-            name: controller.model || 'Unknown GPU',
-            vendor: controller.vendor || this.getGPUVendor(controller.model || ''),
-            memory: vramMB ? vramMB * 1024 * 1024 : undefined, // Convert MB to bytes
-            memoryFree: vramFreeMB ? vramFreeMB * 1024 * 1024 : undefined, // Convert MB to bytes
-            memoryUsed: vramUsedMB ? vramUsedMB * 1024 * 1024 : undefined, // Convert MB to bytes
+            name: modelName || 'Unknown GPU',
+            vendor: controller.vendor || this.getGPUVendor(modelName),
+            memory: vramMB ? vramMB * 1024 * 1024 : undefined,
+            memoryFree: vramFreeMB ? vramFreeMB * 1024 * 1024 : undefined,
+            memoryUsed: vramUsedMB ? vramUsedMB * 1024 * 1024 : undefined,
             driver_version: controller.driverVersion,
             utilizationGpu,
             utilizationMemory,
@@ -812,6 +866,15 @@ export class EncorrNode {
             clockCore,
             clockMemory,
           });
+        }
+      }
+
+      if (process.platform === 'linux') {
+        for (let j = 0; j < lspciAmdGpus.length; j++) {
+          if (!usedLspci.has(j)) {
+            this.logger.info(`[GPU] Added AMD GPU from lspci (not in si.graphics()): ${lspciAmdGpus[j].model}`);
+            gpus.push({ name: lspciAmdGpus[j].model, vendor: lspciAmdGpus[j].vendor });
+          }
         }
       }
 
@@ -835,6 +898,9 @@ export class EncorrNode {
       gpu.vendor?.toLowerCase().includes('amd') || gpu.name?.toLowerCase().includes('amd') ||
       gpu.vendor?.toLowerCase().includes('ati') || gpu.name?.toLowerCase().includes('radeon')
     );
+    const hasIntel = this.systemInfo.gpus.some(gpu =>
+      gpu.vendor?.toLowerCase().includes('intel') || gpu.name?.toLowerCase().includes('intel')
+    );
 
     const methods: string[] = [];
 
@@ -852,10 +918,17 @@ export class EncorrNode {
       }
     }
 
+    if (hasIntel && process.platform === 'linux') {
+      const intelAvailable = await GPUMonitor.isIntelAvailable();
+      if (intelAvailable) {
+        methods.push('sysfs (Intel GPUs)');
+      }
+    }
+
     if (methods.length > 0) {
       this.logger.info(`GPU monitoring enabled using: ${methods.join(', ')}`);
     } else {
-      this.logger.warn('GPU monitoring disabled - no vendor tools available (nvidia-smi or AMD sysfs)');
+      this.logger.warn('GPU monitoring disabled - no vendor tools available (nvidia-smi, AMD sysfs, or Intel sysfs)');
     }
   }
 
@@ -877,35 +950,29 @@ export class EncorrNode {
   private isIntegratedGPU(gpu: any): boolean {
     const name = (gpu.model || gpu.name || '').toLowerCase();
     const vendor = (gpu.vendor || '').toLowerCase();
+    const vramMB = gpu.vram;
 
-    // Intel integrated graphics - ALL Intel GPUs are integrated
     if (vendor.includes('intel')) {
+      if (vramMB && vramMB >= 2048) return false;
       return true;
     }
 
-    // AMD integrated graphics detection
-    // Check for AMD/ATI in vendor OR "advanced" (for "Advanced Micro Devices, Inc.")
     if (vendor.includes('amd') || vendor.includes('ati') || vendor.includes('radeon') || vendor.includes('advanced')) {
-      // Remove special characters like (TM), (R), etc. then normalize whitespace
       const cleanName = name.replace(/[™®©\(tm\)\(r\)\(c\)]/gi, '').replace(/\s+/g, ' ').trim();
 
-      // Pattern 1: Generic "Radeon Graphics" or "AMD Radeon Graphics" (no model number = integrated)
-      // e.g., "AMD Radeon Graphics" or "AMD Radeon(TM) Graphics" -> "AMD Radeon Graphics"
       if (/^(amd\s+)?radeon\s+graphics$/.test(cleanName)) {
         return true;
       }
 
-      // Pattern 2: Very low VRAM (integrated typically < 2GB, discrete typically >= 4GB)
-      // gpu.vram is already in MB from systeminformation
-      const vramMB = gpu.vram;
-      if (vramMB && vramMB < 2048) {
-        return true;
-      }
-
-      // Pattern 3: Contains "integrated" in name
       if (name.includes('integrated')) {
         return true;
       }
+
+      if (vramMB && vramMB < 1024) {
+        return true;
+      }
+
+      return false;
     }
 
     return false;
@@ -926,6 +993,66 @@ export class EncorrNode {
       return 'Apple';
     }
     return 'Unknown';
+  }
+
+  private async detectGPUsViaLspci(): Promise<Array<{ model: string; vendor: string; vram?: number; bus?: string }>> {
+    if (process.platform !== 'linux') return [];
+
+    try {
+      const output = await new Promise<string>((resolve, reject) => {
+        const proc = spawn('lspci', [], { stdio: ['ignore', 'pipe', 'pipe'] });
+        let out = '';
+        proc.stdout.on('data', (d) => { out += d.toString(); });
+        proc.stderr.on('data', () => {});
+        proc.on('close', (code) => (code === 0 ? resolve(out) : reject(new Error(`lspci exited ${code}`))));
+        setTimeout(() => { proc.kill(); reject(new Error('lspci timeout')); }, 3000);
+      });
+
+      const gpus: Array<{ model: string; vendor: string; vram?: number; bus?: string }> = [];
+      const lines = output.split('\n').filter(l => l.trim());
+
+      for (const line of lines) {
+        const busMatch = line.match(/^([\da-f]+:[\da-f]+\.[\da-f]+)/);
+        const clsMatch = line.match(/^[\da-f]+:[\da-f]+\.[\da-f]+\s+(VGA|3D|Display)/i);
+        if (!clsMatch) continue;
+        const cls = clsMatch[1].toLowerCase();
+        if (!cls.includes('vga') && !cls.includes('3d') && !cls.includes('display')) continue;
+
+        if (!line.includes('Advanced Micro Devices')) continue;
+
+        const modelMatch = line.match(/Advanced Micro Devices.*?\[AMD.*?\]\s+(.+?)(?:\s+\(rev\s+\w+\))?$/);
+        const model = modelMatch ? modelMatch[1].trim() : '';
+        const bus = busMatch ? busMatch[1] : '';
+        if (model) {
+          gpus.push({ model, vendor: 'AMD', bus });
+        }
+      }
+
+      for (let i = 0; i < gpus.length; i++) {
+        const vram = await this.readAmdGpuVram(i);
+        if (vram) {
+          gpus[i].vram = vram;
+        }
+      }
+
+      this.logger.info(`[GPU] lspci detected ${gpus.length} AMD GPU(s): ${gpus.map(g => g.model).join(', ')}`);
+      return gpus;
+    } catch (err: any) {
+      this.logger.warn(`[GPU] lspci failed: ${err?.message || err}`);
+      return [];
+    }
+  }
+
+  private async readAmdGpuVram(cardIndex: number): Promise<number | null> {
+    try {
+      const fs = await import('fs').then(m => m.promises);
+      const path = `/sys/class/drm/card${cardIndex}/device/mem_info_vram_total`;
+      const data = await fs.readFile(path, 'utf8');
+      const vram = parseInt(data.trim(), 10);
+      return isNaN(vram) ? null : vram;
+    } catch {
+      return null;
+    }
   }
 
   // ========================================================================

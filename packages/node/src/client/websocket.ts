@@ -8,6 +8,7 @@ import type {
   JobAssignPayload,
   JobCancelPayload,
   FileReplacePayload,
+  VideoMetadata,
 } from '@encorr/shared';
 import {
   createMessage,
@@ -404,18 +405,7 @@ export class WebSocketClient extends EventEmitter {
     }));
   }
 
-  sendJobCompleteWithMetadata(jobId: string, metadata: {
-    container: string;
-    video_codec: string;
-    audio_codecs: string[];
-    subtitle_count: number;
-    duration: number;
-    width: number;
-    height: number;
-    fps: number;
-    bitrate: number;
-    size: number;
-  }, outputPath: string, ffmpeg_logs?: string): void {
+  sendJobCompleteWithMetadata(jobId: string, metadata: VideoMetadata, outputPath: string, ffmpeg_logs?: string): void {
     this.send(createMessage('JOB_COMPLETE', {
       job_id: jobId,
       metadata,

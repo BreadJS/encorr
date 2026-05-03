@@ -27,15 +27,21 @@ export class PresetOptimizer {
    * Analyzes file metadata and returns a comprehensive file analysis.
    */
   analyzeFile(metadata: VideoMetadata, fileSize: number): FileAnalysis {
+    const isAudioOnly = !metadata.video_codec;
+
     // Normalize codec name
-    const codecLower = metadata.video_codec.toLowerCase();
-    let codecFamily: 'h264' | 'h265' | 'other';
-    if (codecLower.includes('264') || codecLower.includes('avc')) {
-      codecFamily = 'h264';
-    } else if (codecLower.includes('265') || codecLower.includes('hevc')) {
-      codecFamily = 'h265';
+    let codecFamily: 'h264' | 'h265' | 'other' | 'audio';
+    if (isAudioOnly) {
+      codecFamily = 'audio';
     } else {
-      codecFamily = 'other';
+      const codecLower = (metadata.video_codec || '').toLowerCase();
+      if (codecLower.includes('264') || codecLower.includes('avc')) {
+        codecFamily = 'h264';
+      } else if (codecLower.includes('265') || codecLower.includes('hevc')) {
+        codecFamily = 'h265';
+      } else {
+        codecFamily = 'other';
+      }
     }
 
     // Categorize file size
@@ -67,7 +73,7 @@ export class PresetOptimizer {
     const hasHdr = bitDepth > 8;
 
     // Get resolution
-    const resolution = `${metadata.width}x${metadata.height}`;
+    const resolution = isAudioOnly ? undefined : `${metadata.width}x${metadata.height}`;
 
     return {
       codec: metadata.video_codec,
@@ -84,6 +90,7 @@ export class PresetOptimizer {
       codecFamily,
       sizeCategory,
       bitrateCategory,
+      audioOnly: isAudioOnly,
     };
   }
 
@@ -117,6 +124,18 @@ export class PresetOptimizer {
     hardwareCaps: HardwareCapabilities,
     mode: TranscodeMode
   ): EncodingStrategy {
+    // Audio only strategy
+    if (analysis.audioOnly) {
+      return {
+        encodingType: 'cpu',
+        gpuType: undefined,
+        targetCodec: undefined,
+        reason: 'Audio-only file detected',
+        forceExplicitDecoder: false,
+        audioOnly: true,
+      };
+    }
+
     // User explicitly chose CPU mode
     if (mode === 'cpu') {
       return {
@@ -165,7 +184,6 @@ export class PresetOptimizer {
     const hasNvidiaGpu = hardwareCaps.nvidia.hasGpu;
     const hasIntelGpu = hardwareCaps.intel.hasGpu;
     const hasAmdGpu = hardwareCaps.amd.hasGpu;
-    const hasAnyGpu = hasNvidiaGpu || hasIntelGpu || hasAmdGpu;
 
     // Primary strategy: Always target H.265 for space reduction
     // Use GPU when available for speed, otherwise use CPU
@@ -213,7 +231,9 @@ export class PresetOptimizer {
    * Determines the target codec based on source codec and encoding type.
    * GPU mode ALWAYS targets H.265 for maximum space savings.
    */
-  private getTargetCodec(analysis: FileAnalysis, encodingType: EncoderType): 'h264' | 'h265' {
+  private getTargetCodec(analysis: FileAnalysis, encodingType: EncoderType): 'h264' | 'h265' | undefined {
+    if (analysis.audioOnly) return undefined;
+
     // GPU mode: ALWAYS use H.265 for space reduction
     // Even if source is H.265, we re-encode to potentially reduce bitrate
     if (encodingType === 'gpu') {
@@ -253,6 +273,16 @@ export class PresetOptimizer {
    * Finds the best preset for a given strategy from available presets.
    */
   private findBestPreset(presets: Preset[], strategy: EncodingStrategy): Preset {
+    // For audio-only files, look for audio presets
+    if (strategy.audioOnly) {
+      const audioPresets = presets.filter(p => p.config.audio_only);
+      const builtinAudio = audioPresets.filter(p => p.is_builtin);
+      if (builtinAudio.length > 0) return builtinAudio[0];
+      if (audioPresets.length > 0) return audioPresets[0];
+      // Fallback to any builtin preset if no audio presets found
+      return presets.find(p => p.is_builtin) || presets[0];
+    }
+
     // Filter presets by encoding type and codec
     const matchingPresets = presets.filter(preset => {
       const config = preset.config;
@@ -305,24 +335,26 @@ export class PresetOptimizer {
     const expectedCompression = this.estimateCompression(analysis, preset);
 
     // Determine CPU usage level
-    const cpuUsage: CpuUsageLevel = strategy.encodingType === 'cpu' ? 'high' : 'low';
+    const cpuUsage: CpuUsageLevel = strategy.audioOnly ? 'low' : (strategy.encodingType === 'cpu' ? 'high' : 'low');
 
     // Determine GPU utilization level
-    const gpuUtilization: GpuUtilizationLevel = strategy.encodingType === 'gpu' ? 'high' : 'none';
+    const gpuUtilization: GpuUtilizationLevel = strategy.audioOnly ? 'none' : (strategy.encodingType === 'gpu' ? 'high' : 'none');
 
     // Determine speed
-    const speed: SpeedLevel = strategy.encodingType === 'gpu' ? 'fast' : 'medium';
+    const speed: SpeedLevel = strategy.audioOnly ? 'fast' : (strategy.encodingType === 'gpu' ? 'fast' : 'medium');
 
     // Build notes
     const notes: string[] = [];
-    if (analysis.hasHdr && preset.config.video_codec === 'h264' && strategy.encodingType === 'gpu') {
-      notes.push('HDR content will be converted to SDR for H.264 GPU encoding');
-    }
-    if (analysis.bitDepth > 8 && preset.config.video_codec === 'h264') {
-      notes.push('10-bit source will be converted to 8-bit for H.264');
-    }
-    if (strategy.forceExplicitDecoder) {
-      notes.push(`Using explicit ${strategy.gpuType} decoder for true GPU pipeline`);
+    if (!strategy.audioOnly) {
+      if (analysis.hasHdr && preset.config.video_codec === 'h264' && strategy.encodingType === 'gpu') {
+        notes.push('HDR content will be converted to SDR for H.264 GPU encoding');
+      }
+      if (analysis.bitDepth > 8 && preset.config.video_codec === 'h264') {
+        notes.push('10-bit source will be converted to 8-bit for H.264');
+      }
+      if (strategy.forceExplicitDecoder) {
+        notes.push(`Using explicit ${strategy.gpuType} decoder for true GPU pipeline`);
+      }
     }
 
     return {
@@ -333,8 +365,8 @@ export class PresetOptimizer {
       gpuUtilization,
       speed,
       details: {
-        sourceCodec: analysis.codec,
-        targetCodec: preset.config.video_codec,
+        sourceCodec: analysis.codec || 'audio',
+        targetCodec: preset.config.audio_only ? (preset.config.audio_encoder || 'audio') : (preset.config.video_codec || 'h265'),
         encodingType: strategy.encodingType,
         gpuType: strategy.gpuType,
         notes,
@@ -347,9 +379,12 @@ export class PresetOptimizer {
    * Now always targets H.265 for space reduction.
    */
   private estimateCompression(analysis: FileAnalysis, preset: Preset): string {
+    if (analysis.audioOnly || preset.config.audio_only) {
+      return 'Audio optimization';
+    }
+
     const sourceBitrate = analysis.bitrate;
     const targetCodec = preset.config.video_codec;
-    const quality = preset.config.quality;
 
     // We always target H.265 for space savings
     let compressionRatio: number;
@@ -491,9 +526,10 @@ interface GpuCapabilities {
 interface EncodingStrategy {
   encodingType: EncoderType;
   gpuType?: GPUVendor;
-  targetCodec: 'h264' | 'h265';
+  targetCodec?: 'h264' | 'h265' | undefined;
   reason: string;
   forceExplicitDecoder: boolean;
+  audioOnly?: boolean;
 }
 
 // ============================================================================

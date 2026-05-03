@@ -328,8 +328,9 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     const { readdirSync, statSync } = require('fs');
     const { join } = require('path');
 
-    // Video file extensions to support (comprehensive list)
+    // Video and audio file extensions to support
     const videoExtensions = new Set([
+      // Video
       '.mp4', '.mpg', '.mpeg', '.mp2', '.m2v', '.m4v', '.mv2',
       '.avi', '.divx', '.xvid', '.mkv', '.webm', '.flv', '.f4v',
       '.swf', '.vob', '.ogv', '.ogg', '.drc', '.gif', '.gifv',
@@ -338,6 +339,9 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       '.3gp', '.3g2', '.f4p', '.f4a', '.f4b', '.wmv', '.mxf',
       '.nsv', '.wtv', '.bik', '.smk', '.mka', '.m3u', '.m3u8',
       '.vro', '.flc', '.fli', '.dvr-ms', '.wtv', '.wmv',
+      // Audio
+      '.flac', '.mp3', '.wav', '.m4a', '.aac', '.wma',
+      '.aiff', '.alac', '.opus',
     ]);
 
     let importedCount = 0;

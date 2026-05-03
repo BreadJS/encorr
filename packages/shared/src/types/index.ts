@@ -159,17 +159,18 @@ export interface VideoFile {
   resolution: string;
   status: FileStatus;
   created_at: number;
+  metadata: VideoMetadata | null;
 }
 
 export interface VideoMetadata {
   container: string;
-  video_codec: string;
+  video_codec?: string; // Optional for audio-only files
   audio_codecs: string[];
   subtitle_count: number;
   duration: number;
-  width: number;
-  height: number;
-  fps: number;
+  width?: number; // Optional for audio-only files
+  height?: number; // Optional for audio-only files
+  fps?: number; // Optional for audio-only files
   bitrate: number;
   size: number;
   bit_depth?: number; // Bit depth (8 for SDR, 10 for HDR)
@@ -286,8 +287,11 @@ export interface QuickSelectPreset {
 }
 
 export interface FFmpegConfig {
+  // Mode settings
+  audio_only?: boolean;
+
   // Video settings
-  video_codec: 'h264' | 'h265';
+  video_codec?: 'h264' | 'h265';
   encoding_type: EncoderType;
   gpu_type?: GPUVendor;
   gpu_device_id?: number;  // Specific GPU device ID to use (for multi-GPU systems)

@@ -457,7 +457,7 @@ export function Jobs() {
                         {/* Node - only show for non-queue tabs */}
                         {activeTab !== 'queue' && (
                           <td className="px-4 py-3">
-                            <span className={`text-gray-300 ${activeTab === 'queue' ? 'text-sm' : 'text-base'}`}>
+                            <span className="text-gray-300 text-sm">
                               {nodeName}
                             </span>
                           </td>

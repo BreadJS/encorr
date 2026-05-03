@@ -43,6 +43,11 @@ const CONTAINERS = [
   { value: 'mkv', label: 'MKV' },
   { value: 'mov', label: 'MOV' },
   { value: 'webm', label: 'WebM' },
+  { value: 'mp3', label: 'MP3' },
+  { value: 'flac', label: 'FLAC' },
+  { value: 'm4a', label: 'M4A' },
+  { value: 'wav', label: 'WAV' },
+  { value: 'ogg', label: 'OGG' },
 ];
 
 const FRAMERATES = [
@@ -75,6 +80,7 @@ const PRESET_SPEEDS = [
 
 // Extended config for form with additional fields
 interface FormPresetConfig {
+  audio_only: boolean;
   video_codec: 'h264' | 'h265';
   encoding_type: 'cpu' | 'gpu';
   gpu_type?: 'nvidia' | 'amd' | 'intel';
@@ -96,6 +102,7 @@ interface FormPresetConfig {
 }
 
 const defaultFormConfig: FormPresetConfig = {
+  audio_only: false,
   video_codec: 'h264',
   encoding_type: 'cpu',
   quality_mode: 'crf',
@@ -115,6 +122,7 @@ const defaultFormConfig: FormPresetConfig = {
 // Helper functions for preset categorization
 function getPresetCategory(preset: any): string {
   const config = preset.config;
+  if (config.audio_only) return 'audio';
   if (config.encoding_type === 'cpu') return 'cpu';
   if (config.encoding_type === 'gpu') {
     if (config.gpu_type === 'nvidia') return 'nvidia';
@@ -255,6 +263,7 @@ export function Presets() {
   const categorizedPresets = useMemo(() => {
     const allPresets = [...BUILTIN_PRESETS, ...(presets || []).filter((p: any) => !p.is_builtin)];
     return {
+      audio: allPresets.filter((p: any) => getPresetCategory(p) === 'audio'),
       cpu: allPresets.filter((p: any) => getPresetCategory(p) === 'cpu' && p.id !== 'builtin-analyze'),
       nvidia: allPresets.filter((p: any) => getPresetCategory(p) === 'nvidia'),
       amd: allPresets.filter((p: any) => getPresetCategory(p) === 'amd'),
@@ -264,7 +273,7 @@ export function Presets() {
 
   // Check if container supports subtitles
   const containerSupportsSubtitles = (format: string) => {
-    return format === 'mkv';
+    return ['mkv', 'mp4', 'mov'].includes(format);
   };
 
   const handleOpenCreate = () => {
@@ -285,12 +294,13 @@ export function Presets() {
     const pConfig = preset.config || defaultConfig;
     setConfig({
       ...defaultFormConfig,
-      video_codec: pConfig.video_codec,
-      encoding_type: pConfig.encoding_type,
+      audio_only: pConfig.audio_only || false,
+      video_codec: pConfig.video_codec || 'h264',
+      encoding_type: pConfig.encoding_type || 'cpu',
       gpu_type: pConfig.gpu_type,
-      quality_mode: pConfig.quality_mode,
+      quality_mode: pConfig.quality_mode || 'crf',
       quality: pConfig.quality,
-      preset: pConfig.preset,
+      preset: pConfig.preset || 'medium',
       format: pConfig.container || 'mkv',
       framerate: 'source',
       resolution: 'source',
@@ -298,7 +308,7 @@ export function Presets() {
       video_encoder: pConfig.video_encoder || 'libx264',
       audio_encoder_label: pConfig.audio_encoder || 'copy',
       audio_bitrate: pConfig.audio_bitrate,
-      subtitles: pConfig.subtitles,
+      subtitles: pConfig.subtitles || 'all',
       max_width: pConfig.max_width,
       max_height: pConfig.max_height,
       deinterlace: pConfig.deinterlace,
@@ -368,7 +378,8 @@ export function Presets() {
     const qualityMode = config.quality_type === 'bitrate' ? 'cq' : config.quality_type;
 
     const presetConfig: PresetConfig = {
-      video_codec: config.video_codec,
+      audio_only: config.audio_only,
+      video_codec: config.audio_only ? undefined : config.video_codec,
       encoding_type: config.encoding_type,
       gpu_type: config.gpu_type,
       quality_mode: qualityMode,
@@ -377,7 +388,7 @@ export function Presets() {
       container: config.format as any,
       audio_encoder: config.audio_encoder_label as any,
       audio_bitrate: config.audio_bitrate,
-      subtitles: config.subtitles,
+      subtitles: config.audio_only ? 'none' : config.subtitles,
       max_width: config.max_width,
       max_height: config.max_height,
       deinterlace: config.deinterlace,
@@ -443,10 +454,10 @@ export function Presets() {
     return (
       presetName.trim() !== '' &&
       config.format !== '' &&
-      config.video_encoder !== '' &&
+      (config.audio_only || config.video_encoder !== '') &&
       config.audio_encoder_label !== '' &&
-      config.resolution !== '' &&
-      config.framerate !== ''
+      (config.audio_only || config.resolution !== '') &&
+      (config.audio_only || config.framerate !== '')
     );
   }, [presetName, config]);
 
@@ -982,6 +993,28 @@ export function Presets() {
           </Card>
         )}
 
+        {/* Audio Presets */}
+        {categorizedPresets.audio.length > 0 && (
+          <Card style={{ backgroundColor: '#252326', border: 'none' }}>
+            <CardContent className="p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Zap className="h-5 w-5 text-green-400" />
+                <h3 className="text-lg font-semibold text-white">Audio-Only Presets</h3>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                {categorizedPresets.audio.map((preset: any) => (
+                  <PresetCard
+                    key={preset.id}
+                    preset={preset}
+                    onEdit={handleOpenEdit}
+                    onDelete={(id) => deleteMutation.mutate(id)}
+                  />
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
         {/* CPU Presets */}
         {categorizedPresets.cpu.length > 0 && (
           <Card style={{ backgroundColor: '#252326', border: 'none' }}>
@@ -1137,13 +1170,52 @@ export function Presets() {
                 </div>
               </div>
 
+              {/* Mode Toggle */}
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-3">
+                  Preset Mode
+                </label>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => updateConfig('audio_only', false)}
+                    className={`flex-1 px-4 py-3 text-sm rounded-lg transition-all flex items-center justify-center gap-2 ${
+                      !config.audio_only
+                        ? 'bg-[#74c69d] text-black font-medium'
+                        : 'text-gray-300 hover:text-white hover:bg-white/5 bg-[#38363a]'
+                    }`}
+                  >
+                    <Film className="h-4 w-4" />
+                    Video + Audio
+                  </button>
+                  <button
+                    onClick={() => {
+                      updateConfig('audio_only', true);
+                      updateConfig('format', 'mp3');
+                      updateConfig('audio_encoder_label', 'libmp3lame');
+                    }}
+                    className={`flex-1 px-4 py-3 text-sm rounded-lg transition-all flex items-center justify-center gap-2 ${
+                      config.audio_only
+                        ? 'bg-[#74c69d] text-black font-medium'
+                        : 'text-gray-300 hover:text-white hover:bg-white/5 bg-[#38363a]'
+                    }`}
+                  >
+                    <Zap className="h-4 w-4" />
+                    Audio Only
+                  </button>
+                </div>
+              </div>
+
               {/* Container */}
               <div>
                 <label className="block text-sm font-medium text-gray-300 mb-3">
                   Container Format <span className="text-red-400">*</span>
                 </label>
                 <div className="grid grid-cols-4 gap-2">
-                  {CONTAINERS.map((container) => (
+                  {CONTAINERS.filter(c => {
+                    const videoContainers = ['mp4', 'mkv', 'mov', 'webm'];
+                    const audioContainers = ['mp3', 'flac', 'm4a', 'wav', 'ogg'];
+                    return config.audio_only ? audioContainers.includes(c.value) : videoContainers.includes(c.value);
+                  }).map((container) => (
                     <button
                       key={container.value}
                       onClick={() => updateConfig('format', container.value)}
@@ -1160,7 +1232,7 @@ export function Presets() {
                     </button>
                   ))}
                 </div>
-                {!containerSupportsSubtitles(config.format) && (
+                {!config.audio_only && !containerSupportsSubtitles(config.format) && (
                   <div className="mt-2 flex items-start gap-2 p-3 rounded-lg" style={{ backgroundColor: '#fff3cd20' }}>
                     <AlertCircle className="h-4 w-4 text-yellow-500 flex-shrink-0 mt-0.5" />
                     <p className="text-sm text-yellow-400">
@@ -1170,147 +1242,176 @@ export function Presets() {
                 )}
               </div>
 
-              {/* Video Encoder */}
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-3">
-                  Video Encoder <span className="text-red-400">*</span>
-                </label>
-                <div className="space-y-3">
-                  {['software', 'hardware'].map((category) => (
-                    <div key={category}>
-                      <div className="text-xs text-gray-500 uppercase mb-2">{category === 'software' ? 'CPU (Software)' : 'GPU (Hardware)'}</div>
-                      <div className="grid grid-cols-2 gap-2">
-                        {VIDEO_ENCODERS.filter(e => e.category === category).map((encoder) => (
-                          <button
-                            key={encoder.value}
-                            onClick={() => handleVideoEncoderChange(encoder.value)}
-                            className={`px-4 py-2.5 text-sm rounded-lg transition-all text-left ${
-                              config.video_encoder === encoder.value
-                                ? 'text-black font-medium'
-                                : 'text-gray-300 hover:text-white'
-                            }`}
-                            style={{
-                              backgroundColor: config.video_encoder === encoder.value ? '#74c69d' : '#38363a'
-                            }}
-                          >
-                            {encoder.label}
-                          </button>
-                        ))}
+              {/* Video Settings (Conditional) */}
+              {!config.audio_only && (
+                <>
+                  {/* Video Encoder */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-3">
+                      Video Encoder <span className="text-red-400">*</span>
+                    </label>
+                    <div className="space-y-3">
+                      {['software', 'hardware'].map((category) => (
+                        <div key={category}>
+                          <div className="text-xs text-gray-500 uppercase mb-2">{category === 'software' ? 'CPU (Software)' : 'GPU (Hardware)'}</div>
+                          <div className="grid grid-cols-2 gap-2">
+                            {VIDEO_ENCODERS.filter(e => e.category === category).map((encoder) => (
+                              <button
+                                key={encoder.value}
+                                onClick={() => handleVideoEncoderChange(encoder.value)}
+                                className={`px-4 py-2.5 text-sm rounded-lg transition-all text-left ${
+                                  config.video_encoder === encoder.value
+                                    ? 'text-black font-medium'
+                                    : 'text-gray-300 hover:text-white'
+                                }`}
+                                style={{
+                                  backgroundColor: config.video_encoder === encoder.value ? '#74c69d' : '#38363a'
+                                }}
+                              >
+                                {encoder.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Quality */}
+                  <div>
+                    <div className="flex items-center justify-between mb-3">
+                      <label className="block text-sm font-medium text-gray-300">
+                        Quality Mode <span className="text-red-400">*</span>
+                      </label>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => handleQualityTypeChange('crf')}
+                          className={`px-3 py-1.5 text-sm rounded-lg transition-all ${
+                            config.quality_type === 'crf' ? 'text-black font-medium' : 'text-gray-400'
+                          }`}
+                          style={{ backgroundColor: config.quality_type === 'crf' ? '#74c69d' : '#38363a' }}
+                        >
+                          RF (Quality)
+                        </button>
+                        <button
+                          onClick={() => handleQualityTypeChange('bitrate')}
+                          className={`px-3 py-1.5 text-sm rounded-lg transition-all ${
+                            config.quality_type === 'bitrate' ? 'text-black font-medium' : 'text-gray-400'
+                          }`}
+                          style={{ backgroundColor: config.quality_type === 'bitrate' ? '#74c69d' : '#38363a' }}
+                        >
+                          Bitrate
+                        </button>
                       </div>
                     </div>
-                  ))}
-                </div>
-              </div>
+                    <div className="flex items-center gap-4">
+                      <input
+                        type="range"
+                        min={config.quality_type === 'crf' ? 0 : 500}
+                        max={config.quality_type === 'crf' ? 51 : 10000}
+                        step={config.quality_type === 'crf' ? 1 : 100}
+                        value={config.quality}
+                        onChange={(e) => updateConfig('quality', parseFloat(e.target.value))}
+                        className="flex-1 h-2 rounded-lg appearance-none cursor-pointer"
+                        style={{ backgroundColor: '#38363a', accentColor: '#74c69d' }}
+                      />
+                      <span className="text-white font-medium w-24 text-right">
+                        {config.quality_type === 'crf' ? `RF ${config.quality}` : `${config.quality} kbps`}
+                      </span>
+                    </div>
+                    <p className="text-sm text-gray-500 mt-2">
+                      {config.quality_type === 'crf'
+                        ? config.quality < 18 ? 'Very high quality, larger file'
+                        : config.quality < 24 ? 'Good quality (recommended)'
+                        : config.quality < 30 ? 'High compression'
+                        : 'Maximum compression, lower quality'
+                        : `${config.quality} kbps average bitrate`}
+                    </p>
+                  </div>
 
-              {/* Quality */}
-              <div>
-                <div className="flex items-center justify-between mb-3">
-                  <label className="block text-sm font-medium text-gray-300">
-                    Quality Mode <span className="text-red-400">*</span>
-                  </label>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => handleQualityTypeChange('crf')}
-                      className={`px-3 py-1.5 text-sm rounded-lg transition-all ${
-                        config.quality_type === 'crf' ? 'text-black font-medium' : 'text-gray-400'
-                      }`}
-                      style={{ backgroundColor: config.quality_type === 'crf' ? '#74c69d' : '#38363a' }}
+                  {/* Resolution */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-3">
+                      Resolution <span className="text-red-400">*</span>
+                    </label>
+                    <div className="grid grid-cols-4 gap-2">
+                      {RESOLUTIONS.map((res) => (
+                        <button
+                          key={res.value}
+                          onClick={() => updateConfig('resolution', res.value)}
+                          className={`px-4 py-2.5 text-sm rounded-lg transition-all ${
+                            config.resolution === res.value
+                              ? 'text-black font-medium'
+                              : 'text-gray-300 hover:text-white'
+                          }`}
+                          style={{
+                            backgroundColor: config.resolution === res.value ? '#74c69d' : '#38363a'
+                          }}
+                        >
+                          {res.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Framerate */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-3">
+                      Framerate <span className="text-red-400">*</span>
+                    </label>
+                    <select
+                      value={config.framerate}
+                      onChange={(e) => updateConfig('framerate', e.target.value)}
+                      className="w-full px-4 py-2.5 rounded-lg text-white focus:outline-none transition-colors"
+                      style={{ backgroundColor: '#38363a', border: '1px solid #38363a' }}
                     >
-                      RF (Quality)
-                    </button>
-                    <button
-                      onClick={() => handleQualityTypeChange('bitrate')}
-                      className={`px-3 py-1.5 text-sm rounded-lg transition-all ${
-                        config.quality_type === 'bitrate' ? 'text-black font-medium' : 'text-gray-400'
-                      }`}
-                      style={{ backgroundColor: config.quality_type === 'bitrate' ? '#74c69d' : '#38363a' }}
+                      {FRAMERATES.map((fr) => (
+                        <option key={fr.value} value={fr.value}>{fr.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                </>
+              )}
+
+              {/* Audio Settings */}
+              <div className="pt-4 border-t border-[#38363a]">
+                <h4 className="text-white font-medium mb-4 flex items-center gap-2">
+                  <Sliders className="h-4 w-4" />
+                  Audio Settings
+                </h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-3">
+                      Audio Encoder <span className="text-red-400">*</span>
+                    </label>
+                    <select
+                      value={config.audio_encoder_label}
+                      onChange={(e) => updateConfig('audio_encoder_label', e.target.value)}
+                      className="w-full px-4 py-2.5 rounded-lg text-white focus:outline-none transition-colors"
+                      style={{ backgroundColor: '#38363a', border: '1px solid #38363a' }}
                     >
-                      Bitrate
-                    </button>
+                      {AUDIO_ENCODERS.map((encoder) => (
+                        <option key={encoder.value} value={encoder.value}>{encoder.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-300 mb-3">
+                      Audio Bitrate (kbps)
+                    </label>
+                    <select
+                      value={config.audio_bitrate}
+                      onChange={(e) => updateConfig('audio_bitrate', parseInt(e.target.value))}
+                      className="w-full px-4 py-2.5 rounded-lg text-white focus:outline-none transition-colors"
+                      style={{ backgroundColor: '#38363a', border: '1px solid #38363a' }}
+                      disabled={config.audio_encoder_label === 'copy'}
+                    >
+                      {[0, 64, 96, 128, 160, 192, 256, 320].map((bitrate) => (
+                        <option key={bitrate} value={bitrate}>{bitrate === 0 ? 'Auto' : `${bitrate} kbps`}</option>
+                      ))}
+                    </select>
                   </div>
                 </div>
-                <div className="flex items-center gap-4">
-                  <input
-                    type="range"
-                    min={config.quality_type === 'crf' ? 0 : 500}
-                    max={config.quality_type === 'crf' ? 51 : 10000}
-                    step={config.quality_type === 'crf' ? 1 : 100}
-                    value={config.quality}
-                    onChange={(e) => updateConfig('quality', parseFloat(e.target.value))}
-                    className="flex-1 h-2 rounded-lg appearance-none cursor-pointer"
-                    style={{ backgroundColor: '#38363a', accentColor: '#74c69d' }}
-                  />
-                  <span className="text-white font-medium w-24 text-right">
-                    {config.quality_type === 'crf' ? `RF ${config.quality}` : `${config.quality} kbps`}
-                  </span>
-                </div>
-                <p className="text-sm text-gray-500 mt-2">
-                  {config.quality_type === 'crf'
-                    ? config.quality < 18 ? 'Very high quality, larger file'
-                    : config.quality < 24 ? 'Good quality (recommended)'
-                    : config.quality < 30 ? 'High compression'
-                    : 'Maximum compression, lower quality'
-                    : `${config.quality} kbps average bitrate`}
-                </p>
-              </div>
-
-              {/* Resolution */}
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-3">
-                  Resolution <span className="text-red-400">*</span>
-                </label>
-                <div className="grid grid-cols-4 gap-2">
-                  {RESOLUTIONS.map((res) => (
-                    <button
-                      key={res.value}
-                      onClick={() => updateConfig('resolution', res.value)}
-                      className={`px-4 py-2.5 text-sm rounded-lg transition-all ${
-                        config.resolution === res.value
-                          ? 'text-black font-medium'
-                          : 'text-gray-300 hover:text-white'
-                      }`}
-                      style={{
-                        backgroundColor: config.resolution === res.value ? '#74c69d' : '#38363a'
-                      }}
-                    >
-                      {res.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Framerate */}
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-3">
-                  Framerate <span className="text-red-400">*</span>
-                </label>
-                <select
-                  value={config.framerate}
-                  onChange={(e) => updateConfig('framerate', e.target.value)}
-                  className="w-full px-4 py-2.5 rounded-lg text-white focus:outline-none transition-colors"
-                  style={{ backgroundColor: '#38363a', border: '1px solid #38363a' }}
-                >
-                  {FRAMERATES.map((fr) => (
-                    <option key={fr.value} value={fr.value}>{fr.label}</option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Audio Encoder */}
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-3">
-                  Audio Encoder <span className="text-red-400">*</span>
-                </label>
-                <select
-                  value={config.audio_encoder_label}
-                  onChange={(e) => updateConfig('audio_encoder_label', e.target.value)}
-                  className="w-full px-4 py-2.5 rounded-lg text-white focus:outline-none transition-colors"
-                  style={{ backgroundColor: '#38363a', border: '1px solid #38363a' }}
-                >
-                  {AUDIO_ENCODERS.map((encoder) => (
-                    <option key={encoder.value} value={encoder.value}>{encoder.label}</option>
-                  ))}
-                </select>
               </div>
 
               {/* Encoder Preset */}
@@ -1345,35 +1446,45 @@ export function Presets() {
                   <span className="text-white font-medium truncate ml-2">{presetName || 'Untitled'}</span>
                 </div>
                 <div className="flex justify-between">
+                  <span className="text-gray-400">Mode</span>
+                  <span className="text-white font-medium">
+                    {config.audio_only ? 'Audio Only' : 'Video + Audio'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
                   <span className="text-gray-400">Container</span>
                   <span className="text-white font-medium">
                     {CONTAINERS.find(c => c.value === config.format)?.label || config.format}
                   </span>
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-400">Video Encoder</span>
-                  <span className="text-white font-medium text-right">
-                    {VIDEO_ENCODERS.find(e => e.value === config.video_encoder)?.label || config.video_encoder}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-400">Quality</span>
-                  <span className="text-white font-medium">
-                    {config.quality_type === 'crf' ? `RF ${config.quality}` : `${config.quality} kbps`}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-400">Resolution</span>
-                  <span className="text-white font-medium">
-                    {RESOLUTIONS.find(r => r.value === config.resolution)?.label || config.resolution}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-400">Framerate</span>
-                  <span className="text-white font-medium">
-                    {FRAMERATES.find(f => f.value === config.framerate)?.label || config.framerate}
-                  </span>
-                </div>
+                {!config.audio_only && (
+                  <>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Video Encoder</span>
+                      <span className="text-white font-medium text-right">
+                        {VIDEO_ENCODERS.find(e => e.value === config.video_encoder)?.label || config.video_encoder}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Quality</span>
+                      <span className="text-white font-medium">
+                        {config.quality_type === 'crf' ? `RF ${config.quality}` : `${config.quality} kbps`}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Resolution</span>
+                      <span className="text-white font-medium">
+                        {RESOLUTIONS.find(r => r.value === config.resolution)?.label || config.resolution}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-400">Framerate</span>
+                      <span className="text-white font-medium">
+                        {FRAMERATES.find(f => f.value === config.framerate)?.label || config.framerate}
+                      </span>
+                    </div>
+                  </>
+                )}
                 <div className="flex justify-between">
                   <span className="text-gray-400">Audio Encoder</span>
                   <span className="text-white font-medium">
@@ -1427,7 +1538,11 @@ function PresetCard({ preset, onEdit, onDelete }: PresetCardProps) {
     >
       <div className="flex items-start justify-between mb-2">
         <div className="flex items-center gap-2 flex-1 min-w-0">
-          <Film className="h-4 w-4 text-gray-400 flex-shrink-0" />
+          {preset.config.audio_only ? (
+            <Zap className="h-4 w-4 text-green-400 flex-shrink-0" />
+          ) : (
+            <Film className="h-4 w-4 text-gray-400 flex-shrink-0" />
+          )}
           <h4 className="text-sm font-medium text-white truncate">{preset.name}</h4>
           {preset.is_builtin && (
             <Lock className="h-3 w-3 text-gray-500 flex-shrink-0" />
@@ -1463,18 +1578,25 @@ function PresetCard({ preset, onEdit, onDelete }: PresetCardProps) {
 
       <div className="flex items-center gap-2 text-xs">
         <span className="px-2 py-0.5 rounded text-white" style={{ backgroundColor: '#38363a' }}>
-          {preset.config.video_codec?.toUpperCase() || 'H264'}
+          {preset.config.audio_only ? preset.config.container?.toUpperCase() : (preset.config.video_codec?.toUpperCase() || 'H264')}
         </span>
-        <span className="text-gray-500">
-          {preset.config.encoding_type === 'gpu' ? 'GPU' : 'CPU'}
-        </span>
-        {preset.config.encoding_type === 'gpu' && preset.config.gpu_type && (
-          <span className="text-gray-500 uppercase">{preset.config.gpu_type}</span>
+        {!preset.config.audio_only && (
+          <>
+            <span className="text-gray-500">
+              {preset.config.encoding_type === 'gpu' ? 'GPU' : 'CPU'}
+            </span>
+            {preset.config.encoding_type === 'gpu' && preset.config.gpu_type && (
+              <span className="text-gray-500 uppercase">{preset.config.gpu_type}</span>
+            )}
+          </>
+        )}
+        {preset.config.audio_only && (
+          <span className="text-gray-500">AUDIO ONLY</span>
         )}
       </div>
 
       <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
-        <span>RF {preset.config.quality}</span>
+        <span>{preset.config.audio_only ? `${preset.config.audio_bitrate ? preset.config.audio_bitrate / 1000 : 'Auto'} kbps` : `RF ${preset.config.quality}`}</span>
         <span>{preset.config.preset}</span>
       </div>
     </div>
