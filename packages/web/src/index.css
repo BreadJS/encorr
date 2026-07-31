@@ -5,3 +5,67 @@
 .tab-content-transition {
   transition: opacity 0.12s ease-out, transform 0.12s ease-out;
 }
+
+/* Nodes uses stable semantic surfaces so a running Tailwind dev session does not
+   fall back to the browser's light input and border defaults after hot reloads. */
+.nodes-page .node-surface {
+  background: #1e1d1f;
+  border-color: #39363a;
+}
+
+.nodes-page .node-inset {
+  background: #181719;
+  border-color: #302e31;
+}
+
+.nodes-page .node-divider {
+  border-color: #302e31;
+}
+
+.nodes-page .node-track {
+  background: #302e31;
+}
+
+.nodes-page .node-icon-tile {
+  background: #282729;
+  border-color: #39363a;
+}
+
+.nodes-page .node-stepper {
+  background: #222123;
+  border-color: #39363a;
+}
+
+.nodes-page .node-stepper-divider {
+  border-color: #39363a;
+}
+
+.nodes-page .node-online-panel {
+  background: #1c2b24;
+  border-color: #365a49;
+}
+
+.nodes-page .node-offline-panel {
+  background: #242326;
+  border-color: #39363a;
+}
+
+.nodes-page .node-action {
+  border-color: #39363a;
+}
+
+.nodes-page .node-filter-shell,
+.nodes-page .node-input,
+.nodes-page .node-code {
+  background: #181719;
+  border-color: #39363a;
+  color-scheme: dark;
+}
+
+.nodes-page .node-input:focus {
+  border-color: #5b7869;
+}
+
+.nodes-page .node-filter-active {
+  background: #302e31;
+}

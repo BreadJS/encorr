@@ -7,6 +7,19 @@ import { FolderPlus, Trash2, RefreshCw, ArrowLeft, ArrowRight, AlertTriangle, Fo
 import { useState, useEffect } from 'react';
 import { useWebSocket } from '@/hooks/useWebSocket';
 
+interface LibraryScanProgress {
+  library_id: string;
+  status: 'starting' | 'scanning' | 'completed' | 'error';
+  imported: number;
+  skipped: number;
+  file_count: number;
+  directories_scanned: number;
+  current_file?: string;
+  message?: string;
+}
+
+const countFormatter = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
+
 export function Library() {
   const queryClient = useQueryClient();
   const [showAddDialog, setShowAddDialog] = useState(false);
@@ -17,12 +30,19 @@ export function Library() {
   const [pathValidationError, setPathValidationError] = useState<string | null>(null);
   const [browseError, setBrowseError] = useState<string | null>(null);
 
-  useWebSocket({ channels: ['jobs'] });
+  useWebSocket({ channels: ['library'] });
 
   const { data: libraries, isLoading } = useQuery({
     queryKey: ['libraries'],
     queryFn: () => api.getLibraries(),
     staleTime: 30000,
+  });
+
+  const { data: libraryScans = {} } = useQuery<Record<string, LibraryScanProgress>>({
+    queryKey: ['library-scans'],
+    queryFn: async () => ({}),
+    initialData: {},
+    staleTime: Infinity,
   });
 
   const { data: drivesInfo } = useQuery({
@@ -68,9 +88,40 @@ export function Library() {
 
   const importMutation = useMutation({
     mutationFn: (libraryId: string) => api.importLibrary(libraryId),
+    onMutate: (libraryId) => {
+      const library = libraries?.find((item: any) => item.id === libraryId);
+      queryClient.setQueryData<Record<string, LibraryScanProgress>>(['library-scans'], (current = {}) => ({
+        ...current,
+        [libraryId]: {
+          library_id: libraryId,
+          status: 'starting',
+          imported: 0,
+          skipped: 0,
+          file_count: library?.file_count || 0,
+          directories_scanned: 0,
+          message: 'Starting scan…',
+        },
+      }));
+    },
     onSuccess: (_, libraryId) => {
       queryClient.invalidateQueries({ queryKey: ['libraries'] });
       queryClient.invalidateQueries({ queryKey: ['library-files', libraryId] });
+    },
+    onError: (error, libraryId) => {
+      queryClient.setQueryData<Record<string, LibraryScanProgress>>(['library-scans'], (current = {}) => ({
+        ...current,
+        [libraryId]: {
+          ...(current[libraryId] || {
+            library_id: libraryId,
+            imported: 0,
+            skipped: 0,
+            file_count: 0,
+            directories_scanned: 0,
+          }),
+          status: 'error',
+          message: error instanceof Error ? error.message : 'Scan failed',
+        },
+      }));
     },
   });
 
@@ -175,7 +226,9 @@ export function Library() {
           <div className="rounded-lg px-3 py-2" style={{ backgroundColor: '#252326' }}>
             <p className="text-xs text-gray-500">Total Files</p>
             <p className="text-lg font-bold text-white">
-              {libraries.reduce((sum: number, lib: any) => sum + (lib.file_count || 0), 0)}
+              {countFormatter.format(
+                libraries.reduce((sum: number, lib: any) => sum + (lib.file_count || 0), 0),
+              )}
             </p>
           </div>
         </div>
@@ -371,53 +424,94 @@ export function Library() {
         </div>
       ) : (
         <div className="space-y-2">
-          {libraries?.map((lib: any) => (
-            <div
-              key={lib.id}
-              className="rounded-lg px-3 py-2.5 transition-colors hover:bg-white/[0.02]"
-              style={{ backgroundColor: '#252326' }}
-            >
-              <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg flex-shrink-0" style={{ backgroundColor: '#38363a' }}>
-                  <FolderOpen className="h-4 w-4" style={{ color: '#74c69d' }} />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <h3 className="text-white font-medium truncate">{lib.name}</h3>
-                  <p className="text-xs text-gray-500 truncate">{lib.path}</p>
-                </div>
-                <span className="text-xs text-gray-500 shrink-0">{lib.file_count || 0} files</span>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => importMutation.mutate(lib.id)}
-                    disabled={importMutation.isPending}
-                    style={{ borderColor: '#38363a', color: '#74c69d' }}
-                    className="hover:bg-green-900/20"
-                    title="Scan library for files"
+          {libraries?.map((lib: any) => {
+            const progress = libraryScans[lib.id];
+            const scanning = progress?.status === 'starting' || progress?.status === 'scanning';
+            const liveFileCount = progress?.file_count ?? lib.file_count ?? 0;
+
+            return (
+              <div
+                key={lib.id}
+                className="rounded-lg px-3 py-2.5 transition-colors hover:bg-white/[0.02]"
+                style={{ backgroundColor: '#252326' }}
+              >
+                <div className="flex items-center gap-3">
+                  <div
+                    className={`p-2 flex-shrink-0 ${scanning ? 'rounded-full' : 'rounded-lg'}`}
+                    style={{ backgroundColor: '#38363a' }}
                   >
-                    <RefreshCw className={`h-3.5 w-3.5 ${importMutation.isPending && importMutation.variables === lib.id ? 'animate-spin' : ''}`} />
-                    <span className="ml-1.5 text-xs">Scan</span>
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      if (confirm(`Delete library "${lib.name}"?`)) {
-                        deleteMutation.mutate(lib.id);
-                      }
-                    }}
-                    disabled={deleteMutation.isPending}
-                    style={{ borderColor: '#38363a', color: '#ef4444' }}
-                    className="hover:bg-red-900/20"
-                    title="Delete library"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </Button>
+                    {scanning ? (
+                      <RefreshCw className="h-4 w-4 animate-spin" style={{ color: '#74c69d' }} />
+                    ) : (
+                      <FolderOpen className="h-4 w-4" style={{ color: '#74c69d' }} />
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <h3 className="text-white font-medium truncate">{lib.name}</h3>
+                    <p className="text-xs text-gray-500 truncate">{lib.path}</p>
+                  </div>
+                  <span className="text-xs text-gray-400 shrink-0 tabular-nums">
+                    {countFormatter.format(liveFileCount)} files
+                  </span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => importMutation.mutate(lib.id)}
+                      disabled={scanning}
+                      style={{ borderColor: '#38363a', color: '#74c69d' }}
+                      className="hover:bg-green-900/20 min-w-20"
+                      title="Scan library for files"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${scanning ? 'animate-spin' : ''}`} />
+                      <span className="ml-1.5 text-xs">
+                        {scanning ? countFormatter.format(progress.imported) : 'Scan'}
+                      </span>
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        if (confirm(`Delete library "${lib.name}"?`)) {
+                          deleteMutation.mutate(lib.id);
+                        }
+                      }}
+                      disabled={deleteMutation.isPending || scanning}
+                      style={{ borderColor: '#38363a', color: '#ef4444' }}
+                      className="hover:bg-red-900/20"
+                      title="Delete library"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
                 </div>
+
+                {scanning && (
+                  <div className="mt-2.5 border-t border-[#38363a] pt-2.5">
+                    <div className="mb-2 flex items-center justify-between gap-4 text-xs">
+                      <span className="min-w-0 truncate text-gray-400">
+                        {progress.current_file ? `Found ${progress.current_file}` : 'Scanning folders…'}
+                      </span>
+                      <span className="shrink-0 tabular-nums text-gray-500">
+                        {countFormatter.format(progress.imported)} found ·{' '}
+                        {countFormatter.format(progress.directories_scanned)} folders
+                      </span>
+                    </div>
+                    <div className="h-1 overflow-hidden rounded-full bg-[#38363a]">
+                      <div className="h-full w-1/3 animate-pulse rounded-full bg-[#74c69d]" />
+                    </div>
+                  </div>
+                )}
+
+                {progress?.status === 'error' && (
+                  <div className="mt-2.5 flex items-center gap-2 border-t border-red-900/40 pt-2.5 text-xs text-red-400">
+                    <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                    <span className="truncate">{progress.message || 'Scan failed'}</span>
+                  </div>
+                )}
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

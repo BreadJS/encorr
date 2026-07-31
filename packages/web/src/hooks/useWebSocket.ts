@@ -10,7 +10,7 @@ interface WebSocketMessage {
 
 interface UseWebSocketOptions {
   url?: string;
-  channels?: ('nodes' | 'jobs')[];
+  channels?: ('nodes' | 'jobs' | 'library')[];
   enabled?: boolean;
 }
 
@@ -43,7 +43,7 @@ function connectWebSocket(url: string, queryClient: ReturnType<typeof useQueryCl
       // Subscribe to all channels
       const subscribeMessage: WebSocketMessage = {
         type: 'WEB_SUBSCRIBE',
-        payload: { channels: ['nodes', 'jobs'] },
+        payload: { channels: ['nodes', 'jobs', 'library'] },
       };
       sharedWebSocket?.send(JSON.stringify(subscribeMessage));
     };
@@ -65,6 +65,23 @@ function connectWebSocket(url: string, queryClient: ReturnType<typeof useQueryCl
             queryClient.invalidateQueries({ queryKey: ['library-files'] });
             queryClient.invalidateQueries({ queryKey: ['files'] });
             break;
+
+          case 'WEB_LIBRARY_SCAN_UPDATE': {
+            const progress = message.payload;
+            queryClient.setQueryData(['library-scans'], (current: Record<string, any> = {}) => ({
+              ...current,
+              [progress.library_id]: progress,
+            }));
+            queryClient.setQueryData(['libraries'], (current: any[] | undefined) =>
+              current?.map(library => library.id === progress.library_id
+                ? { ...library, file_count: progress.file_count }
+                : library),
+            );
+            if (progress.status === 'completed') {
+              queryClient.invalidateQueries({ queryKey: ['library-files', progress.library_id] });
+            }
+            break;
+          }
 
           case 'ACK':
             console.debug('[WebSocket] ACK:', message.payload);
@@ -135,7 +152,11 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
 
     // Create a callback for this subscriber
     const callback = (message: WebSocketMessage) => {
-      if (message.type === 'WEB_NODES_UPDATE' || message.type === 'WEB_JOBS_UPDATE') {
+      if (
+        message.type === 'WEB_NODES_UPDATE'
+        || message.type === 'WEB_JOBS_UPDATE'
+        || message.type === 'WEB_LIBRARY_SCAN_UPDATE'
+      ) {
         setIsConnected(true);
       }
     };

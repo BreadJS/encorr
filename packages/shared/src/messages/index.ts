@@ -38,6 +38,7 @@ export const MessageType = {
   // Server -> Web Client
   WEB_NODES_UPDATE: 'WEB_NODES_UPDATE',
   WEB_JOBS_UPDATE: 'WEB_JOBS_UPDATE',
+  WEB_LIBRARY_SCAN_UPDATE: 'WEB_LIBRARY_SCAN_UPDATE',
 
   // Web Client -> Server
   WEB_SUBSCRIBE: 'WEB_SUBSCRIBE',
@@ -365,7 +366,7 @@ export type FileReplaceResultPayload = z.infer<typeof FileReplaceResultPayloadSc
 
 // WEB_SUBSCRIBE: Web client subscribes to updates
 export const WebSubscribePayloadSchema = z.object({
-  channels: z.array(z.enum(['nodes', 'jobs'])).optional(),
+  channels: z.array(z.enum(['nodes', 'jobs', 'library'])).optional(),
 });
 
 export type WebSubscribePayload = z.infer<typeof WebSubscribePayloadSchema>;
@@ -383,6 +384,20 @@ export const WebJobsUpdatePayloadSchema = z.object({
 });
 
 export type WebJobsUpdatePayload = z.infer<typeof WebJobsUpdatePayloadSchema>;
+
+// WEB_LIBRARY_SCAN_UPDATE: Server streams library scan progress to web clients
+export const WebLibraryScanUpdatePayloadSchema = z.object({
+  library_id: z.string(),
+  status: z.enum(['starting', 'scanning', 'completed', 'error']),
+  imported: z.number().int().min(0),
+  skipped: z.number().int().min(0),
+  file_count: z.number().int().min(0),
+  directories_scanned: z.number().int().min(0),
+  current_file: z.string().optional(),
+  message: z.string().optional(),
+});
+
+export type WebLibraryScanUpdatePayload = z.infer<typeof WebLibraryScanUpdatePayloadSchema>;
 
 // ============================================================================
 // Typed Message Constructors
@@ -420,6 +435,7 @@ export type NodeToServerMessage =
 export type ServerToWebClientMessage =
   | Message<WebNodesUpdatePayload>
   | Message<WebJobsUpdatePayload>
+  | Message<WebLibraryScanUpdatePayload>
   | Message<AckPayload>
   | Message<ErrorPayload>;
 
@@ -485,6 +501,7 @@ export const MessagePayloadValidators = {
   [MessageType.WEB_SUBSCRIBE]: WebSubscribePayloadSchema,
   [MessageType.WEB_NODES_UPDATE]: WebNodesUpdatePayloadSchema,
   [MessageType.WEB_JOBS_UPDATE]: WebJobsUpdatePayloadSchema,
+  [MessageType.WEB_LIBRARY_SCAN_UPDATE]: WebLibraryScanUpdatePayloadSchema,
 } as const;
 
 export function validateMessagePayload(

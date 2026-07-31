@@ -1,4 +1,5 @@
 import { Link, useLocation } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import { clsx } from 'clsx';
 import { useState, useEffect } from 'react';
 import {
@@ -12,8 +13,10 @@ import {
   Folder,
   ChevronLeft,
   ChevronRight,
+  RefreshCw,
 } from 'lucide-react';
 import logo from '@/assets/logo.png';
+import { useWebSocket } from '@/hooks/useWebSocket';
 
 const navItems = [
   { path: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -35,6 +38,18 @@ interface LayoutProps {
 
 export function Layout({ children }: LayoutProps) {
   const location = useLocation();
+  useWebSocket({ channels: ['library'] });
+
+  const { data: libraryScans = {} } = useQuery<Record<string, { status: string }>>({
+    queryKey: ['library-scans'],
+    queryFn: async () => ({}),
+    initialData: {},
+    staleTime: Infinity,
+  });
+  const isLibraryScanning = Object.values(libraryScans).some(
+    scan => scan.status === 'starting' || scan.status === 'scanning',
+  );
+
   const [isCollapsed, setIsCollapsed] = useState(() => {
     // Load from localStorage on mount
     const saved = localStorage.getItem('sidebar-collapsed');
@@ -89,6 +104,7 @@ export function Layout({ children }: LayoutProps) {
           {navItems.map((item) => {
             const Icon = item.icon;
             const isActive = location.pathname === item.path;
+            const showScanSpinner = item.path === '/library' && isLibraryScanning;
 
             return (
               <Link
@@ -101,18 +117,32 @@ export function Layout({ children }: LayoutProps) {
                     : 'text-gray-400 hover:bg-primary/20'
                 )}
                 style={isActive ? { backgroundColor: '#74c69d' } : {}}
-                title={isCollapsed ? item.label : undefined}
+                title={isCollapsed ? `${item.label}${showScanSpinner ? ' (scanning)' : ''}` : undefined}
               >
                 <Icon className="h-4 w-4 flex-shrink-0" />
                 {!isCollapsed && (
-                  <span className="transition-opacity duration-200 whitespace-nowrap">
-                    {item.label}
-                  </span>
+                  <>
+                    <span className="transition-opacity duration-200 whitespace-nowrap">
+                      {item.label}
+                    </span>
+                    {showScanSpinner && (
+                      <RefreshCw
+                        className="ml-auto h-3.5 w-3.5 flex-shrink-0 animate-spin"
+                        aria-label="Library scan in progress"
+                      />
+                    )}
+                  </>
+                )}
+                {isCollapsed && showScanSpinner && (
+                  <RefreshCw
+                    className="absolute right-1 top-1 h-2.5 w-2.5 animate-spin"
+                    aria-label="Library scan in progress"
+                  />
                 )}
                 {/* Tooltip when collapsed */}
                 {isCollapsed && (
                   <div className="absolute left-full ml-2 px-2 py-1 bg-gray-800 text-white text-xs rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap z-50">
-                    {item.label}
+                    {item.label}{showScanSpinner ? ' · Scanning' : ''}
                   </div>
                 )}
               </Link>

@@ -16,6 +16,7 @@ import type {
   UsageUpdatePayload,
   FileReplacePayload,
   AckPayload,
+  WebLibraryScanUpdatePayload,
 } from '@encorr/shared';
 import {
   createMessage,
@@ -57,7 +58,7 @@ interface NodeConnection {
 
 interface WebClientConnection {
   ws: WebSocket;
-  subscriptions: Set<'nodes' | 'jobs'>;
+  subscriptions: Set<'nodes' | 'jobs' | 'library'>;
   lastHeartbeat: number;
 }
 
@@ -94,6 +95,7 @@ export class EncorrWebSocketServer {
   private connections: Map<WebSocket, NodeConnection> = new Map();
   private connectionsByNodeId: Map<string, NodeConnection> = new Map();
   private webClients: Map<WebSocket, WebClientConnection> = new Map();
+  private activeLibraryScans: Map<string, WebLibraryScanUpdatePayload> = new Map();
   private db: EncorrDatabase;
   private logger: Logger;
   private eventHandlers: Partial<WebSocketServerEvents> = {};
@@ -1095,7 +1097,7 @@ export class EncorrWebSocketServer {
   }
 
   private handleWebSubscribe(ws: WebSocket, message: any): void {
-    const payload = message.payload as { channels?: ('nodes' | 'jobs')[] };
+    const payload = message.payload as { channels?: ('nodes' | 'jobs' | 'library')[] };
     const channels = payload.channels || ['nodes', 'jobs'];
 
     // Move connection from node connections to web clients
@@ -1120,6 +1122,9 @@ export class EncorrWebSocketServer {
       if (channels.includes('jobs')) {
         this.sendJobsUpdate(ws);
       }
+      if (channels.includes('library')) {
+        this.sendActiveLibraryScans(ws);
+      }
 
       this.sendMessage(ws, createAckMessage(message.id!, true, 'Subscribed'));
     } else if (!nodeConn) {
@@ -1128,6 +1133,9 @@ export class EncorrWebSocketServer {
       if (webClient) {
         channels.forEach(ch => webClient.subscriptions.add(ch));
         this.logger.info(`Web client updated subscriptions: ${Array.from(webClient.subscriptions).join(', ')}`);
+        if (channels.includes('library')) {
+          this.sendActiveLibraryScans(ws);
+        }
         this.sendMessage(ws, createAckMessage(message.id!, true, 'Subscriptions updated'));
       }
     }
@@ -1143,6 +1151,12 @@ export class EncorrWebSocketServer {
     const jobs = this.getEnrichedJobs();
     const message = createMessage(MessageType.WEB_JOBS_UPDATE, { jobs });
     this.sendMessage(ws, message);
+  }
+
+  private sendActiveLibraryScans(ws: WebSocket): void {
+    for (const progress of this.activeLibraryScans.values()) {
+      this.sendMessage(ws, createMessage(MessageType.WEB_LIBRARY_SCAN_UPDATE, progress));
+    }
   }
 
   // Helper to enrich jobs with file, preset, and node info
@@ -1228,6 +1242,24 @@ export class EncorrWebSocketServer {
       if (client.subscriptions.has('jobs') && ws.readyState === WebSocket.OPEN) {
         this.sendMessage(ws, message);
       }
+    }
+  }
+
+  public broadcastLibraryScanUpdate(payload: WebLibraryScanUpdatePayload): void {
+    if (payload.status === 'starting' || payload.status === 'scanning') {
+      this.activeLibraryScans.set(payload.library_id, payload);
+    }
+
+    const message = createMessage(MessageType.WEB_LIBRARY_SCAN_UPDATE, payload);
+
+    for (const [ws, client] of this.webClients) {
+      if (client.subscriptions.has('library') && ws.readyState === WebSocket.OPEN) {
+        this.sendMessage(ws, message);
+      }
+    }
+
+    if (payload.status === 'completed' || payload.status === 'error') {
+      this.activeLibraryScans.delete(payload.library_id);
     }
   }
 

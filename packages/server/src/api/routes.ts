@@ -1,4 +1,6 @@
 import { FastifyInstance } from 'fastify';
+import { readdir, stat } from 'fs/promises';
+import { join } from 'path';
 import type { EncorrDatabase } from '../database';
 import type { EncorrWebSocketServer } from '../websocket/server';
 import type { Logger } from 'winston';
@@ -235,6 +237,8 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
   // Libraries
   // ========================================================================
 
+  const activeLibraryScans = new Set<string>();
+
   // Get all libraries
   fastify.get('/libraries', async (request, reply) => {
     const libraries = db.getAllLibraries();
@@ -325,8 +329,10 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       return sendError('Library not found');
     }
 
-    const { readdirSync, statSync } = require('fs');
-    const { join } = require('path');
+    if (activeLibraryScans.has(id)) {
+      reply.status(409);
+      return sendError('This library is already being scanned');
+    }
 
     // Video file extensions to support (comprehensive list)
     const videoExtensions = new Set([
@@ -342,61 +348,104 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
 
     let importedCount = 0;
     let skippedCount = 0;
+    let directoriesScanned = 0;
+    let lastBroadcast = 0;
 
-    function scanDirectory(dirPath: string, baseDir: string) {
-      try {
-        const entries = readdirSync(dirPath, { withFileTypes: true });
+    const publishProgress = (
+      status: 'starting' | 'scanning' | 'completed' | 'error',
+      currentFile?: string,
+      message?: string,
+    ) => {
+      wsServer.broadcastLibraryScanUpdate({
+        library_id: id,
+        status,
+        imported: importedCount,
+        skipped: skippedCount,
+        file_count: db.getLibraryFiles(id).length,
+        directories_scanned: directoriesScanned,
+        current_file: currentFile,
+        message,
+      });
+      lastBroadcast = Date.now();
+    };
+
+    activeLibraryScans.add(id);
+    publishProgress('starting', undefined, `Scanning ${library.name}`);
+
+    try {
+      const pendingDirectories = [library.path];
+
+      while (pendingDirectories.length > 0) {
+        const directory = pendingDirectories.pop()!;
+        let entries: any[];
+
+        try {
+          entries = await readdir(directory, { withFileTypes: true });
+          directoriesScanned++;
+        } catch (error) {
+          if (directory === library.path) throw error;
+          skippedCount++;
+          logger.warn(`Failed to scan directory ${directory}:`, error);
+          continue;
+        }
 
         for (const entry of entries) {
-          const fullPath = join(dirPath, entry.name);
+          const fullPath = join(directory, entry.name);
 
           if (entry.isDirectory()) {
-            if (recursive) {
-              scanDirectory(fullPath, baseDir);
-            }
-          } else if (entry.isFile()) {
-            const ext = '.' + entry.name.split('.').pop()?.toLowerCase();
+            if (recursive) pendingDirectories.push(fullPath);
+            continue;
+          }
 
-            if (videoExtensions.has(ext)) {
-              try {
-                const stats = statSync(fullPath);
+          if (!entry.isFile()) continue;
+          const extensionIndex = entry.name.lastIndexOf('.');
+          const ext = extensionIndex >= 0 ? entry.name.slice(extensionIndex).toLowerCase() : '';
+          if (!videoExtensions.has(ext)) continue;
 
-                db.upsertLibraryFile({
-                  library_id: id,
-                  filename: entry.name,
-                  filepath: fullPath,
-                  filesize: stats.size,
-                  format: ext.substring(1), // Remove the dot
-                });
+          try {
+            const stats = await stat(fullPath);
+            db.upsertLibraryFile({
+              library_id: id,
+              filename: entry.name,
+              filepath: fullPath,
+              filesize: stats.size,
+              format: ext.substring(1),
+            });
+            importedCount++;
+          } catch (error) {
+            skippedCount++;
+            logger.warn(`Failed to import file ${entry.name}:`, error);
+          }
 
-                importedCount++;
-              } catch (err) {
-                skippedCount++;
-                logger.warn(`Failed to import file ${entry.name}:`, err);
-              }
-            }
+          if (importedCount % 10 === 0 || Date.now() - lastBroadcast >= 150) {
+            publishProgress('scanning', entry.name);
           }
         }
-      } catch (err) {
-        logger.warn(`Failed to scan directory ${dirPath}:`, err);
+
+        publishProgress('scanning');
+        await new Promise<void>(resolve => setImmediate(resolve));
       }
+
+      const message = `Imported ${importedCount} file${importedCount !== 1 ? 's' : ''}`;
+      publishProgress('completed', undefined, message);
+      logger.info(`Library import completed: ${importedCount} imported, ${skippedCount} skipped`);
+      db.logActivity({
+        level: 'info',
+        category: 'file',
+        message: `Library "${library.name}" import completed: ${importedCount} files`,
+        metadata: { library_id: id, imported_count: importedCount, skipped_count: skippedCount },
+      });
+
+      return sendSuccess({ imported: importedCount, skipped: skippedCount, message });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Library scan failed';
+      publishProgress('error', undefined, message);
+      logger.error(`Library import failed for ${library.name}:`, error);
+      reply.status(500);
+      return sendError(message);
+    } finally {
+      activeLibraryScans.delete(id);
     }
-
-    scanDirectory(library.path, library.path);
-
-    logger.info(`Library import completed: ${importedCount} imported, ${skippedCount} skipped`);
-    db.logActivity({
-      level: 'info',
-      category: 'file',
-      message: `Library "${library.name}" import completed: ${importedCount} files`,
-      metadata: { library_id: id, imported_count: importedCount, skipped_count: skippedCount },
-    });
-
-    return sendSuccess({
-      imported: importedCount,
-      skipped: skippedCount,
-      message: `Imported ${importedCount} file${importedCount !== 1 ? 's' : ''}`,
-    });
   });
 
   // Get library files
