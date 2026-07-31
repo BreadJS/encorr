@@ -433,7 +433,7 @@ export function Presets() {
       preset: config.preset,
       container: config.format as any,
       audio_encoder: config.audio_encoder_label as any,
-      audio_bitrate: config.audio_bitrate,
+      audio_bitrate: config.audio_encoder_label === 'copy' ? 0 : config.audio_bitrate,
       subtitles: config.subtitles,
       max_width: config.max_width,
       max_height: config.max_height,
@@ -467,6 +467,24 @@ export function Presets() {
     } else {
       updateConfig('quality', 2000); // Bitrate default in kbps
     }
+  };
+
+  const handleResolutionChange = (resolution: string) => {
+    const dimensions: Record<string, { max_width?: number; max_height?: number }> = {
+      source: {},
+      '2160': { max_width: 3840, max_height: 2160 },
+      '1080': { max_width: 1920, max_height: 1080 },
+      '720': { max_width: 1280, max_height: 720 },
+      '480': { max_width: 854, max_height: 480 },
+      '360': { max_width: 640, max_height: 360 },
+    };
+    const selectedDimensions = dimensions[resolution] || {};
+    setConfig(previous => ({
+      ...previous,
+      resolution,
+      max_width: selectedDimensions.max_width,
+      max_height: selectedDimensions.max_height,
+    }));
   };
 
   // Handle video encoder change
@@ -1117,338 +1135,87 @@ export function Presets() {
 
   // Create/Edit View
   return (
-    <div className="space-y-6">
-      <div className="flex items-center gap-4">
-        <Button
-          onClick={handleBack}
-          style={{ borderColor: '#38363a', color: '#ffffff' }}
-          className="hover:bg-gray-800"
-        >
-          <ArrowLeft className="mr-2 h-4 w-4" />
-          Back
+    <div className="mx-auto max-w-[1500px] space-y-5 pb-10">
+      <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+        <div className="flex items-start gap-3">
+          <button onClick={handleBack} className="mt-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#39363a] bg-[#282729] text-gray-400" aria-label="Back to presets"><ArrowLeft className="h-4 w-4" /></button>
+          <div>
+            <div className="mb-1.5 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-[#74c69d]"><Sliders className="h-3.5 w-3.5" />Preset editor</div>
+            <h1 className="text-3xl font-semibold tracking-tight text-white">{view === 'edit' ? 'Edit preset' : 'Create preset'}</h1>
+            <p className="mt-1 text-sm text-gray-400">Configure the output, encoder, quality, and media handling.</p>
+          </div>
+        </div>
+        <Button onClick={handleSave} disabled={!isFormValid || createMutation.isPending || updateMutation.isPending} style={{ backgroundColor: '#74c69d', color: '#1a1a1a', border: 'none' }} className="disabled:opacity-50">
+          {createMutation.isPending || updateMutation.isPending ? 'Saving…' : view === 'edit' ? 'Save changes' : 'Create preset'}
         </Button>
-        <div className="flex-1">
-          <h1 className="text-3xl font-bold text-white">
-            {view === 'edit' ? 'Edit Preset' : 'Create Preset'}
-          </h1>
-          <p className="text-gray-400">
-            {view === 'edit' ? 'Modify existing preset configuration' : 'Create a new transcoding preset'}
-          </p>
-        </div>
-        <Button
-          onClick={handleSave}
-          disabled={!isFormValid || createMutation.isPending || updateMutation.isPending}
-          style={{ backgroundColor: '#74c69d', color: '#1a1a1a', border: 'none' }}
-          className="hover:opacity-90 disabled:opacity-50"
-        >
-          {view === 'edit' ? 'Save Changes' : 'Create Preset'}
-        </Button>
-      </div>
+      </header>
 
-      <div className="grid lg:grid-cols-3 gap-6">
-        {/* Main Form */}
-        <div className="lg:col-span-2 space-y-6">
-          <Card style={{ backgroundColor: '#252326', border: 'none' }}>
-            <CardContent className="p-6 space-y-6">
-              {/* Name and Description */}
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">
-                    Preset Name <span className="text-red-400">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={presetName}
-                    onChange={(e) => setPresetName(e.target.value)}
-                    placeholder="e.g., My Custom Preset"
-                    className="w-full px-4 py-2.5 rounded-lg text-white placeholder-gray-500 focus:outline-none transition-colors"
-                    style={{ backgroundColor: '#38363a', border: '1px solid #38363a' }}
-                    disabled={editingPreset?.is_builtin}
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">Description</label>
-                  <textarea
-                    value={presetDescription}
-                    onChange={(e) => setPresetDescription(e.target.value)}
-                    placeholder="Describe what this preset is best for..."
-                    rows={2}
-                    className="w-full px-4 py-2.5 rounded-lg text-white placeholder-gray-500 focus:outline-none transition-colors resize-none"
-                    style={{ backgroundColor: '#38363a', border: '1px solid #38363a' }}
-                  />
-                </div>
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
+        <div className="space-y-5">
+          <section className="overflow-hidden rounded-2xl border border-[#39363a] bg-[#282729]">
+            <div className="flex items-center gap-3 border-b border-[#39363a] px-5 py-4"><div className="rounded-xl bg-[#74c69d]/10 p-2.5 text-[#74c69d]"><Film className="h-5 w-5" /></div><div><h2 className="font-semibold text-white">Identity & output</h2><p className="mt-0.5 text-xs text-gray-500">Name this profile and choose its output container.</p></div></div>
+            <div className="space-y-5 p-5">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div><label className="mb-2 block text-xs font-medium text-gray-300">Preset name <span className="text-red-400">*</span></label><input type="text" value={presetName} onChange={event => setPresetName(event.target.value)} placeholder="e.g. Archive H.265" className="h-11 w-full rounded-xl border border-[#39363a] bg-[#1e1d1f] px-3.5 text-sm text-white outline-none placeholder:text-gray-600 focus:border-[#74c69d]/60" disabled={editingPreset?.is_builtin} /></div>
+                <div><label className="mb-2 block text-xs font-medium text-gray-300">Description</label><input type="text" value={presetDescription} onChange={event => setPresetDescription(event.target.value)} placeholder="What is this profile best for?" className="h-11 w-full rounded-xl border border-[#39363a] bg-[#1e1d1f] px-3.5 text-sm text-white outline-none placeholder:text-gray-600 focus:border-[#74c69d]/60" /></div>
+              </div>
+              <div><label className="mb-2 block text-xs font-medium text-gray-300">Container format <span className="text-red-400">*</span></label><div className="grid grid-cols-2 gap-2 sm:grid-cols-4">{CONTAINERS.map(container => <button key={container.value} onClick={() => updateConfig('format', container.value)} className={`rounded-xl border px-4 py-2.5 text-sm font-medium ${config.format === container.value ? 'border-[#74c69d] bg-[#74c69d] text-[#1e1d1f]' : 'border-[#39363a] bg-[#222123] text-gray-400'}`}>{container.label}</button>)}</div></div>
+              {!containerSupportsSubtitles(config.format) && <div className="flex items-start gap-2.5 rounded-xl border border-amber-500/20 bg-amber-500/[0.07] p-3 text-xs leading-5 text-amber-300"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />{config.format.toUpperCase()} does not support embedded subtitles in Encorr. Subtitle tracks will be omitted.</div>}
+            </div>
+          </section>
+
+          <section className="overflow-hidden rounded-2xl border border-[#39363a] bg-[#282729]">
+            <div className="flex items-center justify-between border-b border-[#39363a] px-5 py-4"><div className="flex items-center gap-3"><div className="rounded-xl bg-[#60a5fa]/10 p-2.5 text-[#60a5fa]"><Monitor className="h-5 w-5" /></div><div><h2 className="font-semibold text-white">Video encoding</h2><p className="mt-0.5 text-xs text-gray-500">Select the engine and balance quality against output size.</p></div></div><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider ${config.encoding_type === 'gpu' ? 'bg-[#a78bfa]/10 text-[#c4b5fd]' : 'bg-[#74c69d]/10 text-[#95d5b2]'}`}>{config.encoding_type === 'gpu' ? `${config.gpu_type || ''} GPU` : 'CPU'}</span></div>
+            <div className="space-y-6 p-5">
+              <div><label className="mb-3 block text-xs font-medium text-gray-300">Video encoder <span className="text-red-400">*</span></label><div className="space-y-4">{['software', 'hardware'].map(category => <div key={category}><p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-gray-600">{category === 'software' ? 'Software / CPU' : 'Hardware / GPU'}</p><div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">{VIDEO_ENCODERS.filter(encoder => encoder.category === category).map(encoder => <button key={encoder.value} onClick={() => handleVideoEncoderChange(encoder.value)} className={`rounded-xl border px-3 py-2.5 text-left text-xs font-medium ${config.video_encoder === encoder.value ? 'border-[#74c69d] bg-[#74c69d]/10 text-[#b7e4c7]' : 'border-[#39363a] bg-[#222123] text-gray-400'}`}>{encoder.label}</button>)}</div></div>)}</div></div>
+
+              <div className="rounded-xl border border-[#39363a] bg-[#222123] p-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-xs font-medium text-gray-300">Quality mode</p><p className="mt-1 text-[11px] text-gray-600">Constant quality is recommended for most content.</p></div><div className="grid grid-cols-2 rounded-lg bg-black/20 p-1"><button onClick={() => handleQualityTypeChange('crf')} className={`rounded-md px-3 py-1.5 text-xs font-medium ${config.quality_type === 'crf' ? 'bg-[#74c69d] text-[#1e1d1f]' : 'text-gray-500'}`}>RF quality</button><button onClick={() => handleQualityTypeChange('bitrate')} className={`rounded-md px-3 py-1.5 text-xs font-medium ${config.quality_type === 'bitrate' ? 'bg-[#74c69d] text-[#1e1d1f]' : 'text-gray-500'}`}>Bitrate</button></div></div>
+                <div className="mt-5 flex items-center gap-4"><input type="range" min={config.quality_type === 'crf' ? 0 : 500} max={config.quality_type === 'crf' ? 51 : 10000} step={config.quality_type === 'crf' ? 1 : 100} value={config.quality} onChange={event => updateConfig('quality', Number(event.target.value))} className="h-2 flex-1 cursor-pointer appearance-none rounded-lg bg-[#39363a]" style={{ accentColor: '#74c69d' }} /><div className="min-w-24 rounded-lg bg-black/20 px-3 py-2 text-center font-mono text-sm text-white">{config.quality_type === 'crf' ? `RF ${config.quality}` : `${config.quality}k`}</div></div>
+                <p className="mt-2 text-[11px] text-gray-600">{config.quality_type === 'crf' ? config.quality < 18 ? 'Visually lossless; larger output.' : config.quality < 24 ? 'Balanced quality and compression.' : config.quality < 30 ? 'Smaller output with visible compression.' : 'Maximum compression; lower quality.' : `${config.quality} kbps average video bitrate.`}</p>
               </div>
 
-              {/* Container */}
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-3">
-                  Container Format <span className="text-red-400">*</span>
-                </label>
-                <div className="grid grid-cols-4 gap-2">
-                  {CONTAINERS.map((container) => (
-                    <button
-                      key={container.value}
-                      onClick={() => updateConfig('format', container.value)}
-                      className={`px-4 py-3 text-sm rounded-lg transition-all ${
-                        config.format === container.value
-                          ? 'bg-[#74c69d] text-black font-medium'
-                          : 'text-gray-300 hover:text-white hover:bg-white/5'
-                      }`}
-                      style={{
-                        backgroundColor: config.format === container.value ? '#74c69d' : '#38363a',
-                      }}
-                    >
-                      {container.label}
-                    </button>
-                  ))}
-                </div>
-                {!containerSupportsSubtitles(config.format) && (
-                  <div className="mt-2 flex items-start gap-2 p-3 rounded-lg" style={{ backgroundColor: '#fff3cd20' }}>
-                    <AlertCircle className="h-4 w-4 text-yellow-500 flex-shrink-0 mt-0.5" />
-                    <p className="text-sm text-yellow-400">
-                      {config.format.toUpperCase()} does not support embedded subtitles. Subtitles will not be included in the output file.
-                    </p>
-                  </div>
-                )}
+              <div className="grid gap-5 md:grid-cols-2">
+                <div><label className="mb-2 block text-xs font-medium text-gray-300">Resolution <span className="text-red-400">*</span></label><div className="grid grid-cols-2 gap-2">{RESOLUTIONS.map(resolution => <button key={resolution.value} onClick={() => handleResolutionChange(resolution.value)} className={`rounded-lg border px-2.5 py-2 text-xs ${config.resolution === resolution.value ? 'border-[#74c69d] bg-[#74c69d]/10 text-[#b7e4c7]' : 'border-[#39363a] bg-[#222123] text-gray-500'}`}>{resolution.label}</button>)}</div></div>
+                <div className="space-y-4"><div><label className="mb-2 block text-xs font-medium text-gray-300">Framerate <span className="text-red-400">*</span></label><select value={config.framerate} onChange={event => updateConfig('framerate', event.target.value)} className="h-11 w-full rounded-xl border border-[#39363a] bg-[#1e1d1f] px-3.5 text-sm text-white outline-none">{FRAMERATES.map(framerate => <option key={framerate.value} value={framerate.value}>{framerate.label}</option>)}</select></div><div><label className="mb-2 block text-xs font-medium text-gray-300">Encoder speed</label><select value={config.preset} onChange={event => updateConfig('preset', event.target.value as FormPresetConfig['preset'])} className="h-11 w-full rounded-xl border border-[#39363a] bg-[#1e1d1f] px-3.5 text-sm capitalize text-white outline-none">{PRESET_SPEEDS.map(speed => <option key={speed} value={speed}>{speed}</option>)}</select><p className="mt-1.5 text-[10px] text-gray-600">Slower presets improve compression but take longer.</p></div></div>
               </div>
+            </div>
+          </section>
 
-              {/* Video Encoder */}
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-3">
-                  Video Encoder <span className="text-red-400">*</span>
-                </label>
-                <div className="space-y-3">
-                  {['software', 'hardware'].map((category) => (
-                    <div key={category}>
-                      <div className="text-xs text-gray-500 uppercase mb-2">{category === 'software' ? 'CPU (Software)' : 'GPU (Hardware)'}</div>
-                      <div className="grid grid-cols-2 gap-2">
-                        {VIDEO_ENCODERS.filter(e => e.category === category).map((encoder) => (
-                          <button
-                            key={encoder.value}
-                            onClick={() => handleVideoEncoderChange(encoder.value)}
-                            className={`px-4 py-2.5 text-sm rounded-lg transition-all text-left ${
-                              config.video_encoder === encoder.value
-                                ? 'text-black font-medium'
-                                : 'text-gray-300 hover:text-white'
-                            }`}
-                            style={{
-                              backgroundColor: config.video_encoder === encoder.value ? '#74c69d' : '#38363a'
-                            }}
-                          >
-                            {encoder.label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Quality */}
-              <div>
-                <div className="flex items-center justify-between mb-3">
-                  <label className="block text-sm font-medium text-gray-300">
-                    Quality Mode <span className="text-red-400">*</span>
-                  </label>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => handleQualityTypeChange('crf')}
-                      className={`px-3 py-1.5 text-sm rounded-lg transition-all ${
-                        config.quality_type === 'crf' ? 'text-black font-medium' : 'text-gray-400'
-                      }`}
-                      style={{ backgroundColor: config.quality_type === 'crf' ? '#74c69d' : '#38363a' }}
-                    >
-                      RF (Quality)
-                    </button>
-                    <button
-                      onClick={() => handleQualityTypeChange('bitrate')}
-                      className={`px-3 py-1.5 text-sm rounded-lg transition-all ${
-                        config.quality_type === 'bitrate' ? 'text-black font-medium' : 'text-gray-400'
-                      }`}
-                      style={{ backgroundColor: config.quality_type === 'bitrate' ? '#74c69d' : '#38363a' }}
-                    >
-                      Bitrate
-                    </button>
-                  </div>
-                </div>
-                <div className="flex items-center gap-4">
-                  <input
-                    type="range"
-                    min={config.quality_type === 'crf' ? 0 : 500}
-                    max={config.quality_type === 'crf' ? 51 : 10000}
-                    step={config.quality_type === 'crf' ? 1 : 100}
-                    value={config.quality}
-                    onChange={(e) => updateConfig('quality', parseFloat(e.target.value))}
-                    className="flex-1 h-2 rounded-lg appearance-none cursor-pointer"
-                    style={{ backgroundColor: '#38363a', accentColor: '#74c69d' }}
-                  />
-                  <span className="text-white font-medium w-24 text-right">
-                    {config.quality_type === 'crf' ? `RF ${config.quality}` : `${config.quality} kbps`}
-                  </span>
-                </div>
-                <p className="text-sm text-gray-500 mt-2">
-                  {config.quality_type === 'crf'
-                    ? config.quality < 18 ? 'Very high quality, larger file'
-                    : config.quality < 24 ? 'Good quality (recommended)'
-                    : config.quality < 30 ? 'High compression'
-                    : 'Maximum compression, lower quality'
-                    : `${config.quality} kbps average bitrate`}
-                </p>
-              </div>
-
-              {/* Resolution */}
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-3">
-                  Resolution <span className="text-red-400">*</span>
-                </label>
-                <div className="grid grid-cols-4 gap-2">
-                  {RESOLUTIONS.map((res) => (
-                    <button
-                      key={res.value}
-                      onClick={() => updateConfig('resolution', res.value)}
-                      className={`px-4 py-2.5 text-sm rounded-lg transition-all ${
-                        config.resolution === res.value
-                          ? 'text-black font-medium'
-                          : 'text-gray-300 hover:text-white'
-                      }`}
-                      style={{
-                        backgroundColor: config.resolution === res.value ? '#74c69d' : '#38363a'
-                      }}
-                    >
-                      {res.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Framerate */}
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-3">
-                  Framerate <span className="text-red-400">*</span>
-                </label>
-                <select
-                  value={config.framerate}
-                  onChange={(e) => updateConfig('framerate', e.target.value)}
-                  className="w-full px-4 py-2.5 rounded-lg text-white focus:outline-none transition-colors"
-                  style={{ backgroundColor: '#38363a', border: '1px solid #38363a' }}
-                >
-                  {FRAMERATES.map((fr) => (
-                    <option key={fr.value} value={fr.value}>{fr.label}</option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Audio Encoder */}
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-3">
-                  Audio Encoder <span className="text-red-400">*</span>
-                </label>
-                <select
-                  value={config.audio_encoder_label}
-                  onChange={(e) => updateConfig('audio_encoder_label', e.target.value)}
-                  className="w-full px-4 py-2.5 rounded-lg text-white focus:outline-none transition-colors"
-                  style={{ backgroundColor: '#38363a', border: '1px solid #38363a' }}
-                >
-                  {AUDIO_ENCODERS.map((encoder) => (
-                    <option key={encoder.value} value={encoder.value}>{encoder.label}</option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Encoder Preset */}
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-3">
-                  Encoder Speed
-                </label>
-                <select
-                  value={config.preset}
-                  onChange={(e) => updateConfig('preset', e.target.value as any)}
-                  className="w-full px-4 py-2.5 rounded-lg text-white focus:outline-none transition-colors"
-                  style={{ backgroundColor: '#38363a', border: '1px solid #38363a' }}
-                >
-                  {PRESET_SPEEDS.map((speed) => (
-                    <option key={speed} value={speed}>{speed}</option>
-                  ))}
-                </select>
-                <p className="text-xs text-gray-500 mt-1">Faster = lower quality, Slower = higher quality</p>
-              </div>
-            </CardContent>
-          </Card>
+          <section className="overflow-hidden rounded-2xl border border-[#39363a] bg-[#282729]">
+            <div className="flex items-center gap-3 border-b border-[#39363a] px-5 py-4"><div className="rounded-xl bg-[#a78bfa]/10 p-2.5 text-[#a78bfa]"><Music2 className="h-5 w-5" /></div><div><h2 className="font-semibold text-white">Audio & media</h2><p className="mt-0.5 text-xs text-gray-500">Control audio conversion, subtitle tracks, and filtering.</p></div></div>
+            <div className="grid gap-5 p-5 md:grid-cols-2">
+              <div><label className="mb-2 block text-xs font-medium text-gray-300">Audio encoder <span className="text-red-400">*</span></label><select value={config.audio_encoder_label} onChange={event => updateConfig('audio_encoder_label', event.target.value)} className="h-11 w-full rounded-xl border border-[#39363a] bg-[#1e1d1f] px-3.5 text-sm text-white outline-none">{AUDIO_ENCODERS.map(encoder => <option key={encoder.value} value={encoder.value}>{encoder.label}</option>)}</select><p className="mt-1.5 text-[10px] text-gray-600">Copy preserves the original audio without re-encoding.</p></div>
+              <div className={config.audio_encoder_label === 'copy' ? 'opacity-40' : ''}><label className="mb-2 flex justify-between text-xs font-medium text-gray-300"><span>Audio bitrate</span><span className="font-mono text-gray-500">{config.audio_bitrate} kbps</span></label><input type="range" min={64} max={640} step={32} value={config.audio_bitrate} disabled={config.audio_encoder_label === 'copy'} onChange={event => updateConfig('audio_bitrate', Number(event.target.value))} className="mt-3 h-2 w-full cursor-pointer appearance-none rounded-lg bg-[#39363a] disabled:cursor-not-allowed" style={{ accentColor: '#a78bfa' }} /></div>
+              <div><label className="mb-2 block text-xs font-medium text-gray-300">Subtitle tracks</label><div className="grid grid-cols-3 gap-2">{(['all', 'first', 'none'] as const).map(option => <button key={option} onClick={() => updateConfig('subtitles', option)} disabled={!containerSupportsSubtitles(config.format)} className={`rounded-lg border px-2 py-2.5 text-xs capitalize disabled:cursor-not-allowed disabled:opacity-35 ${config.subtitles === option ? 'border-[#a78bfa] bg-[#a78bfa]/10 text-[#c4b5fd]' : 'border-[#39363a] bg-[#222123] text-gray-500'}`}>{option}</button>)}</div></div>
+              <div><label className="mb-2 block text-xs font-medium text-gray-300">Video filters</label><button onClick={() => updateConfig('deinterlace', !config.deinterlace)} className={`flex w-full items-center justify-between rounded-xl border px-3.5 py-3 text-left ${config.deinterlace ? 'border-[#74c69d]/60 bg-[#74c69d]/10' : 'border-[#39363a] bg-[#222123]'}`}><div><p className={`text-xs font-medium ${config.deinterlace ? 'text-[#b7e4c7]' : 'text-gray-400'}`}>Deinterlace source</p><p className="mt-1 text-[10px] text-gray-600">Remove interlacing artifacts from older media.</p></div><span className={`h-5 w-9 rounded-full p-0.5 ${config.deinterlace ? 'bg-[#74c69d]' : 'bg-[#39363a]'}`}><span className={`block h-4 w-4 rounded-full bg-white transition-transform ${config.deinterlace ? 'translate-x-4' : ''}`} /></span></button></div>
+            </div>
+          </section>
         </div>
 
-        {/* Preset Summary */}
-        <div className="space-y-6">
-          <Card style={{ backgroundColor: '#252326', border: 'none' }}>
-            <CardContent className="p-4">
-              <h3 className="text-lg font-semibold text-white mb-4">Preset Summary</h3>
-              <div className="space-y-3 text-sm">
-                <div className="flex justify-between">
-                  <span className="text-gray-400">Name</span>
-                  <span className="text-white font-medium truncate ml-2">{presetName || 'Untitled'}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-400">Container</span>
-                  <span className="text-white font-medium">
-                    {CONTAINERS.find(c => c.value === config.format)?.label || config.format}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-400">Video Encoder</span>
-                  <span className="text-white font-medium text-right">
-                    {VIDEO_ENCODERS.find(e => e.value === config.video_encoder)?.label || config.video_encoder}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-400">Quality</span>
-                  <span className="text-white font-medium">
-                    {config.quality_type === 'crf' ? `RF ${config.quality}` : `${config.quality} kbps`}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-400">Resolution</span>
-                  <span className="text-white font-medium">
-                    {RESOLUTIONS.find(r => r.value === config.resolution)?.label || config.resolution}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-400">Framerate</span>
-                  <span className="text-white font-medium">
-                    {FRAMERATES.find(f => f.value === config.framerate)?.label || config.framerate}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-400">Audio Encoder</span>
-                  <span className="text-white font-medium">
-                    {AUDIO_ENCODERS.find(e => e.value === config.audio_encoder_label)?.label || config.audio_encoder_label}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-400">Speed Preset</span>
-                  <span className="text-white font-medium">{config.preset}</span>
-                </div>
-              </div>
+        <aside className="space-y-4 xl:sticky xl:top-6 xl:self-start">
+          <div className="overflow-hidden rounded-2xl border border-[#39363a] bg-[#282729]">
+            <div className="border-b border-[#39363a] p-5"><div className="flex items-center justify-between"><p className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-500">Summary</p><span className={`h-2 w-2 rounded-full ${isFormValid ? 'bg-[#74c69d]' : 'bg-amber-400'}`} /></div><h2 className="mt-3 truncate text-xl font-semibold text-white">{presetName || 'Untitled preset'}</h2><p className="mt-1 line-clamp-2 text-xs leading-5 text-gray-500">{presetDescription || 'Your preset description will appear here.'}</p></div>
+            <div className="space-y-4 p-5">
+              <div className="flex flex-wrap gap-1.5"><span className="rounded-md bg-[#74c69d]/10 px-2 py-1 text-[10px] font-semibold text-[#95d5b2]">{config.video_codec.toUpperCase()}</span><span className="rounded-md bg-white/[0.05] px-2 py-1 text-[10px] font-semibold uppercase text-gray-400">{config.format}</span><span className="rounded-md bg-[#a78bfa]/10 px-2 py-1 text-[10px] font-semibold uppercase text-[#c4b5fd]">{config.encoding_type === 'gpu' ? config.gpu_type : 'CPU'}</span></div>
+              <div className="space-y-3 text-xs">{[
+                ['Encoder', VIDEO_ENCODERS.find(encoder => encoder.value === config.video_encoder)?.label || config.video_encoder],
+                ['Quality', config.quality_type === 'crf' ? `RF ${config.quality}` : `${config.quality} kbps`],
+                ['Resolution', RESOLUTIONS.find(resolution => resolution.value === config.resolution)?.label || config.resolution],
+                ['Framerate', FRAMERATES.find(framerate => framerate.value === config.framerate)?.label || config.framerate],
+                ['Audio', AUDIO_ENCODERS.find(encoder => encoder.value === config.audio_encoder_label)?.label || config.audio_encoder_label],
+                ['Subtitles', containerSupportsSubtitles(config.format) ? config.subtitles : 'Not supported'],
+                ['Speed', config.preset],
+              ].map(([label, value]) => <div key={label} className="flex items-start justify-between gap-4"><span className="text-gray-600">{label}</span><span className="text-right font-medium capitalize text-gray-300">{value}</span></div>)}</div>
+            </div>
+          </div>
 
-              {presetDescription && (
-                <div className="mt-4 pt-4 border-t" style={{ borderColor: '#38363a' }}>
-                  <span className="text-gray-400 text-sm">Description</span>
-                  <p className="text-white text-sm mt-1">{presetDescription}</p>
-                </div>
-              )}
+          <div className={`rounded-2xl border p-4 ${isFormValid ? 'border-[#74c69d]/20 bg-[#74c69d]/[0.06]' : 'border-amber-500/20 bg-amber-500/[0.06]'}`}>
+            <div className="flex items-start gap-3"><AlertCircle className={`mt-0.5 h-4 w-4 shrink-0 ${isFormValid ? 'text-[#74c69d]' : 'text-amber-400'}`} /><div><p className={`text-xs font-medium ${isFormValid ? 'text-[#b7e4c7]' : 'text-amber-300'}`}>{isFormValid ? 'Ready to save' : 'Preset needs attention'}</p><p className="mt-1 text-[11px] leading-5 text-gray-500">{isFormValid ? 'All required settings are configured.' : 'Complete the name and required encoding settings.'}</p></div></div>
+          </div>
 
-              {/* Validation warning */}
-              {!isFormValid && (
-                <div className="mt-4 pt-4 border-t" style={{ borderColor: '#38363a' }}>
-                  <div className="flex items-start gap-2">
-                    <AlertCircle className="h-4 w-4 text-red-400 flex-shrink-0 mt-0.5" />
-                    <p className="text-sm text-red-400">
-                      Please fill in all required fields (marked with *)
-                    </p>
-                  </div>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </div>
+          <Button onClick={handleSave} disabled={!isFormValid || createMutation.isPending || updateMutation.isPending} style={{ backgroundColor: '#74c69d', color: '#1a1a1a', border: 'none' }} className="w-full disabled:opacity-50">{createMutation.isPending || updateMutation.isPending ? 'Saving…' : view === 'edit' ? 'Save changes' : 'Create preset'}</Button>
+        </aside>
       </div>
     </div>
   );
