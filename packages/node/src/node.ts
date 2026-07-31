@@ -469,6 +469,29 @@ export class EncorrNode {
       const { promises: fs } = require('fs');
       const { resolve, dirname } = require('path');
 
+      // Helper function to move files across devices
+      const moveFile = async (src: string, dest: string): Promise<void> => {
+        try {
+          // Try rename first (fast, works on same filesystem)
+          await fs.rename(src, dest);
+          this.logger.debug(`[FILE_REPLACE] Moved file using rename (same device)`);
+        } catch (error: any) {
+          // If cross-device link error, use copy+delete
+          if (error.code === 'EXDEV') {
+            this.logger.info(`[FILE_REPLACE] Cross-device move detected, using copy+delete`);
+            // Ensure target directory exists
+            await fs.mkdir(dirname(dest), { recursive: true });
+            // Copy file
+            await fs.copyFile(src, dest);
+            // Delete source
+            await fs.unlink(src);
+            this.logger.debug(`[FILE_REPLACE] Moved file using copy+delete (cross-device)`);
+          } else {
+            throw error;
+          }
+        }
+      };
+
       // Verify source file exists (for replace operations)
       if (operation === 'replace' || operation === 'backup_replace') {
         const sourceExists = await fs.access(source_path).then(() => true).catch(() => false);
@@ -488,7 +511,7 @@ export class EncorrNode {
       // Perform the operation
       if (operation === 'replace') {
         // Direct replace: move transcoded file to original location
-        await fs.rename(source_path, target_path);
+        await moveFile(source_path, target_path);
         this.logger.info(`[FILE_REPLACE] Replaced original file with transcoded version`);
       } else if (operation === 'backup_replace') {
         // Backup original to .org, then move transcoded file to original location
@@ -497,17 +520,17 @@ export class EncorrNode {
         // Check if backup already exists
         const backupExists = await fs.access(backupPath).then(() => true).catch(() => false);
         if (backupExists) {
-          this.logger.warn(`[FILE_REPLACE] Backup file already exists: ${backupPath}, skipping backup creation`);
-          // Just remove the old backup and create a new one
+          this.logger.warn(`[FILE_REPLACE] Backup file already exists: ${backupPath}, removing old backup`);
+          // Just remove the old backup
           await fs.unlink(backupPath);
         }
 
-        // Rename original to .org
+        // Rename original to .org (same device, should work)
         await fs.rename(target_path, backupPath);
         this.logger.info(`[FILE_REPLACE] Backed up original to: ${backupPath}`);
 
-        // Move transcoded file to original location
-        await fs.rename(source_path, target_path);
+        // Move transcoded file to original location (may be cross-device)
+        await moveFile(source_path, target_path);
         this.logger.info(`[FILE_REPLACE] Moved transcoded file to: ${target_path}`);
       } else if (operation === 'cleanup_backup') {
         // Delete the .org backup file

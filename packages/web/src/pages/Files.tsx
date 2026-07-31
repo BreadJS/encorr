@@ -40,6 +40,10 @@ export function Files() {
   const [reportFileName, setReportFileName] = useState('');
   const [showReportDrawer, setShowReportDrawer] = useState(false);
 
+  // Track file replacement operations in progress
+  const [pendingFileReplacements, setPendingFileReplacements] = useState<Set<string>>(new Set());
+  const [replacementProgress, setReplacementProgress] = useState<{ current: number; total: number } | null>(null);
+
   // Enable WebSocket for real-time updates
   useWebSocket({ enabled: true });
 
@@ -236,35 +240,82 @@ export function Files() {
   // Replace original file mutation
   const replaceOriginalMutation = useMutation({
     mutationFn: async (fileId: string) => {
-      return api.replaceOriginalFile(fileId);
+      setPendingFileReplacements(prev => new Set(prev).add(fileId));
+      try {
+        return await api.replaceOriginalFile(fileId);
+      } finally {
+        setPendingFileReplacements(prev => {
+          const next = new Set(prev);
+          next.delete(fileId);
+          return next;
+        });
+      }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['files'] });
       queryClient.invalidateQueries({ queryKey: ['libraries'] });
+    },
+    onError: (error: Error) => {
+      console.error('Failed to replace original file:', error);
+      // Could add a toast notification here
     },
   });
 
   // Backup and replace mutation
   const backupAndReplaceMutation = useMutation({
     mutationFn: async (fileId: string) => {
-      return api.backupAndReplaceFile(fileId);
+      setPendingFileReplacements(prev => new Set(prev).add(fileId));
+      try {
+        return await api.backupAndReplaceFile(fileId);
+      } finally {
+        setPendingFileReplacements(prev => {
+          const next = new Set(prev);
+          next.delete(fileId);
+          return next;
+        });
+      }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['files'] });
       queryClient.invalidateQueries({ queryKey: ['libraries'] });
+    },
+    onError: (error: Error) => {
+      console.error('Failed to backup and replace file:', error);
     },
   });
 
   // Cleanup backup mutation
   const cleanupBackupMutation = useMutation({
     mutationFn: async (fileId: string) => {
-      return api.cleanupOriginalFile(fileId);
+      setPendingFileReplacements(prev => new Set(prev).add(fileId));
+      try {
+        return await api.cleanupOriginalFile(fileId);
+      } finally {
+        setPendingFileReplacements(prev => {
+          const next = new Set(prev);
+          next.delete(fileId);
+          return next;
+        });
+      }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['files'] });
       queryClient.invalidateQueries({ queryKey: ['libraries'] });
     },
+    onError: (error: Error) => {
+      console.error('Failed to cleanup backup file:', error);
+    },
   });
+
+  // Helper function to process files one by one for bulk operations
+  const processFilesBulk = async (fileIds: string[], mutation: typeof replaceOriginalMutation) => {
+    setReplacementProgress({ current: 0, total: fileIds.length });
+    for (let i = 0; i < fileIds.length; i++) {
+      await mutation.mutateAsync(fileIds[i]);
+      setReplacementProgress({ current: i + 1, total: fileIds.length });
+    }
+    setReplacementProgress(null);
+  };
 
   // Apply client-side search filter and status filter
   const filteredFiles = useMemo(() => {
@@ -428,15 +479,17 @@ export function Files() {
                     const completedFileIds = Array.from(selectedFiles).filter(id =>
                       filesWithJobStatus.find((f: any) => f.id === id && f.displayStatus === 'completed')
                     );
-                    completedFileIds.forEach(id => replaceOriginalMutation.mutate(id));
+                    processFilesBulk(completedFileIds, replaceOriginalMutation);
                   }}
-                  disabled={replaceOriginalMutation.isPending}
+                  disabled={replaceOriginalMutation.isPending || pendingFileReplacements.size > 0}
                   style={{ borderColor: '#39363a', color: '#ffffff' }}
                   className="border flex items-center gap-2 animate-in slide-in-from-left-2 fade-in duration-300 text-sm"
                   title="Replace original files with transcoded versions"
                 >
-                  <Replace className={`h-4 w-4 ${replaceOriginalMutation.isPending ? 'animate-spin' : ''}`} />
-                  <span className="hidden sm:inline">Replace Original</span>
+                  <Replace className={`h-4 w-4 ${replaceOriginalMutation.isPending || pendingFileReplacements.size > 0 ? 'animate-spin' : ''}`} />
+                  <span className="hidden sm:inline">
+                    {replacementProgress ? ` (${replacementProgress.current}/${replacementProgress.total})` : 'Replace Original'}
+                  </span>
                   <span className="sm:hidden">Replace</span> ({completedSelectedCount})
                 </Button>
                 <Button
@@ -444,15 +497,17 @@ export function Files() {
                     const completedFileIds = Array.from(selectedFiles).filter(id =>
                       filesWithJobStatus.find((f: any) => f.id === id && f.displayStatus === 'completed')
                     );
-                    completedFileIds.forEach(id => backupAndReplaceMutation.mutate(id));
+                    processFilesBulk(completedFileIds, backupAndReplaceMutation);
                   }}
-                  disabled={backupAndReplaceMutation.isPending}
+                  disabled={backupAndReplaceMutation.isPending || pendingFileReplacements.size > 0}
                   style={{ borderColor: '#39363a', color: '#ffffff' }}
                   className="border flex items-center gap-2 animate-in slide-in-from-left-2 fade-in duration-300 delay-100 text-sm"
                   title="Rename originals to .org and put new files in place"
                 >
-                  <Copy className={`h-4 w-4 ${backupAndReplaceMutation.isPending ? 'animate-spin' : ''}`} />
-                  <span className="hidden sm:inline">Backup & Replace</span>
+                  <Copy className={`h-4 w-4 ${backupAndReplaceMutation.isPending || pendingFileReplacements.size > 0 ? 'animate-spin' : ''}`} />
+                  <span className="hidden sm:inline">
+                    {replacementProgress ? ` (${replacementProgress.current}/${replacementProgress.total})` : 'Backup & Replace'}
+                  </span>
                   <span className="sm:hidden">Backup</span> ({completedSelectedCount})
                 </Button>
                 <div className="h-6 w-px bg-gray-500 mx-2 hidden sm:block" />
@@ -893,32 +948,32 @@ export function Files() {
                                   <div className="p-1">
                                     <button
                                       onClick={() => replaceOriginalMutation.mutate(file.id)}
-                                      disabled={replaceOriginalMutation.isPending}
-                                      className="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-white/5 rounded transition-colors flex items-center gap-2"
+                                      disabled={replaceOriginalMutation.isPending || pendingFileReplacements.has(file.id)}
+                                      className="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-white/5 rounded transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                                       title="Replace original file with transcoded version"
                                     >
-                                      <Replace className="h-4 w-4" />
-                                      Replace Original
+                                      <Replace className={`h-4 w-4 ${pendingFileReplacements.has(file.id) ? 'animate-spin' : ''}`} />
+                                      {pendingFileReplacements.has(file.id) ? 'Replacing...' : 'Replace Original'}
                                     </button>
                                     {file.status === 'backup_replaced' ? (
                                       <button
                                         onClick={() => cleanupBackupMutation.mutate(file.id)}
-                                        disabled={cleanupBackupMutation.isPending}
-                                        className="w-full text-left px-3 py-2 text-sm text-green-400 hover:bg-white/5 rounded transition-colors flex items-center gap-2"
+                                        disabled={cleanupBackupMutation.isPending || pendingFileReplacements.has(file.id)}
+                                        className="w-full text-left px-3 py-2 text-sm text-green-400 hover:bg-white/5 rounded transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                                         title="Delete the .org backup file"
                                       >
-                                        <Copy className="h-4 w-4" />
-                                        Cleanup Backup (.org)
+                                        <Copy className={`h-4 w-4 ${pendingFileReplacements.has(file.id) ? 'animate-spin' : ''}`} />
+                                        {pendingFileReplacements.has(file.id) ? 'Cleaning...' : 'Cleanup Backup (.org)'}
                                       </button>
                                     ) : (
                                       <button
                                         onClick={() => backupAndReplaceMutation.mutate(file.id)}
-                                        disabled={backupAndReplaceMutation.isPending}
-                                        className="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-white/5 rounded transition-colors flex items-center gap-2"
+                                        disabled={backupAndReplaceMutation.isPending || pendingFileReplacements.has(file.id)}
+                                        className="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-white/5 rounded transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                                         title="Rename original to .org and put new file in place"
                                       >
-                                        <Copy className="h-4 w-4" />
-                                        Backup & Replace
+                                        <Copy className={`h-4 w-4 ${pendingFileReplacements.has(file.id) ? 'animate-spin' : ''}`} />
+                                        {pendingFileReplacements.has(file.id) ? 'Backing up...' : 'Backup & Replace'}
                                       </button>
                                     )}
                                   </div>

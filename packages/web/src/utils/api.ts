@@ -60,11 +60,15 @@ async function request<T>(
   await configPromise;
 
   const url = `${API_BASE}${endpoint}`;
+
+  // Only set Content-Type header if there's a body
+  const hasBody = options?.body !== undefined;
+  const headers = hasBody
+    ? { 'Content-Type': 'application/json', ...options?.headers }
+    : { ...options?.headers };
+
   const response = await fetch(url, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...options?.headers,
-    },
+    headers,
     ...options,
   });
 
