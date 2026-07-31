@@ -2,7 +2,24 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/utils/api';
 import { Card, CardContent } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
-import { Trash2, Plus, Lock, Film, Sliders, ArrowLeft, Cpu, Zap, AlertCircle, ChevronDown } from 'lucide-react';
+import {
+  AlertCircle,
+  ArrowLeft,
+  Box,
+  ChevronDown,
+  Cpu,
+  Film,
+  Gauge,
+  Layers3,
+  Lock,
+  Monitor,
+  Music2,
+  Plus,
+  Search,
+  Sliders,
+  Trash2,
+  Zap,
+} from 'lucide-react';
 import { BUILTIN_PRESETS, type PresetConfig, defaultConfig } from '@/data/presets';
 import { useState, useMemo, useEffect, useRef } from 'react';
 
@@ -127,6 +144,8 @@ function getPresetCategory(preset: any): string {
 export function Presets() {
   const queryClient = useQueryClient();
   const [view, setView] = useState<'list' | 'create' | 'edit' | 'quick-select-create' | 'quick-select-edit'>('list');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [activeCategory, setActiveCategory] = useState<'all' | 'quick' | 'cpu' | 'nvidia' | 'amd' | 'intel'>('all');
   const [editingPreset, setEditingPreset] = useState<any | null>(null);
   const [editingQuickSelectPreset, setEditingQuickSelectPreset] = useState<any | null>(null);
 
@@ -251,16 +270,54 @@ export function Presets() {
     queryFn: () => api.getQuickSelectPresets(),
   });
 
-  // Organize presets into categories
+  const allPresets = useMemo(
+    () => [...BUILTIN_PRESETS, ...(presets || []).filter((preset: any) => !preset.is_builtin)],
+    [presets]
+  );
+
+  // Organize presets into categories and apply the list search.
   const categorizedPresets = useMemo(() => {
-    const allPresets = [...BUILTIN_PRESETS, ...(presets || []).filter((p: any) => !p.is_builtin)];
+    const normalizedSearch = searchQuery.trim().toLowerCase();
+    const filteredPresets = allPresets.filter((preset: any) => {
+      if (preset.id === 'builtin-analyze') return false;
+      if (!normalizedSearch) return true;
+      const searchable = [
+        preset.name,
+        preset.description,
+        preset.config?.video_codec,
+        preset.config?.gpu_type,
+        preset.config?.container,
+        preset.config?.preset,
+      ].filter(Boolean).join(' ').toLowerCase();
+      return searchable.includes(normalizedSearch);
+    });
+
     return {
-      cpu: allPresets.filter((p: any) => getPresetCategory(p) === 'cpu' && p.id !== 'builtin-analyze'),
-      nvidia: allPresets.filter((p: any) => getPresetCategory(p) === 'nvidia'),
-      amd: allPresets.filter((p: any) => getPresetCategory(p) === 'amd'),
-      intel: allPresets.filter((p: any) => getPresetCategory(p) === 'intel'),
+      cpu: filteredPresets.filter((preset: any) => getPresetCategory(preset) === 'cpu'),
+      nvidia: filteredPresets.filter((preset: any) => getPresetCategory(preset) === 'nvidia'),
+      amd: filteredPresets.filter((preset: any) => getPresetCategory(preset) === 'amd'),
+      intel: filteredPresets.filter((preset: any) => getPresetCategory(preset) === 'intel'),
     };
-  }, [presets]);
+  }, [allPresets, searchQuery]);
+
+  const filteredQuickSelectPresets = useMemo(() => {
+    const normalizedSearch = searchQuery.trim().toLowerCase();
+    if (!normalizedSearch) return quickSelectPresets;
+
+    return quickSelectPresets.filter((quickPreset: any) => {
+      const mappedPresetNames = [
+        quickPreset.nvidia_preset_id,
+        quickPreset.amd_preset_id,
+        quickPreset.intel_preset_id,
+        quickPreset.cpu_preset_id,
+      ].map(id => allPresets.find((preset: any) => preset.id === id)?.name);
+      return [quickPreset.name, quickPreset.description, ...mappedPresetNames]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
+        .includes(normalizedSearch);
+    });
+  }, [allPresets, quickSelectPresets, searchQuery]);
 
   // Check if container supports subtitles
   const containerSupportsSubtitles = (format: string) => {
@@ -869,205 +926,190 @@ export function Presets() {
 
   // List View
   if (view === 'list') {
+    const presetSections = [
+      {
+        id: 'cpu' as const,
+        title: 'CPU / Software',
+        description: 'Universal software encoding with maximum compatibility',
+        icon: Cpu,
+        color: '#74c69d',
+        presets: categorizedPresets.cpu,
+      },
+      {
+        id: 'nvidia' as const,
+        title: 'NVIDIA NVENC',
+        description: 'Hardware-accelerated profiles for NVIDIA GPUs',
+        icon: Zap,
+        color: '#76b900',
+        presets: categorizedPresets.nvidia,
+      },
+      {
+        id: 'amd' as const,
+        title: 'AMD AMF',
+        description: 'Hardware-accelerated profiles for AMD Radeon GPUs',
+        icon: Zap,
+        color: '#ed4c5c',
+        presets: categorizedPresets.amd,
+      },
+      {
+        id: 'intel' as const,
+        title: 'Intel Quick Sync',
+        description: 'Efficient hardware encoding for Intel graphics',
+        icon: Zap,
+        color: '#60a5fa',
+        presets: categorizedPresets.intel,
+      },
+    ];
+    const visibleSections = presetSections.filter(section => activeCategory === 'all' || activeCategory === section.id);
+    const visiblePresetCount = visibleSections.reduce((total, section) => total + section.presets.length, 0);
+    const customPresetCount = allPresets.filter((preset: any) => !preset.is_builtin && preset.id !== 'builtin-analyze').length;
+    const hardwarePresetCount = allPresets.filter((preset: any) => preset.config?.encoding_type === 'gpu').length;
+    const categoryTabs = [
+      { id: 'all' as const, label: 'All profiles', count: allPresets.length - 1 },
+      { id: 'quick' as const, label: 'Quick Select', count: filteredQuickSelectPresets.length },
+      { id: 'cpu' as const, label: 'CPU', count: categorizedPresets.cpu.length },
+      { id: 'nvidia' as const, label: 'NVIDIA', count: categorizedPresets.nvidia.length },
+      { id: 'amd' as const, label: 'AMD', count: categorizedPresets.amd.length },
+      { id: 'intel' as const, label: 'Intel', count: categorizedPresets.intel.length },
+    ];
+
     return (
-      <div className="space-y-6">
-        <div className="flex items-center justify-between">
+      <div className="mx-auto max-w-[1600px] space-y-5 pb-8">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <h1 className="text-3xl font-bold text-white">Presets</h1>
-            <p className="text-gray-400">Transcoding configuration presets</p>
+            <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-[#74c69d]">
+              <Sliders className="h-3.5 w-3.5" />
+              Encoding profiles
+            </div>
+            <h1 className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">Presets</h1>
+            <p className="mt-1.5 text-sm text-gray-400">Build reusable encoding profiles and route jobs to the right hardware.</p>
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <Button
+              onClick={handleOpenQSCreate}
+              variant="outline"
+              className="border-[#4b5650] text-[#95d5b2]"
+            >
+              <Layers3 className="mr-2 h-4 w-4" />
+              New Quick Select
+            </Button>
             <Button
               onClick={handleOpenCreate}
               style={{ backgroundColor: '#74c69d', color: '#1a1a1a', border: 'none' }}
-              className="hover:opacity-90"
             >
               <Plus className="mr-2 h-4 w-4" />
-              Create Preset
-            </Button>
-            <Button
-              onClick={handleOpenQSCreate}
-              style={{ backgroundColor: '#74c69d', color: '#1a1a1a', border: 'none' }}
-              className="hover:opacity-90"
-            >
-              <Zap className="mr-2 h-4 w-4" />
-              Create Quick Select Preset
+              New Preset
             </Button>
           </div>
         </div>
 
-        {/* Quick Select Presets */}
-        {quickSelectPresets.length > 0 && (
-          <Card style={{ backgroundColor: '#252326', border: 'none' }}>
-            <CardContent className="p-4">
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-2">
-                  <Zap className="h-5 w-5 text-[#74c69d]" />
-                  <h3 className="text-lg font-semibold text-white">Quick Select Presets</h3>
+        <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="rounded-2xl border border-[#39363a] bg-[#282729] p-5">
+            <div className="flex items-start justify-between"><div><p className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-500">Total profiles</p><p className="mt-3 text-3xl font-semibold text-white">{allPresets.length - 1}</p></div><div className="rounded-xl bg-[#74c69d]/10 p-2.5 text-[#74c69d]"><Film className="h-5 w-5" /></div></div>
+            <p className="mt-2 text-xs text-gray-500">Across CPU and GPU encoders</p>
+          </div>
+          <div className="rounded-2xl border border-[#39363a] bg-[#282729] p-5">
+            <div className="flex items-start justify-between"><div><p className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-500">Quick Select</p><p className="mt-3 text-3xl font-semibold text-white">{quickSelectPresets.length}</p></div><div className="rounded-xl bg-[#a78bfa]/10 p-2.5 text-[#a78bfa]"><Layers3 className="h-5 w-5" /></div></div>
+            <p className="mt-2 text-xs text-gray-500">Automatic hardware routing</p>
+          </div>
+          <div className="rounded-2xl border border-[#39363a] bg-[#282729] p-5">
+            <div className="flex items-start justify-between"><div><p className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-500">GPU profiles</p><p className="mt-3 text-3xl font-semibold text-white">{hardwarePresetCount}</p></div><div className="rounded-xl bg-[#60a5fa]/10 p-2.5 text-[#60a5fa]"><Zap className="h-5 w-5" /></div></div>
+            <p className="mt-2 text-xs text-gray-500">NVIDIA, AMD, and Intel</p>
+          </div>
+          <div className="rounded-2xl border border-[#39363a] bg-[#282729] p-5">
+            <div className="flex items-start justify-between"><div><p className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-500">Custom profiles</p><p className="mt-3 text-3xl font-semibold text-white">{customPresetCount}</p></div><div className="rounded-xl bg-amber-400/10 p-2.5 text-amber-300"><Sliders className="h-5 w-5" /></div></div>
+            <p className="mt-2 text-xs text-gray-500">Editable profiles you created</p>
+          </div>
+        </section>
+
+        <section className="rounded-2xl border border-[#39363a] bg-[#282729] p-3">
+          <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+            <div className="relative min-w-0 flex-1 xl:max-w-md">
+              <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-600" />
+              <input
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="Search by name, codec, vendor, or container…"
+                className="h-10 w-full rounded-xl border border-[#39363a] bg-[#1e1d1f] pl-10 pr-4 text-sm text-white outline-none placeholder:text-gray-600 focus:border-[#74c69d]/60"
+              />
+            </div>
+            <div className="flex gap-1 overflow-x-auto pb-1 xl:pb-0">
+              {categoryTabs.map(tab => (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveCategory(tab.id)}
+                  className={`flex shrink-0 items-center gap-2 rounded-lg px-3 py-2 text-xs font-medium ${activeCategory === tab.id ? 'bg-[#74c69d] text-[#1e1d1f]' : 'text-gray-400'}`}
+                >
+                  {tab.label}
+                  <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${activeCategory === tab.id ? 'bg-black/10 text-[#1e1d1f]' : 'bg-white/[0.05] text-gray-500'}`}>{tab.count}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {(activeCategory === 'all' || activeCategory === 'quick') && (
+          <section className="overflow-hidden rounded-2xl border border-[#39363a] bg-[#282729]">
+            <div className="flex flex-col gap-3 border-b border-[#39363a] px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-start gap-3">
+                <div className="rounded-xl bg-[#a78bfa]/10 p-2.5 text-[#a78bfa]"><Layers3 className="h-5 w-5" /></div>
+                <div>
+                  <div className="flex items-center gap-2"><h2 className="font-semibold text-white">Quick Select routing</h2><span className="rounded-full bg-[#a78bfa]/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-[#c4b5fd]">Smart Transcode</span></div>
+                  <p className="mt-1 text-xs text-gray-500">One choice that automatically maps to the correct hardware profile.</p>
                 </div>
               </div>
-              <p className="text-sm text-gray-400 mb-4">
-                Pre-configured profiles for Smart Transcode that automatically select the appropriate preset based on available GPU hardware
-              </p>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                {quickSelectPresets.map((qp: any) => (
-                  <div
-                    key={qp.id}
-                    className="p-4 rounded-lg relative"
-                    style={{ backgroundColor: '#1E1D1F' }}
-                  >
-                    <div className="flex items-start justify-between mb-2">
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2 mb-1">
-                          <Zap className="h-4 w-4 text-[#74c69d]" />
-                          <h4 className="font-semibold text-white">{qp.name}</h4>
-                          {qp.is_builtin && (
-                            <Lock className="h-3 w-3 text-gray-500" />
-                          )}
-                        </div>
-                        {qp.description && (
-                          <p className="text-sm text-gray-400">{qp.description}</p>
-                        )}
+              <button onClick={handleOpenQSCreate} className="flex items-center gap-1.5 text-xs font-medium text-[#c4b5fd]"><Plus className="h-3.5 w-3.5" />Add route</button>
+            </div>
+            {filteredQuickSelectPresets.length === 0 ? (
+              <div className="flex min-h-40 flex-col items-center justify-center p-6 text-center"><Layers3 className="h-6 w-6 text-gray-600" /><p className="mt-3 text-sm text-gray-400">{searchQuery ? 'No matching Quick Select profiles' : 'No Quick Select profiles yet'}</p><p className="mt-1 text-xs text-gray-600">{searchQuery ? 'Try a different name, vendor, or mapped preset.' : 'Create one to route Smart Transcode jobs by GPU vendor.'}</p></div>
+            ) : (
+              <div className="grid gap-3 p-3 lg:grid-cols-2">
+                {filteredQuickSelectPresets.map((quickPreset: any) => {
+                  const mappings = [
+                    { vendor: 'NVIDIA', id: quickPreset.nvidia_preset_id, color: '#76b900' },
+                    { vendor: 'AMD', id: quickPreset.amd_preset_id, color: '#ed4c5c' },
+                    { vendor: 'Intel', id: quickPreset.intel_preset_id, color: '#60a5fa' },
+                    { vendor: 'CPU', id: quickPreset.cpu_preset_id, color: '#fbbf24' },
+                  ];
+                  return (
+                    <div key={quickPreset.id} className="rounded-xl border border-[#39363a] bg-[#222123] p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0"><div className="flex items-center gap-2"><h3 className="truncate text-sm font-semibold text-white">{quickPreset.name}</h3>{quickPreset.is_builtin && <span className="flex items-center gap-1 rounded-full bg-white/[0.05] px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-gray-500"><Lock className="h-2.5 w-2.5" />Built-in</span>}</div><p className="mt-1 line-clamp-2 text-xs leading-5 text-gray-500">{quickPreset.description || 'Automatic preset selection based on available hardware.'}</p></div>
+                        {!quickPreset.is_builtin && <div className="flex shrink-0 gap-1"><button onClick={() => handleOpenQSEdit(quickPreset)} className="rounded-md p-1.5 text-gray-500" title="Edit Quick Select"><Sliders className="h-3.5 w-3.5" /></button><button onClick={() => { if (confirm(`Delete Quick Select preset "${quickPreset.name}"?`)) deleteQSMutation.mutate(quickPreset.id); }} disabled={deleteQSMutation.isPending} className="rounded-md p-1.5 text-gray-500 disabled:opacity-50" title="Delete Quick Select"><Trash2 className="h-3.5 w-3.5" /></button></div>}
                       </div>
-                      {!qp.is_builtin && (
-                        <div className="flex gap-1">
-                          <button
-                            onClick={() => handleOpenQSEdit(qp)}
-                            className="p-1.5 rounded hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
-                            title="Edit"
-                          >
-                            <Sliders className="h-3.5 w-3.5" />
-                          </button>
-                          <button
-                            onClick={() => deleteQSMutation.mutate(qp.id)}
-                            disabled={deleteQSMutation.isPending}
-                            className="p-1.5 rounded hover:bg-red-500/20 text-gray-400 hover:text-red-400 transition-colors disabled:opacity-50"
-                            title="Delete"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      )}
+                      <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                        {mappings.map(mapping => {
+                          const mappedPreset = allPresets.find((preset: any) => preset.id === mapping.id);
+                          return <div key={mapping.vendor} className="flex min-w-0 items-center gap-2 rounded-lg bg-black/10 px-2.5 py-2"><span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: mapping.id ? mapping.color : '#4b5563' }} /><div className="min-w-0"><p className="text-[9px] font-semibold uppercase tracking-wider text-gray-600">{mapping.vendor}</p><p className="truncate text-[11px] text-gray-300">{mappedPreset?.name || 'Not configured'}</p></div></div>;
+                        })}
+                      </div>
                     </div>
-                    <div className="mt-3 space-y-1 text-xs">
-                      {qp.nvidia_preset_id && (
-                        <div className="flex items-center gap-2 text-gray-400">
-                          <span className="text-green-400">NVIDIA:</span>
-                          <span>{presets?.find((p: any) => p.id === qp.nvidia_preset_id)?.name || 'Not set'}</span>
-                        </div>
-                      )}
-                      {qp.amd_preset_id && (
-                        <div className="flex items-center gap-2 text-gray-400">
-                          <span className="text-red-400">AMD:</span>
-                          <span>{presets?.find((p: any) => p.id === qp.amd_preset_id)?.name || 'Not set'}</span>
-                        </div>
-                      )}
-                      {qp.intel_preset_id && (
-                        <div className="flex items-center gap-2 text-gray-400">
-                          <span className="text-blue-400">Intel:</span>
-                          <span>{presets?.find((p: any) => p.id === qp.intel_preset_id)?.name || 'Not set'}</span>
-                        </div>
-                      )}
-                      {qp.cpu_preset_id && (
-                        <div className="flex items-center gap-2 text-gray-400">
-                          <span className="text-yellow-400">CPU:</span>
-                          <span>{presets?.find((p: any) => p.id === qp.cpu_preset_id)?.name || 'Not set'}</span>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
-            </CardContent>
-          </Card>
+            )}
+          </section>
         )}
 
-        {/* CPU Presets */}
-        {categorizedPresets.cpu.length > 0 && (
-          <Card style={{ backgroundColor: '#252326', border: 'none' }}>
-            <CardContent className="p-4">
-              <div className="flex items-center gap-2 mb-3">
-                <Cpu className="h-5 w-5 text-blue-400" />
-                <h3 className="text-lg font-semibold text-white">CPU Presets</h3>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                {categorizedPresets.cpu.map((preset: any) => (
-                  <PresetCard
-                    key={preset.id}
-                    preset={preset}
-                    onEdit={handleOpenEdit}
-                    onDelete={(id) => deleteMutation.mutate(id)}
-                  />
-                ))}
-              </div>
-            </CardContent>
-          </Card>
-        )}
+        {activeCategory !== 'quick' && visibleSections.map(section => (
+          <PresetSection
+            key={section.id}
+            title={section.title}
+            description={section.description}
+            icon={section.icon}
+            color={section.color}
+            presets={section.presets}
+            onEdit={handleOpenEdit}
+            onDelete={(id) => deleteMutation.mutate(id)}
+          />
+        ))}
 
-        {/* NVIDIA GPU Presets */}
-        {categorizedPresets.nvidia.length > 0 && (
-          <Card style={{ backgroundColor: '#252326', border: 'none' }}>
-            <CardContent className="p-4">
-              <div className="flex items-center gap-2 mb-3">
-                <div className="h-5 w-5 rounded bg-[#76b900]" />
-                <h3 className="text-lg font-semibold text-white">NVIDIA GPU Presets</h3>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                {categorizedPresets.nvidia.map((preset: any) => (
-                  <PresetCard
-                    key={preset.id}
-                    preset={preset}
-                    onEdit={handleOpenEdit}
-                    onDelete={(id) => deleteMutation.mutate(id)}
-                  />
-                ))}
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
-        {/* AMD GPU Presets */}
-        {categorizedPresets.amd.length > 0 && (
-          <Card style={{ backgroundColor: '#252326', border: 'none' }}>
-            <CardContent className="p-4">
-              <div className="flex items-center gap-2 mb-3">
-                <div className="h-5 w-5 rounded bg-[#ED1C24]" />
-                <h3 className="text-lg font-semibold text-white">AMD GPU Presets</h3>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                {categorizedPresets.amd.map((preset: any) => (
-                  <PresetCard
-                    key={preset.id}
-                    preset={preset}
-                    onEdit={handleOpenEdit}
-                    onDelete={(id) => deleteMutation.mutate(id)}
-                  />
-                ))}
-              </div>
-            </CardContent>
-          </Card>
-        )}
-
-        {/* Intel GPU Presets */}
-        {categorizedPresets.intel.length > 0 && (
-          <Card style={{ backgroundColor: '#252326', border: 'none' }}>
-            <CardContent className="p-4">
-              <div className="flex items-center gap-2 mb-3">
-                <div className="h-5 w-5 rounded bg-[#0068B5]" />
-                <h3 className="text-lg font-semibold text-white">Intel GPU Presets</h3>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                {categorizedPresets.intel.map((preset: any) => (
-                  <PresetCard
-                    key={preset.id}
-                    preset={preset}
-                    onEdit={handleOpenEdit}
-                    onDelete={(id) => deleteMutation.mutate(id)}
-                  />
-                ))}
-              </div>
-            </CardContent>
-          </Card>
+        {activeCategory !== 'quick' && visiblePresetCount === 0 && (
+          <div className="flex min-h-56 flex-col items-center justify-center rounded-2xl border border-dashed border-[#39363a] bg-[#282729]/40 p-6 text-center">
+            <Search className="h-7 w-7 text-gray-600" />
+            <p className="mt-3 text-sm font-medium text-gray-300">No matching presets</p>
+            <p className="mt-1 text-xs text-gray-600">Try another search or hardware category.</p>
+          </div>
         )}
       </div>
     );
@@ -1412,32 +1454,68 @@ export function Presets() {
   );
 }
 
+interface PresetSectionProps {
+  title: string;
+  description: string;
+  icon: typeof Cpu;
+  color: string;
+  presets: any[];
+  onEdit: (preset: any) => void;
+  onDelete: (id: string) => void;
+}
+
+function PresetSection({ title, description, icon: Icon, color, presets, onEdit, onDelete }: PresetSectionProps) {
+  if (presets.length === 0) return null;
+
+  return (
+    <section className="overflow-hidden rounded-2xl border border-[#39363a] bg-[#282729]">
+      <div className="flex items-center justify-between border-b border-[#39363a] px-5 py-4">
+        <div className="flex items-start gap-3">
+          <div className="rounded-xl p-2.5" style={{ backgroundColor: `${color}16`, color }}><Icon className="h-5 w-5" /></div>
+          <div>
+            <div className="flex items-center gap-2"><h2 className="font-semibold text-white">{title}</h2><span className="rounded-full bg-white/[0.05] px-2 py-0.5 text-[10px] font-medium text-gray-500">{presets.length}</span></div>
+            <p className="mt-1 text-xs text-gray-500">{description}</p>
+          </div>
+        </div>
+      </div>
+      <div className="grid gap-3 p-3 md:grid-cols-2 2xl:grid-cols-3">
+        {presets.map(preset => <PresetCard key={preset.id} preset={preset} onEdit={onEdit} onDelete={onDelete} accent={color} />)}
+      </div>
+    </section>
+  );
+}
+
 // Preset Card Component
 interface PresetCardProps {
   preset: any;
   onEdit: (preset: any) => void;
   onDelete: (id: string) => void;
+  accent: string;
 }
 
-function PresetCard({ preset, onEdit, onDelete }: PresetCardProps) {
+function PresetCard({ preset, onEdit, onDelete, accent }: PresetCardProps) {
+  const config = preset.config || {};
+  const qualityMode = (config.quality_mode || 'crf').toUpperCase();
+  const resolution = config.max_height ? `${config.max_height}p max` : 'Source';
+  const audio = config.audio_encoder === 'copy' ? 'Audio copy' : (config.audio_encoder || 'AAC').toUpperCase();
+
   return (
-    <div
-      className="p-3 rounded-lg transition-all hover:shadow-lg group"
-      style={{ backgroundColor: '#1E1D1F' }}
-    >
-      <div className="flex items-start justify-between mb-2">
-        <div className="flex items-center gap-2 flex-1 min-w-0">
-          <Film className="h-4 w-4 text-gray-400 flex-shrink-0" />
-          <h4 className="text-sm font-medium text-white truncate">{preset.name}</h4>
-          {preset.is_builtin && (
-            <Lock className="h-3 w-3 text-gray-500 flex-shrink-0" />
-          )}
+    <article className="flex min-h-[220px] flex-col rounded-xl border border-[#39363a] bg-[#222123] p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-0 items-start gap-3">
+          <div className="mt-0.5 rounded-lg p-2" style={{ backgroundColor: `${accent}14`, color: accent }}><Film className="h-4 w-4" /></div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <h3 className="truncate text-sm font-semibold text-white">{preset.name}</h3>
+              {preset.is_builtin && <span className="flex shrink-0 items-center gap-1 rounded-full bg-white/[0.05] px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-gray-500"><Lock className="h-2.5 w-2.5" />Built-in</span>}
+            </div>
+            <p className="mt-1 line-clamp-2 min-h-[40px] text-xs leading-5 text-gray-500">{preset.description || 'Custom transcoding configuration.'}</p>
+          </div>
         </div>
-        {!preset.is_builtin && (
-          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+        {!preset.is_builtin && <div className="flex shrink-0 items-center gap-1">
             <button
               onClick={() => onEdit(preset)}
-              className="text-gray-400 hover:text-white p-1 transition-colors"
+              className="rounded-md p-1.5 text-gray-500"
               title="Edit preset"
             >
               <Sliders className="h-3.5 w-3.5" />
@@ -1448,35 +1526,26 @@ function PresetCard({ preset, onEdit, onDelete }: PresetCardProps) {
                   onDelete(preset.id);
                 }
               }}
-              className="text-gray-400 hover:text-red-400 p-1 transition-colors"
+              className="rounded-md p-1.5 text-gray-500"
               title="Delete preset"
             >
               <Trash2 className="h-3.5 w-3.5" />
             </button>
-          </div>
-        )}
+          </div>}
       </div>
 
-      {preset.description && (
-        <p className="text-xs text-gray-400 line-clamp-2 mb-2">{preset.description}</p>
-      )}
-
-      <div className="flex items-center gap-2 text-xs">
-        <span className="px-2 py-0.5 rounded text-white" style={{ backgroundColor: '#38363a' }}>
-          {preset.config.video_codec?.toUpperCase() || 'H264'}
-        </span>
-        <span className="text-gray-500">
-          {preset.config.encoding_type === 'gpu' ? 'GPU' : 'CPU'}
-        </span>
-        {preset.config.encoding_type === 'gpu' && preset.config.gpu_type && (
-          <span className="text-gray-500 uppercase">{preset.config.gpu_type}</span>
-        )}
+      <div className="mt-4 flex flex-wrap gap-1.5">
+        <span className="rounded-md px-2 py-1 text-[10px] font-semibold" style={{ backgroundColor: `${accent}14`, color: accent }}>{config.video_codec?.toUpperCase() || 'H.264'}</span>
+        <span className="rounded-md bg-white/[0.05] px-2 py-1 text-[10px] font-medium uppercase text-gray-400">{config.container || 'mkv'}</span>
+        <span className="rounded-md bg-white/[0.05] px-2 py-1 text-[10px] font-medium text-gray-400">{config.encoding_type === 'gpu' ? `${config.gpu_type?.toUpperCase() || 'GPU'} hardware` : 'Software'}</span>
       </div>
 
-      <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
-        <span>RF {preset.config.quality}</span>
-        <span>{preset.config.preset}</span>
+      <div className="mt-auto grid grid-cols-2 gap-x-4 gap-y-2 border-t border-[#39363a]/80 pt-3 text-[11px]">
+        <div className="flex items-center gap-2 text-gray-500"><Gauge className="h-3 w-3" /><span className="truncate">{qualityMode} {config.quality ?? 'Auto'}</span></div>
+        <div className="flex items-center gap-2 text-gray-500"><Monitor className="h-3 w-3" /><span className="truncate">{resolution}</span></div>
+        <div className="flex items-center gap-2 text-gray-500"><Music2 className="h-3 w-3" /><span className="truncate">{audio}</span></div>
+        <div className="flex items-center gap-2 text-gray-500"><Box className="h-3 w-3" /><span className="truncate capitalize">{config.preset || 'medium'} speed</span></div>
       </div>
-    </div>
+    </article>
   );
 }
