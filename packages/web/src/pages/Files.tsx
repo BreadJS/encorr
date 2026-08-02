@@ -568,10 +568,12 @@ export function Files() {
     }
 
     if (status === 'failed') {
+      const completedOutputMissing = file.job?.status === 'completed'
+        && file.transcode_output_available === false;
       return (
         <div className="flex items-center gap-2" title={file.displayError || 'Operation failed'}>
           <X className="h-3.5 w-3.5 text-red-400 flex-shrink-0" />
-          <span className="text-red-400 text-xs">{file.transcode_output_available === false ? 'Output missing' : 'Failed'}</span>
+          <span className="text-red-400 text-xs">{completedOutputMissing ? 'Output missing' : 'Failed'}</span>
         </div>
       );
     }

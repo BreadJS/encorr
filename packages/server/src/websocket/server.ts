@@ -37,6 +37,7 @@ import {
   generateMessageId,
   validateMessagePayload,
   MessageType,
+  parseFFmpegError,
 } from '@encorr/shared';
 import type { EncorrDatabase } from '../database';
 import type { Logger } from 'winston';
@@ -884,6 +885,10 @@ export class EncorrWebSocketServer {
     if (!connection || !connection.nodeId) return;
 
     const payload = message.payload as JobErrorPayload;
+    const parsedError = payload.ffmpeg_logs
+      ? parseFFmpegError(payload.ffmpeg_logs, payload.error)
+      : null;
+    const errorMessage = parsedError?.message || payload.error;
 
     // Check if this job was already cancelled - if so, don't overwrite with 'failed'
     const existingJob = this.db.getJobById(payload.job_id);
@@ -913,9 +918,9 @@ export class EncorrWebSocketServer {
       return;
     }
 
-    this.logger.error(`Job ${payload.job_id} failed on node ${connection.nodeId}: ${payload.error}`);
+    this.logger.error(`Job ${payload.job_id} failed on node ${connection.nodeId}: ${errorMessage}`);
 
-    this.db.failJob(payload.job_id, payload.error);
+    this.db.failJob(payload.job_id, errorMessage);
     this.releaseGpuAssignment(connection.nodeId, payload.job_id);
     this.releaseCpuAssignment(connection.nodeId, payload.job_id);
 
@@ -933,8 +938,11 @@ export class EncorrWebSocketServer {
     this.db.logActivity({
       level: 'error',
       category: 'job',
-      message: `Job ${payload.job_id} failed: ${payload.error}`,
-      metadata: payload.details,
+      message: `Job ${payload.job_id} failed: ${errorMessage}`,
+      metadata: {
+        ...payload.details,
+        ...(parsedError?.recognized ? { ffmpeg_error_code: parsedError.code } : {}),
+      },
     });
 
     // Create job report for failure
@@ -954,7 +962,7 @@ export class EncorrWebSocketServer {
           preset_id: preset?.id ?? null,
           preset_name: preset?.name ?? null,
           status: 'failed',
-          error_message: payload.error,
+          error_message: errorMessage,
           ffmpeg_logs: payload.ffmpeg_logs ?? null,
           duration_seconds: null,
           avg_fps: null,
@@ -967,7 +975,7 @@ export class EncorrWebSocketServer {
       this.logger.error(`[REPORT] Failed to create failure report: ${reportErr instanceof Error ? reportErr.message : String(reportErr)}`);
     }
 
-    this.eventHandlers.jobFailed?.(payload.job_id, payload.error);
+    this.eventHandlers.jobFailed?.(payload.job_id, errorMessage);
 
     this.scheduleWebUpdates();
 

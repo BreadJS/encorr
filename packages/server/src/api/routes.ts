@@ -19,6 +19,7 @@ import type {
   SmartTranscodeResult,
   TranscodeMode,
 } from '@encorr/shared';
+import { parseFFmpegError } from '@encorr/shared';
 import { loadConfig } from '../config';
 import { presetOptimizer } from '../services/preset-optimizer';
 
@@ -44,6 +45,12 @@ function sendSuccess<T>(data: T, message?: string) {
 
 function sendError(error: string, statusCode = 400) {
   return { success: false, error };
+}
+
+function withParsedFFmpegError<T extends Record<string, any>>(report: T): T {
+  if (report.status !== 'failed' || !report.ffmpeg_logs) return report;
+  const parsed = parseFFmpegError(report.ffmpeg_logs, report.error_message || 'FFmpeg failed');
+  return parsed.recognized ? { ...report, error_message: parsed.message } : report;
 }
 
 function formatBytes(bytes: number): string {
@@ -1537,7 +1544,8 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     // result set. Counts must describe the selected library, not only the
     // current pagination slice.
     const latestTranscodeReports = new Map<string, any>();
-    for (const report of db.getLatestTranscodeReports()) {
+    for (const storedReport of db.getLatestTranscodeReports()) {
+      const report = withParsedFFmpegError(storedReport);
       const libraryFileId = report.library_file_id || report.file_id;
       if (libraryFileId) latestTranscodeReports.set(libraryFileId, report);
     }
@@ -2515,7 +2523,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     const { limit } = request.query as { limit?: string };
 
     const reportLimit = limit ? parseInt(limit, 10) : 50;
-    const reports = db.getJobReportsByFileId(fileId, reportLimit);
+    const reports = db.getJobReportsByFileId(fileId, reportLimit).map(withParsedFFmpegError);
 
     return sendSuccess(reports);
   });
@@ -2524,7 +2532,8 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
   fastify.get('/report/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
 
-    const report = db.getJobReportById(id);
+    const storedReport = db.getJobReportById(id);
+    const report = storedReport ? withParsedFFmpegError(storedReport) : undefined;
     if (!report) {
       reply.status(404);
       return sendError('Report not found');

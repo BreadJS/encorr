@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'child_process';
 import { existsSync, unlinkSync, renameSync, statSync, mkdirSync } from 'fs';
 import { join, dirname, basename } from 'path';
-import type { FFmpegConfig } from '@encorr/shared';
+import { parseFFmpegError, type FFmpegConfig } from '@encorr/shared';
 import { buildFFmpegArgs, parseFFmpegProgressLine } from '../ffmpeg';
 import type { Logger } from 'winston';
 
@@ -31,6 +31,8 @@ export interface TranscodeResult {
   duration_seconds: number;
   avg_fps?: number;
   error?: string;
+  error_code?: string;
+  retry_possible?: boolean;
   output_path: string;
   ffmpeg_logs?: string;
   decoder_info?: string;
@@ -314,12 +316,19 @@ export class Transcoder {
         }
       }
 
+      const fallbackError = error instanceof Error ? error.message : String(error);
+      const parsedError = wasCancelled
+        ? null
+        : parseFFmpegError(stderrOutput.join('\n'), fallbackError);
+
       return {
         success: false,
         original_size: original_size,
         transcoded_size: 0,
         duration_seconds: 0,
-        error: wasCancelled ? 'Cancelled by user' : (error instanceof Error ? error.message : String(error)),
+        error: wasCancelled ? 'Cancelled by user' : parsedError!.message,
+        error_code: parsedError?.code,
+        retry_possible: parsedError?.retryPossible ?? false,
         output_path: '',
         ffmpeg_logs: stderrOutput.slice(-500).join('\n'),
       };

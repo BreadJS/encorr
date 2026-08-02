@@ -244,8 +244,16 @@ function JobRow({ job, tab, onDelete, deleting }: {
             <span>{String(job.original_codec).toUpperCase()} → {String(job.target_codec).toUpperCase()}</span>
           )}
           {job.resolution && <span>{job.resolution}</span>}
-          {job.error_message && <span className="truncate text-red-400">{job.error_message}</span>}
         </div>
+        {job.error_message && (
+          <div
+            className="mt-2 flex items-start gap-1.5 rounded-md border border-red-500/20 bg-red-500/5 px-2 py-1.5 text-xs leading-5 text-red-300"
+            title={job.error_message}
+          >
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>{job.error_message}</span>
+          </div>
+        )}
       </div>
 
       <div className="text-xs text-gray-400">

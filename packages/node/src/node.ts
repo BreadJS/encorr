@@ -382,7 +382,12 @@ export class EncorrNode {
           this.logger.error(`[JOB_ERROR] Job ${jobId} failed: ${result.error}`);
         }
 
-        this.wsClient.sendJobError(jobId, result.error || 'Unknown error', false, result.ffmpeg_logs);
+        this.wsClient.sendJobError(
+          jobId,
+          result.error || 'Unknown error',
+          result.retry_possible ?? false,
+          result.ffmpeg_logs
+        );
       }
 
     } catch (error) {
