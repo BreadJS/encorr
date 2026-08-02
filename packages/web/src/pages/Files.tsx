@@ -220,6 +220,7 @@ export function Files() {
         displayProgress,
         job: activeJob || latestReport,
         outputSize: latestReport?.output_size || latestReport?.transcoded_size || null,
+        oldSize: file.old_size || latestReport?.original_size || null,
         displayError: file.display_error || latestReport?.error_message || file.error_message,
       };
     });
@@ -274,9 +275,9 @@ export function Files() {
 
   // Smart transcode mutation
   const smartTranscodeMutation = useMutation({
-    mutationFn: async ({ mode, presetId }: { mode: TranscodeMode; presetId?: string }) => {
+    mutationFn: async ({ mode, presetId, postAction }: { mode: TranscodeMode; presetId?: string; postAction: 'keep' | 'replace' | 'backup_replace' }) => {
       const fileIds = Array.from(selectedFiles);
-      return api.createSmartJob({ file_ids: fileIds, mode, preset_id: presetId });
+      return api.createSmartJob({ file_ids: fileIds, mode, preset_id: presetId, post_action: postAction });
     },
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['files'] });
@@ -965,10 +966,9 @@ export function Files() {
                     <div className="text-xs text-gray-300 uppercase font-medium w-28 flex-shrink-0">Codec</div>
                     <div className="text-xs text-gray-300 uppercase font-medium w-28 flex-shrink-0">New Codec</div>
                     <div className="text-xs text-gray-300 uppercase font-medium w-20 flex-shrink-0">Res</div>
-                    <div className="text-xs text-gray-300 uppercase font-medium w-20 flex-shrink-0">Size</div>
-                    <div className="text-xs text-gray-300 uppercase font-medium w-20 flex-shrink-0">New Size</div>
+                    <div className="text-xs text-gray-300 uppercase font-medium w-32 flex-shrink-0">Sizes</div>
                     <div className="text-xs text-gray-300 uppercase font-medium w-24 flex-shrink-0">Status</div>
-                    <div className="text-xs text-gray-300 uppercase font-medium w-12 flex-shrink-0">+</div>
+                    <div className="text-xs text-gray-300 uppercase font-medium w-16 flex-shrink-0 text-center">Actions</div>
                   </div>
 
                   {/* File Rows */}
@@ -1091,17 +1091,14 @@ export function Files() {
                           </span>
                         </div>
 
-                        {/* Size */}
-                        <div className="w-20 flex-shrink-0 text-sm text-gray-400 truncate">
-                          {formatBytes(file.filesize || file.file_size || file.size || 0)}
-                        </div>
-
-                        {/* New Size (only if transcoded) */}
-                        <div className="w-20 flex-shrink-0 text-sm text-gray-400 truncate">
-                          {(file.displayStatus === 'transcoded' || file.displayStatus === 'completed') && file.outputSize ? (
-                            <span className="text-green-400">{formatBytes(file.outputSize)}</span>
-                          ) : (
-                            <span className="text-gray-600">—</span>
+                        {/* Compact size history */}
+                        <div className="w-32 flex-shrink-0 space-y-0.5 text-[11px]">
+                          {file.oldSize && (
+                            <div className="flex items-center justify-between gap-2 text-gray-500"><span>Old</span><span className="truncate text-gray-400">{formatBytes(file.oldSize)}</span></div>
+                          )}
+                          <div className="flex items-center justify-between gap-2 text-gray-500"><span>Current</span><span className="truncate text-gray-300">{formatBytes(file.filesize || file.file_size || file.size || 0)}</span></div>
+                          {(file.displayStatus === 'transcoded' && file.outputSize) && (
+                            <div className="flex items-center justify-between gap-2 text-gray-500"><span>Output</span><span className="truncate text-green-400">{formatBytes(file.outputSize)}</span></div>
                           )}
                         </div>
 
@@ -1350,8 +1347,8 @@ export function Files() {
       open={showSmartTranscodeDialog}
       onOpenChange={setShowSmartTranscodeDialog}
       files={files.filter((f: any) => selectedFiles.has(f.id))}
-      onConfirm={async (mode, presetId) => {
-        await smartTranscodeMutation.mutateAsync({ mode, presetId });
+      onConfirm={async (mode, presetId, postAction) => {
+        await smartTranscodeMutation.mutateAsync({ mode, presetId, postAction });
       }}
     />
 

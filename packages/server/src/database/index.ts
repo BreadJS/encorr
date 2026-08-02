@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { v4 as uuidv4 } from 'uuid';
 import { mkdirSync, readFileSync, rmSync } from 'fs';
-import { basename, dirname, resolve, sep } from 'path';
+import { basename, dirname, join, resolve, sep } from 'path';
 import type {
   Logger
 } from 'winston';
@@ -79,6 +79,12 @@ export class EncorrDatabase {
       current = dirname(current);
     }
     throw new Error(`Refusing full reset: database is not inside a .encorr directory (${this.databasePath})`);
+  }
+
+  getComparisonCacheDirectory(): string {
+    const cacheDirectory = join(this.getDataRoot(), 'cache', 'comparisons');
+    mkdirSync(cacheDirectory, { recursive: true });
+    return cacheDirectory;
   }
 
   fullReset(): string {
@@ -2359,6 +2365,20 @@ export class EncorrDatabase {
       ORDER BY COALESCE(completed_at, reclaimed_at, created_at) DESC
       LIMIT ?
     `).all(limit);
+  }
+
+  getLatestStorageReclaims(): any[] {
+    return this.db.prepare(`
+      SELECT * FROM (
+        SELECT storage_reclaims.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY library_file_id
+            ORDER BY COALESCE(completed_at, reclaimed_at, created_at) DESC, created_at DESC
+          ) AS reclaim_rank
+        FROM storage_reclaims
+      )
+      WHERE reclaim_rank = 1
+    `).all();
   }
 
   getDashboardStats(): DashboardStats {

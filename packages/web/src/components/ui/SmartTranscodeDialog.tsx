@@ -6,7 +6,7 @@ import { useState, useMemo, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Dialog } from '@/components/ui/Dialog';
 import { Button } from '@/components/ui/Button';
-import { Loader2, Cpu, Zap, Settings2, CheckCircle2, ChevronDown } from 'lucide-react';
+import { Loader2, Cpu, Zap, Settings2, CheckCircle2, ChevronDown, AlertTriangle, Copy, Replace } from 'lucide-react';
 import { BUILTIN_PRESETS } from '@/data/presets';
 import { api } from '@/utils/api';
 import type { TranscodeMode } from '@encorr/shared';
@@ -34,7 +34,7 @@ interface SmartTranscodeDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   files: LibraryFile[];
-  onConfirm: (mode: TranscodeMode, presetId: string) => Promise<void>;
+  onConfirm: (mode: TranscodeMode, presetId: string, postAction: 'keep' | 'replace' | 'backup_replace') => Promise<void>;
 }
 
 // ============================================================================
@@ -120,6 +120,14 @@ export function SmartTranscodeDialog({
   const [mode, setMode] = useState<TranscodeMode>('auto');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [selectedQuickSelectPresetId, setSelectedQuickSelectPresetId] = useState<string>('');
+  const [postAction, setPostAction] = useState<'keep' | 'replace' | 'backup_replace'>('keep');
+  const [replaceConfirmed, setReplaceConfirmed] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setPostAction('keep');
+    setReplaceConfirmed(false);
+  }, [open]);
 
   // GPU dropdown states
   const [nvidiaDropdownOpen, setNvidiaDropdownOpen] = useState(false);
@@ -291,7 +299,7 @@ export function SmartTranscodeDialog({
   const handleConfirm = async () => {
     setIsSubmitting(true);
     try {
-      await onConfirm(mode, getActivePresetId());
+      await onConfirm(mode, getActivePresetId(), postAction);
       onOpenChange(false);
     } catch (error) {
       console.error('Failed to start transcoding:', error);
@@ -329,7 +337,7 @@ export function SmartTranscodeDialog({
           </Button>
           <Button
             onClick={handleConfirm}
-            disabled={isSubmitting || files.length === 0 || (!getActivePresetId() && mode !== 'auto')}
+            disabled={isSubmitting || files.length === 0 || (!getActivePresetId() && mode !== 'auto') || (postAction === 'replace' && !replaceConfirmed)}
           >
             {isSubmitting ? (
               <>
@@ -703,6 +711,38 @@ export function SmartTranscodeDialog({
             <p className="text-xs text-gray-400">{currentPreset.name}</p>
             <p className="text-xs text-gray-500 mt-1">{currentPreset.description}</p>
           </div>
+        )}
+
+        <div className="space-y-2">
+          <h3 className="text-base font-semibold text-white">After Each Transcode</h3>
+          <p className="text-xs leading-5 text-gray-500">Choose what Encorr should do after each output is successfully created.</p>
+          {([
+            { id: 'keep', title: 'Keep output separate', detail: 'Keep the original and transcoded copy side by side for manual review.', icon: Copy },
+            { id: 'backup_replace', title: 'Backup & Replace', detail: 'Rename the original to .org, then install the transcoded file. The backup can be removed later.', icon: Copy },
+            { id: 'replace', title: 'Replace Original', detail: 'Install the transcoded file and permanently remove the original without retaining a backup.', icon: Replace },
+          ] as const).map(option => {
+            const Icon = option.icon;
+            return (
+              <label key={option.id} className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 ${postAction === option.id ? 'border-[#5b8f75] bg-[#1b3027]' : 'border-[#39363a] bg-[#1E1D1F]'}`}>
+                <input
+                  type="radio"
+                  name="smart-post-action"
+                  checked={postAction === option.id}
+                  onChange={() => { setPostAction(option.id); setReplaceConfirmed(false); }}
+                  className="mt-1 accent-[#74c69d]"
+                />
+                <Icon className={`mt-0.5 h-4 w-4 shrink-0 ${postAction === option.id ? 'text-[#74c69d]' : 'text-gray-500'}`} />
+                <span><span className="block text-sm font-medium text-white">{option.title}</span><span className="mt-0.5 block text-xs leading-5 text-gray-500">{option.detail}</span></span>
+              </label>
+            );
+          })}
+        </div>
+
+        {postAction === 'replace' && (
+          <label className="flex cursor-pointer gap-3 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-xs leading-5 text-red-200">
+            <input type="checkbox" checked={replaceConfirmed} onChange={event => setReplaceConfirmed(event.target.checked)} className="mt-1 shrink-0 accent-red-500" />
+            <span><span className="flex items-center gap-1.5 font-semibold"><AlertTriangle className="h-4 w-4" />Confirm automatic replacement</span><span className="mt-1 block">I understand each original will be permanently replaced when its transcode completes, without keeping a .org backup.</span></span>
+          </label>
         )}
 
         {/* File List */}

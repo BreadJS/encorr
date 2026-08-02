@@ -216,7 +216,7 @@ export const api = {
     method: 'POST',
     body: JSON.stringify(data),
   }),
-  createSmartJob: (data: { file_ids: string[]; mode: 'auto' | 'gpu' | 'cpu'; preset_id?: string }) =>
+  createSmartJob: (data: { file_ids: string[]; mode: 'auto' | 'gpu' | 'cpu'; preset_id?: string; post_action?: 'keep' | 'replace' | 'backup_replace' }) =>
     request<{
       success: boolean;
       jobs: Array<{
@@ -392,8 +392,18 @@ export const api = {
     original: { size: number; codec: string | null; width: number | null; height: number | null; duration: number | null; container: string; stream_url: string };
     transcoded: { size: number; codec: string | null; width: number | null; height: number | null; duration: number | null; container: string; stream_url: string };
   }>(`/library-files/${fileId}/compare`),
-  getComparisonStreamUrl: (fileId: string, variant: 'original' | 'transcoded') =>
-    `${getBackendUrl()}/library-files/${encodeURIComponent(fileId)}/compare/${variant}`,
+  getComparisonStreamUrl: (fileId: string, variant: 'original' | 'transcoded', compatible = false) =>
+    `${getBackendUrl()}/library-files/${encodeURIComponent(fileId)}/compare/${variant}${compatible ? '/compatible' : ''}`,
+  prepareComparisonPreview: (fileId: string) => request<{
+    status: 'processing' | 'ready' | 'failed';
+    progress: number;
+    error: string | null;
+  }>(`/library-files/${fileId}/compare/prepare`, { method: 'POST' }),
+  getComparisonPreviewStatus: (fileId: string) => request<{
+    status: 'idle' | 'processing' | 'ready' | 'failed';
+    progress: number;
+    error: string | null;
+  }>(`/library-files/${fileId}/compare/preview-status`),
 
   // Logs
   getLogs: (params?: { level?: string; category?: string; limit?: number }) =>

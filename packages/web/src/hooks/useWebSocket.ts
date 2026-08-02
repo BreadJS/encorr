@@ -106,12 +106,25 @@ function connectWebSocket(url: string, queryClient: ReturnType<typeof useQueryCl
             queryClient.setQueryData(['nodes'], message.payload.nodes);
             break;
 
-          case 'WEB_JOBS_UPDATE':
-            queryClient.setQueryData(['jobs'], message.payload.jobs);
+          case 'WEB_JOBS_UPDATE': {
+            const nextJobs = message.payload.jobs || [];
+            const previousJobs = queryClient.getQueryData<any[]>(['jobs']) || [];
+            const previousOperations = new Map(previousJobs
+              .filter(job => job.file_operation)
+              .map(job => [job.id, `${job.status}:${job.progress}:${job.current_action || ''}`]));
+            const nextOperations = nextJobs.filter((job: any) => job.file_operation);
+            const storageOperationChanged = previousOperations.size !== nextOperations.length
+              || nextOperations.some((job: any) => previousOperations.get(job.id) !== `${job.status}:${job.progress}:${job.current_action || ''}`);
+            queryClient.setQueryData(['jobs'], nextJobs);
+            if (storageOperationChanged) {
+              queryClient.invalidateQueries({ queryKey: ['storage-reclaims'] });
+              queryClient.invalidateQueries({ queryKey: ['stats'] });
+            }
             // Update library files status based on job data
             queryClient.invalidateQueries({ queryKey: ['library-files'] });
             queryClient.invalidateQueries({ queryKey: ['files'] });
             break;
+          }
 
           case 'WEB_LIBRARY_SCAN_UPDATE': {
             const progress = message.payload;

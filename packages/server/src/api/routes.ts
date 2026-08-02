@@ -1,7 +1,10 @@
 import { FastifyInstance } from 'fastify';
+import type { FastifyReply, FastifyRequest } from 'fastify';
 import { createReadStream } from 'fs';
-import { readdir, stat } from 'fs/promises';
+import { readdir, rename, stat, unlink } from 'fs/promises';
 import { extname, join } from 'path';
+import { createHash } from 'crypto';
+import { spawn, type ChildProcess } from 'child_process';
 import type { EncorrDatabase } from '../database';
 import type { EncorrWebSocketServer } from '../websocket/server';
 import type { Logger } from 'winston';
@@ -28,6 +31,8 @@ interface RoutesOptions {
   wsServer: EncorrWebSocketServer;
   logger: Logger;
 }
+
+const COMPARISON_PREVIEW_SECONDS = 60;
 
 // ============================================================================
 // Helper Functions
@@ -57,6 +62,58 @@ function videoContentType(path: string): string {
   if (extension === '.avi') return 'video/x-msvideo';
   if (extension === '.mkv') return 'video/x-matroska';
   return 'application/octet-stream';
+}
+
+async function sendSeekableVideo(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  path: string,
+  filename: string,
+) {
+  const fileStat = await stat(path);
+  if (!fileStat.isFile()) throw new Error('Source is not a file');
+  const total = fileStat.size;
+  const range = request.headers.range;
+  const commonHeaders = {
+    'Accept-Ranges': 'bytes',
+    'Content-Type': videoContentType(path),
+    'Cache-Control': 'private, no-store',
+    'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(filename)}`,
+  };
+
+  if (!range) {
+    reply.headers({ ...commonHeaders, 'Content-Length': String(total) });
+    return reply.send(createReadStream(path));
+  }
+
+  const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+  if (!match) {
+    reply.status(416).header('Content-Range', `bytes */${total}`);
+    return reply.send();
+  }
+  let requestedStart: number;
+  let requestedEnd: number;
+  if (!match[1] && match[2]) {
+    const suffixLength = Number(match[2]);
+    requestedStart = Math.max(0, total - suffixLength);
+    requestedEnd = total - 1;
+  } else {
+    requestedStart = Number(match[1]);
+    requestedEnd = match[2] ? Number(match[2]) : total - 1;
+  }
+  const start = Math.max(0, requestedStart);
+  const end = Math.min(total - 1, requestedEnd);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= total) {
+    reply.status(416).header('Content-Range', `bytes */${total}`);
+    return reply.send();
+  }
+
+  reply.code(206).headers({
+    ...commonHeaders,
+    'Content-Range': `bytes ${start}-${end}/${total}`,
+    'Content-Length': String(end - start + 1),
+  });
+  return reply.send(createReadStream(path, { start, end }));
 }
 
 // ============================================================================
@@ -102,6 +159,175 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       transcodedPath: report.output_path as string,
     } as const;
   };
+
+  type ComparisonPreviewState = {
+    status: 'processing' | 'ready' | 'failed';
+    progress: number;
+    error?: string;
+    processes: Set<ChildProcess>;
+  };
+  const comparisonPreviewJobs = new Map<string, ComparisonPreviewState>();
+
+  const resolveComparisonPreviewTargets = async (libraryFileId: string) => {
+    const sources = resolveComparisonSources(libraryFileId);
+    if (!sources.ok) throw new Error(sources.error);
+    const [originalStat, transcodedStat] = await Promise.all([
+      stat(sources.originalPath),
+      stat(sources.transcodedPath),
+    ]);
+    const cacheDirectory = db.getComparisonCacheDirectory();
+    const targetFor = (variant: 'original' | 'transcoded', path: string, size: number, modified: number) => {
+      const fingerprint = createHash('sha256')
+        .update(`preview-v2:${COMPARISON_PREVIEW_SECONDS}:${path}:${size}:${modified}`)
+        .digest('hex')
+        .slice(0, 16);
+      return join(cacheDirectory, `${libraryFileId}-${variant}-${fingerprint}.mp4`);
+    };
+    return {
+      sources,
+      original: targetFor('original', sources.originalPath, originalStat.size, originalStat.mtimeMs),
+      transcoded: targetFor('transcoded', sources.transcodedPath, transcodedStat.size, transcodedStat.mtimeMs),
+    };
+  };
+
+  const generateComparisonPreview = (
+    inputPath: string,
+    outputPath: string,
+    durationSeconds: number,
+    onProgress: (progress: number) => void,
+    processes: Set<ChildProcess>,
+  ) => new Promise<void>((resolve, reject) => {
+    const temporaryPath = `${outputPath}.tmp.mp4`;
+    const child = spawn('ffmpeg', [
+      '-hide_banner',
+      '-loglevel', 'error',
+      '-nostdin',
+      '-y',
+      '-i', inputPath,
+      '-t', String(COMPARISON_PREVIEW_SECONDS),
+      '-map', '0:v:0',
+      '-map', '0:a:0?',
+      '-c:v', 'libx264',
+      '-preset', 'veryfast',
+      '-crf', '12',
+      '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac',
+      '-b:a', '192k',
+      '-sn',
+      '-dn',
+      '-movflags', '+faststart',
+      '-progress', 'pipe:2',
+      temporaryPath,
+    ], { stdio: ['ignore', 'ignore', 'pipe'] });
+    processes.add(child);
+    let stderr = '';
+    let progressBuffer = '';
+
+    child.stderr?.on('data', chunk => {
+      const text = chunk.toString();
+      stderr = `${stderr}${text}`.slice(-8000);
+      progressBuffer += text;
+      const lines = progressBuffer.split(/\r?\n/);
+      progressBuffer = lines.pop() || '';
+      for (const line of lines) {
+        const match = /^out_time_(?:ms|us)=(\d+)$/.exec(line.trim());
+        if (!match || durationSeconds <= 0) continue;
+        const seconds = Number(match[1]) / 1_000_000;
+        onProgress(Math.max(0, Math.min(99, (seconds / durationSeconds) * 100)));
+      }
+    });
+    child.once('error', error => {
+      processes.delete(child);
+      void unlink(temporaryPath).catch(() => undefined);
+      reject(error);
+    });
+    child.once('close', code => {
+      processes.delete(child);
+      if (code !== 0) {
+        void unlink(temporaryPath).catch(() => undefined);
+        reject(new Error(stderr.trim() || `FFmpeg exited with code ${code}`));
+        return;
+      }
+      rename(temporaryPath, outputPath).then(() => resolve(), reject);
+    });
+  });
+
+  const startComparisonPreview = async (libraryFileId: string) => {
+    const existing = comparisonPreviewJobs.get(libraryFileId);
+    if (existing?.status === 'processing') return existing;
+
+    const targets = await resolveComparisonPreviewTargets(libraryFileId);
+    const cacheDirectory = db.getComparisonCacheDirectory();
+    const currentTargets = new Set([targets.original, targets.transcoded]);
+    const cachedEntries = await readdir(cacheDirectory).catch(() => [] as string[]);
+    await Promise.all(cachedEntries
+      .filter(entry => entry.startsWith(`${libraryFileId}-`))
+      .map(entry => join(cacheDirectory, entry))
+      .filter(path => !currentTargets.has(path))
+      .map(path => unlink(path).catch(() => undefined)));
+    const existingFiles = await Promise.all([
+      stat(targets.original).then(value => value.isFile()).catch(() => false),
+      stat(targets.transcoded).then(value => value.isFile()).catch(() => false),
+    ]);
+    if (existingFiles.every(Boolean)) {
+      const ready: ComparisonPreviewState = { status: 'ready', progress: 100, processes: new Set() };
+      comparisonPreviewJobs.set(libraryFileId, ready);
+      return ready;
+    }
+
+    const state: ComparisonPreviewState = { status: 'processing', progress: 0, processes: new Set() };
+    comparisonPreviewJobs.set(libraryFileId, state);
+    const sourceDuration = Number(targets.sources.file.metadata?.duration || targets.sources.file.duration || 0);
+    const duration = sourceDuration > 0
+      ? Math.min(COMPARISON_PREVIEW_SECONDS, sourceDuration)
+      : COMPARISON_PREVIEW_SECONDS;
+    const progress = { original: existingFiles[0] ? 100 : 0, transcoded: existingFiles[1] ? 100 : 0 };
+    const updateProgress = () => {
+      state.progress = Math.round((progress.original + progress.transcoded) / 2);
+    };
+
+    const tasks: Promise<void>[] = [];
+    if (!existingFiles[0]) {
+      tasks.push(generateComparisonPreview(
+        targets.sources.originalPath,
+        targets.original,
+        duration,
+        value => { progress.original = value; updateProgress(); },
+        state.processes,
+      ));
+    }
+    if (!existingFiles[1]) {
+      tasks.push(generateComparisonPreview(
+        targets.sources.transcodedPath,
+        targets.transcoded,
+        duration,
+        value => { progress.transcoded = value; updateProgress(); },
+        state.processes,
+      ));
+    }
+
+    void Promise.all(tasks).then(() => {
+      state.status = 'ready';
+      state.progress = 100;
+      logger.info(`[COMPARE] Browser-compatible previews ready for ${libraryFileId}`);
+    }).catch(error => {
+      for (const process of state.processes) process.kill('SIGTERM');
+      state.status = 'failed';
+      state.error = error instanceof Error ? error.message : 'Preview generation failed';
+      logger.error(`[COMPARE] Preview generation failed for ${libraryFileId}: ${state.error}`);
+    });
+    return state;
+  };
+
+  const cancelComparisonPreviews = () => {
+    for (const state of comparisonPreviewJobs.values()) {
+      for (const process of state.processes) process.kill('SIGTERM');
+    }
+    comparisonPreviewJobs.clear();
+  };
+  fastify.addHook('onClose', async () => {
+    cancelComparisonPreviews();
+  });
 
   // ========================================================================
   // Config (for frontend)
@@ -691,6 +917,57 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     }
   });
 
+  fastify.post('/library-files/:id/compare/prepare', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      const state = await startComparisonPreview(id);
+      reply.code(state.status === 'processing' ? 202 : 200);
+      return sendSuccess({ status: state.status, progress: state.progress, error: state.error || null });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not prepare compatible previews';
+      logger.error(`[COMPARE] Could not start preview generation for ${id}: ${message}`);
+      reply.status(500);
+      return sendError(message);
+    }
+  });
+
+  fastify.get('/library-files/:id/compare/preview-status', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const active = comparisonPreviewJobs.get(id);
+    if (active) {
+      return sendSuccess({ status: active.status, progress: active.progress, error: active.error || null });
+    }
+    try {
+      const targets = await resolveComparisonPreviewTargets(id);
+      const ready = (await Promise.all([
+        stat(targets.original).then(value => value.isFile()).catch(() => false),
+        stat(targets.transcoded).then(value => value.isFile()).catch(() => false),
+      ])).every(Boolean);
+      return sendSuccess({ status: ready ? 'ready' : 'idle', progress: ready ? 100 : 0, error: null });
+    } catch (error) {
+      reply.status(404);
+      return sendError(error instanceof Error ? error.message : 'Comparison sources are unavailable');
+    }
+  });
+
+  fastify.get('/library-files/:id/compare/:variant/compatible', async (request, reply) => {
+    const { id, variant } = request.params as { id: string; variant: 'original' | 'transcoded' };
+    if (variant !== 'original' && variant !== 'transcoded') {
+      reply.status(400);
+      return sendError('Invalid comparison stream');
+    }
+    try {
+      const targets = await resolveComparisonPreviewTargets(id);
+      const path = variant === 'original' ? targets.original : targets.transcoded;
+      return await sendSeekableVideo(request, reply, path, `${targets.sources.file.filename}.comparison.mp4`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Compatible preview is unavailable';
+      logger.warn(`[COMPARE] Compatible ${variant} stream failed for ${id}: ${message}`);
+      reply.status(404);
+      return sendError('Browser-compatible preview is not ready');
+    }
+  });
+
   fastify.get('/library-files/:id/compare/:variant', async (request, reply) => {
     const { id, variant } = request.params as { id: string; variant: 'original' | 'transcoded' };
     if (variant !== 'original' && variant !== 'transcoded') {
@@ -705,52 +982,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
 
     const path = variant === 'original' ? sources.originalPath : sources.transcodedPath;
     try {
-      const fileStat = await stat(path);
-      if (!fileStat.isFile()) throw new Error('Source is not a file');
-      const total = fileStat.size;
-      const range = request.headers.range;
-      const commonHeaders = {
-        'Accept-Ranges': 'bytes',
-        'Content-Type': videoContentType(path),
-        'Cache-Control': 'private, no-store',
-        'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(sources.file.filename)}`,
-      };
-
-      if (!range) {
-        reply.headers({ ...commonHeaders, 'Content-Length': String(total) });
-        return reply.send(createReadStream(path));
-      }
-
-      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
-      if (!match) {
-        reply.status(416).header('Content-Range', `bytes */${total}`);
-        return reply.send();
-      }
-      let requestedStart: number;
-      let requestedEnd: number;
-      if (!match[1] && match[2]) {
-        const suffixLength = Number(match[2]);
-        requestedStart = Math.max(0, total - suffixLength);
-        requestedEnd = total - 1;
-      } else {
-        requestedStart = Number(match[1]);
-        requestedEnd = match[2]
-          ? Number(match[2])
-          : total - 1;
-      }
-      const start = Math.max(0, requestedStart);
-      const end = Math.min(total - 1, requestedEnd);
-      if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= total) {
-        reply.status(416).header('Content-Range', `bytes */${total}`);
-        return reply.send();
-      }
-
-      reply.code(206).headers({
-        ...commonHeaders,
-        'Content-Range': `bytes ${start}-${end}/${total}`,
-        'Content-Length': String(end - start + 1),
-      });
-      return reply.send(createReadStream(path, { start, end }));
+      return await sendSeekableVideo(request, reply, path, sources.file.filename);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Stream unavailable';
       logger.warn(`[COMPARE] ${variant} stream failed for ${id}: ${message}`);
@@ -1296,6 +1528,10 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       const libraryFileId = report.library_file_id || report.file_id;
       if (libraryFileId) latestTranscodeReports.set(libraryFileId, report);
     }
+    const latestStorageReclaims = new Map<string, any>();
+    for (const reclaim of db.getLatestStorageReclaims()) {
+      if (reclaim.library_file_id) latestStorageReclaims.set(reclaim.library_file_id, reclaim);
+    }
 
     const activeAnalysisFileIds = new Set<string>();
     const activeTranscodeFileIds = new Set<string>();
@@ -1358,6 +1594,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       else if (displayStatus === 'cancelled') statusCounts.cancelled++;
 
       const latestReport = latestTranscodeReports.get(file.id);
+      const latestReclaim = latestStorageReclaims.get(file.id);
       const outputIsAvailable = latestReport?.output_available !== 0
         && typeof latestReport?.output_path === 'string'
         && latestReport.output_path.trim().length > 0;
@@ -1368,6 +1605,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
           ? (latestReport.error_message || 'Transcoded output is no longer available')
           : file.error_message,
         transcode_output_available: latestReport ? outputIsAvailable : undefined,
+        old_size: Number(latestReclaim?.original_size || latestReport?.original_size || 0) || null,
       };
     });
 
@@ -1912,7 +2150,12 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
   // Smart transcoding endpoint - automatically selects optimal presets or uses user-selected preset
   fastify.post('/jobs/smart', async (request, reply) => {
     const data = request.body as SmartTranscodeRequest;
-    const { file_ids, mode = 'auto', preset_id: userPresetId } = data;
+    const { file_ids, mode = 'auto', preset_id: userPresetId, post_action: postAction = 'keep' } = data;
+
+    if (!['keep', 'replace', 'backup_replace'].includes(postAction)) {
+      reply.status(400);
+      return sendError('Choose a valid action for completed transcodes');
+    }
 
     logger.info(`[SMART_TRANSCODE] Creating smart transcoding jobs for ${file_ids.length} files with mode: ${mode}${userPresetId ? `, preset: ${userPresetId}` : ''}`);
 
@@ -2013,6 +2256,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
             const job = db.createJob({
               file_id,
               preset_id: presetId,
+              post_action: postAction,
             });
 
             // Parse expected compression to estimate size
@@ -2072,7 +2316,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
           reason = `User selected preset: ${preset?.name || presetId}`;
           expectedCompression = 'Unknown (user preset)';
           logger.info(`[SMART_TRANSCODE] Library file ${file_id}: ${reason}`);
-          job = db.createJobForLibraryFile(file_id, presetId);
+          job = db.createJobForLibraryFile(file_id, presetId, undefined, postAction);
         } else if (metadata) {
           // Auto-select optimal preset based on file analysis
           const analysis = presetOptimizer.analyzeFile(metadata, fileSize);
@@ -2084,7 +2328,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
           reason = recommendation.reason;
           expectedCompression = recommendation.expectedCompression;
 
-          job = db.createJobForLibraryFile(file_id, presetId);
+          job = db.createJobForLibraryFile(file_id, presetId, undefined, postAction);
         } else {
           // No metadata available - use default preset based on mode
           if (mode === 'gpu') {
@@ -2112,7 +2356,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
           }
           expectedCompression = 'Unknown (no metadata)';
 
-          job = db.createJobForLibraryFile(file_id, presetId);
+          job = db.createJobForLibraryFile(file_id, presetId, undefined, postAction);
         }
 
         if (!job) {
@@ -2523,6 +2767,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     }
 
     logger.warn('[RESET] Full system reset requested');
+    cancelComparisonPreviews();
     const workers = wsServer.prepareFullReset();
     const dataRoot = db.fullReset();
 

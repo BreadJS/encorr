@@ -45,6 +45,7 @@ export function FileCompare() {
   const viewerRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef(false);
   const animationRef = useRef<number | null>(null);
+  const fallbackStartedRef = useRef(false);
   const [split, setSplit] = useState(50);
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -54,6 +55,9 @@ export function FileCompare() {
   const [audioSource, setAudioSource] = useState<'original' | 'transcoded'>('original');
   const [playbackRate, setPlaybackRate] = useState(1);
   const [mediaError, setMediaError] = useState<string | null>(null);
+  const [previewRequested, setPreviewRequested] = useState(false);
+  const [usingCompatiblePreview, setUsingCompatiblePreview] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   const query = useQuery({
     queryKey: ['file-comparison', id],
@@ -62,8 +66,53 @@ export function FileCompare() {
     retry: false,
   });
 
-  const originalUrl = id ? api.getComparisonStreamUrl(id, 'original') : '';
-  const transcodedUrl = id ? api.getComparisonStreamUrl(id, 'transcoded') : '';
+  const previewStatusQuery = useQuery({
+    queryKey: ['file-comparison-preview', id],
+    queryFn: () => api.getComparisonPreviewStatus(id),
+    enabled: Boolean(id) && previewRequested,
+    retry: false,
+    refetchInterval: result => {
+      const status = result.state.data?.status;
+      return status === 'ready' || status === 'failed' ? false : 1000;
+    },
+  });
+
+  useEffect(() => {
+    const status = previewStatusQuery.data;
+    if (status?.status === 'ready') {
+      setUsingCompatiblePreview(true);
+      setPreviewError(null);
+      setMediaError(null);
+      setPlaying(false);
+      setCurrentTime(0);
+      setDuration(0);
+    } else if (status?.status === 'failed') {
+      setPreviewError(status.error || 'The compatible preview could not be generated.');
+    }
+  }, [previewStatusQuery.data]);
+
+  const originalUrl = id ? api.getComparisonStreamUrl(id, 'original', usingCompatiblePreview) : '';
+  const transcodedUrl = id ? api.getComparisonStreamUrl(id, 'transcoded', usingCompatiblePreview) : '';
+
+  const requestCompatiblePreview = () => {
+    if (!id || fallbackStartedRef.current) return;
+    fallbackStartedRef.current = true;
+    setPreviewRequested(true);
+    setPreviewError(null);
+    setMediaError(null);
+    void api.prepareComparisonPreview(id).catch(error => {
+      setPreviewError(error instanceof Error ? error.message : 'Could not start compatible preview generation.');
+    });
+  };
+
+  const handleMediaError = (video: HTMLVideoElement | null, label: string) => {
+    const code = video?.error?.code;
+    if (!usingCompatiblePreview && (code === 3 || code === 4)) {
+      requestCompatiblePreview();
+      return;
+    }
+    setMediaError(mediaErrorMessage(video, label));
+  };
 
   const applyAudio = () => {
     const original = originalRef.current;
@@ -131,6 +180,10 @@ export function FileCompare() {
       original.pause();
       transcoded.pause();
       setPlaying(false);
+      if (!usingCompatiblePreview && ([original.error?.code, transcoded.error?.code].some(code => code === 3 || code === 4))) {
+        requestCompatiblePreview();
+        return;
+      }
       setMediaError('One of the videos could not start. Its codec may not be supported by this browser.');
       return;
     }
@@ -216,7 +269,7 @@ export function FileCompare() {
             className="absolute inset-0 h-full w-full bg-black object-contain"
             onLoadedMetadata={updateDuration}
             onEnded={() => { originalRef.current?.pause(); setPlaying(false); }}
-            onError={() => setMediaError(mediaErrorMessage(transcodedRef.current, 'Transcoded output'))}
+            onError={() => handleMediaError(transcodedRef.current, 'Transcoded output')}
           />
           <div className="pointer-events-none absolute inset-0 overflow-hidden" style={{ clipPath: `inset(0 ${100 - split}% 0 0)` }}>
             <video
@@ -227,7 +280,7 @@ export function FileCompare() {
               className="absolute inset-0 h-full w-full bg-black object-contain"
               onLoadedMetadata={updateDuration}
               onEnded={() => { transcodedRef.current?.pause(); setPlaying(false); }}
-              onError={() => setMediaError(mediaErrorMessage(originalRef.current, 'Original'))}
+              onError={() => handleMediaError(originalRef.current, 'Original')}
             />
           </div>
 
@@ -257,8 +310,24 @@ export function FileCompare() {
             <span className="absolute left-1/2 top-1/2 grid h-10 w-10 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full border-2 border-white bg-[#1e1d1f]/90 text-xs font-bold text-white shadow-xl">↔</span>
           </button>
 
-          {!playing && !mediaError && (
+          {!playing && !mediaError && (!previewRequested || usingCompatiblePreview) && (
             <button onClick={() => void togglePlayback()} className="absolute left-1/2 top-1/2 z-20 grid h-16 w-16 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full border border-white/25 bg-black/60 text-white backdrop-blur hover:bg-black/75" aria-label="Play comparison"><Play className="ml-1 h-7 w-7" /></button>
+          )}
+          {previewRequested && !usingCompatiblePreview && !previewError && (
+            <div className="absolute inset-0 z-20 grid place-items-center bg-black/80 p-6 text-center backdrop-blur-sm">
+              <div className="max-w-md">
+                <RefreshCw className="mx-auto h-8 w-8 animate-spin text-[#74c69d]" />
+                <p className="mt-4 font-medium text-white">Preparing a one-minute compatible preview</p>
+                <p className="mt-1 text-sm leading-6 text-gray-400">Only the first 60 seconds are converted. Both versions receive identical high-quality settings, and the result is cached after the first run.</p>
+                <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-[#74c69d] transition-all" style={{ width: `${previewStatusQuery.data?.progress || 0}%` }} /></div>
+                <p className="mt-2 text-xs tabular-nums text-gray-500">{previewStatusQuery.data?.progress || 0}%</p>
+              </div>
+            </div>
+          )}
+          {previewError && (
+            <div className="absolute inset-x-6 bottom-6 z-20 mx-auto flex max-w-2xl items-start gap-3 rounded-xl border border-red-500/40 bg-red-950/90 p-4 text-sm text-red-100 shadow-2xl backdrop-blur">
+              <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-400" /><div><p className="font-medium">Compatible preview failed</p><p className="mt-1 text-red-200/75">{previewError}</p></div>
+            </div>
           )}
           {mediaError && (
             <div className="absolute inset-x-6 bottom-6 z-20 mx-auto flex max-w-2xl items-start gap-3 rounded-xl border border-red-500/40 bg-red-950/90 p-4 text-sm text-red-100 shadow-2xl backdrop-blur">

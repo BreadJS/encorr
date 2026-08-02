@@ -34,9 +34,23 @@ function formatDate(timestamp?: number | null): string {
   }).format(new Date(timestamp * 1000));
 }
 
-function statusPresentation(status: string, errorMessage?: string | null) {
+function isBackupCleanupActive(record: { status: string; progress?: number; error_message?: string | null; current_action?: string | null }): boolean {
+  const action = String(record.current_action || '').toLowerCase();
+  return record.status === 'backup_retained'
+    && !record.error_message
+    && (safeNumber(record.progress) < 100 || action.includes('delet') || action === 'removal queued');
+}
+
+function statusPresentation(status: string, errorMessage?: string | null, progress?: number, currentAction?: string | null) {
   if (status === 'reclaimed') return { label: 'Reclaimed', color: 'bg-[#74c69d]/10 text-[#95d5b2]', icon: CheckCircle2 };
   if (status === 'backup_retained' && errorMessage) return { label: 'Removal failed', color: 'bg-red-400/10 text-red-300', icon: AlertTriangle };
+  if (isBackupCleanupActive({ status, error_message: errorMessage, progress, current_action: currentAction })) return {
+    label: safeNumber(progress) >= 100
+      ? 'Finalizing removal'
+      : currentAction && currentAction !== 'Waiting for node' ? currentAction : 'Removal queued',
+    color: 'bg-blue-400/10 text-blue-300',
+    icon: RefreshCw,
+  };
   if (status === 'backup_retained') return { label: 'Backup retained', color: 'bg-amber-400/10 text-amber-300', icon: Archive };
   if (status === 'failed') return { label: 'Failed', color: 'bg-red-400/10 text-red-300', icon: AlertTriangle };
   return { label: 'Replacement pending', color: 'bg-blue-400/10 text-blue-300', icon: RefreshCw };
@@ -74,19 +88,20 @@ export function Storage() {
   const query = useQuery({
     queryKey: ['storage-reclaims'],
     queryFn: () => api.getStorageReclaims(500),
-    refetchInterval: 15000,
+    refetchInterval: result => result.state.data?.records.some(isBackupCleanupActive) ? 750 : 15000,
   });
 
   const summary = query.data?.summary;
   const records = useMemo(() => query.data?.records || [], [query.data?.records]);
   const retainedRecords = useMemo(() => records.filter(record => record.status === 'backup_retained'), [records]);
-  const selectedRecords = retainedRecords.filter(record => selectedBackups.has(record.id));
-  const allRetainedSelected = retainedRecords.length > 0 && selectedRecords.length === retainedRecords.length;
+  const removableRecords = useMemo(() => retainedRecords.filter(record => !isBackupCleanupActive(record)), [retainedRecords]);
+  const selectedRecords = removableRecords.filter(record => selectedBackups.has(record.id));
+  const allRetainedSelected = removableRecords.length > 0 && selectedRecords.length === removableRecords.length;
 
   useEffect(() => {
-    const retainedIds = new Set(retainedRecords.map(record => record.id));
+    const retainedIds = new Set(removableRecords.map(record => record.id));
     setSelectedBackups(previous => new Set(Array.from(previous).filter(id => retainedIds.has(id))));
-  }, [retainedRecords]);
+  }, [removableRecords]);
 
   const cleanupMutation = useMutation({
     mutationFn: async (items: typeof retainedRecords) => {
@@ -103,6 +118,14 @@ export function Storage() {
       return { succeeded, failures };
     },
     onSuccess: ({ succeeded, failures }) => {
+      queryClient.setQueryData(['storage-reclaims'], (current: typeof query.data) => current ? {
+        ...current,
+        records: current.records.map(record => succeeded.includes(record.id)
+          && record.status === 'backup_retained'
+          && safeNumber(record.progress) >= 100
+          ? { ...record, progress: 0, current_action: 'Removal queued', error_message: null }
+          : record),
+      } : current);
       setSelectedBackups(previous => {
         const next = new Set(previous);
         succeeded.forEach(id => next.delete(id));
@@ -112,7 +135,7 @@ export function Storage() {
       setCleanupConfirmed(false);
       setCleanupNotice(failures.length > 0
         ? { type: 'error', message: `${succeeded.length.toLocaleString()} queued, ${failures.length.toLocaleString()} failed. ${failures[0]}` }
-        : { type: 'success', message: `${succeeded.length.toLocaleString()} backup removal${succeeded.length === 1 ? '' : 's'} added to Jobs.` });
+        : { type: 'success', message: `${succeeded.length.toLocaleString()} backup removal${succeeded.length === 1 ? '' : 's'} queued. Storage totals will update as soon as the node confirms deletion.` });
       void queryClient.invalidateQueries({ queryKey: ['storage-reclaims'] });
       void queryClient.invalidateQueries({ queryKey: ['jobs'] });
     },
@@ -227,8 +250,8 @@ export function Storage() {
                     <input
                       type="checkbox"
                       checked={allRetainedSelected}
-                      disabled={retainedRecords.length === 0}
-                      onChange={() => setSelectedBackups(allRetainedSelected ? new Set() : new Set(retainedRecords.map(record => record.id)))}
+                      disabled={removableRecords.length === 0}
+                      onChange={() => setSelectedBackups(allRetainedSelected ? new Set() : new Set(removableRecords.map(record => record.id)))}
                       className="h-4 w-4 accent-[#74c69d] disabled:opacity-30"
                       aria-label="Select all retained backups"
                     />
@@ -244,7 +267,8 @@ export function Storage() {
               </thead>
               <tbody className="divide-y divide-[#39363a]/70">
                 {records.map(record => {
-                  const presentation = statusPresentation(record.status, record.error_message);
+                  const cleanupActive = isBackupCleanupActive(record);
+                  const presentation = statusPresentation(record.status, record.error_message, record.progress, record.current_action);
                   const StatusIcon = presentation.icon;
                   const difference = safeNumber(record.bytes_reclaimed);
                   const retainedImpact = record.status === 'backup_retained' ? safeNumber(record.replacement_size) : 0;
@@ -252,7 +276,7 @@ export function Storage() {
                   return (
                     <tr key={record.id}>
                       <td className="px-4 py-4 text-center">
-                        {record.status === 'backup_retained' && (
+                        {record.status === 'backup_retained' && !cleanupActive && (
                           <input
                             type="checkbox"
                             checked={selectedBackups.has(record.id)}
@@ -271,11 +295,14 @@ export function Storage() {
                         <p className="truncate text-sm font-medium text-gray-200" title={record.filename}>{record.filename}</p>
                         <p className="mt-1 truncate text-[11px] text-gray-600">{record.library_name || 'Unknown library'}{record.node_name ? ` · ${record.node_name}` : ''}</p>
                       </td>
-                      <td className="px-4 py-4"><span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium ${presentation.color}`}><StatusIcon className={`h-3 w-3 ${record.status === 'pending' ? 'animate-spin' : ''}`} />{presentation.label}</span></td>
+                      <td className="px-4 py-4">
+                        <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium ${presentation.color}`}><StatusIcon className={`h-3 w-3 ${record.status === 'pending' || cleanupActive ? 'animate-spin' : ''}`} />{presentation.label}</span>
+                        {cleanupActive && <div className="mt-2 h-1 w-28 overflow-hidden rounded-full bg-white/[0.07]"><div className="h-full rounded-full bg-blue-400 transition-all" style={{ width: `${safeNumber(record.progress)}%` }} /></div>}
+                      </td>
                       <td className="px-4 py-4 text-right text-sm text-gray-400">{formatBytes(record.original_size)}</td>
                       <td className="px-4 py-4 text-right text-sm text-gray-400">{formatBytes(record.replacement_size)}</td>
                       <td className={`px-4 py-4 text-right text-sm font-medium ${record.status === 'backup_retained' ? 'text-amber-300' : difference > 0 ? 'text-[#95d5b2]' : difference < 0 ? 'text-amber-300' : 'text-gray-500'}`}>{record.status === 'reclaimed' ? `${difference >= 0 ? '' : '+'}${formatBytes(Math.abs(difference))}` : record.status === 'backup_retained' ? `+${formatBytes(retainedImpact)} claimed` : 'Not counted'}</td>
-                      <td className="px-4 py-4 text-right text-sm text-gray-400">{record.status === 'reclaimed' ? `${rowReduction}%` : record.status === 'backup_retained' ? `Remove ${formatBytes(record.original_size)}` : '—'}</td>
+                      <td className="px-4 py-4 text-right text-sm text-gray-400">{record.status === 'reclaimed' ? `${rowReduction}%` : cleanupActive ? `${Math.round(safeNumber(record.progress))}% complete` : record.status === 'backup_retained' ? `Remove ${formatBytes(record.original_size)}` : '—'}</td>
                       <td className="px-5 py-4 text-xs text-gray-500">{formatDate(record.reclaimed_at || record.created_at)}</td>
                     </tr>
                   );
