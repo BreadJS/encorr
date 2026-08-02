@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Activity,
@@ -11,10 +11,12 @@ import {
   Database,
   Film,
   Gauge,
+  HardDrive,
   Layers3,
   Minus,
   Monitor,
   Plus,
+  Play,
   RefreshCw,
   Scan,
   Search,
@@ -61,6 +63,14 @@ function vendorColor(vendor?: string) {
 }
 
 function jobType(job: any) {
+  if (job.file_operation || job.job_type === 'file_operation') {
+    const cleanup = job.operation === 'cleanup_backup';
+    return {
+      label: cleanup ? 'Delete backup' : job.operation === 'backup_replace' ? 'Backup & Replace' : 'Replace Original',
+      color: '#60a5fa',
+      Icon: HardDrive,
+    };
+  }
   const analyze = job.type === 'analyze'
     || job.preset_id === 'builtin-analyze'
     || job.preset_name?.toLowerCase().includes('analyze');
@@ -227,6 +237,9 @@ function JobRow({ job, tab, onDelete, deleting }: {
         <p className="truncate text-sm font-medium text-white" title={jobName(job)}>{jobName(job)}</p>
         <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-gray-500">
           <span>{job.preset_name || 'No preset information'}</span>
+          {job.post_action && job.post_action !== 'keep' && (
+            <span className="text-blue-300">After: {job.post_action === 'backup_replace' ? 'Backup & Replace' : 'Replace Original'}</span>
+          )}
           {job.original_codec && job.target_codec && (
             <span>{String(job.original_codec).toUpperCase()} → {String(job.target_codec).toUpperCase()}</span>
           )}
@@ -247,7 +260,9 @@ function JobRow({ job, tab, onDelete, deleting }: {
           <div className="text-xs">
             <p className="font-medium text-[#8bd5ad]">Completed</p>
             <p className="mt-1 text-[11px] text-gray-500">
-              {saving !== null ? `${saving}% smaller` : transcodedSize > 0 ? formatBytes(transcodedSize) : 'Output ready'}
+              {job.file_operation
+                ? `${job.current_action || 'File operation complete'} · ${formatBytes(numberValue(job.total_bytes))}`
+                : saving !== null ? `${saving}% smaller` : transcodedSize > 0 ? formatBytes(transcodedSize) : 'Output ready'}
             </p>
           </div>
         ) : tab === 'failed' ? (
@@ -257,22 +272,24 @@ function JobRow({ job, tab, onDelete, deleting }: {
         ) : (
           <div>
             <div className="mb-1.5 flex justify-between text-[11px] text-gray-500">
-              <span>Queued</span><span>{percentage(job.progress).toFixed(0)}%</span>
+              <span>{job.depends_on_job_id ? 'Waiting for analysis' : 'Queued'}</span><span>{percentage(job.progress).toFixed(0)}%</span>
             </div>
             <ProgressBar value={job.progress} color="#f59e0b" />
           </div>
         )}
       </div>
 
-      <button
-        type="button"
-        onClick={() => onDelete(job.id)}
-        disabled={deleting}
-        className="grid h-8 w-8 place-items-center rounded-lg border border-[#39363a] text-gray-500 hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-300 disabled:opacity-40"
-        title={tab === 'queue' ? 'Cancel job' : 'Remove from history'}
-      >
-        {tab === 'queue' ? <X className="h-3.5 w-3.5" /> : <Trash2 className="h-3.5 w-3.5" />}
-      </button>
+      {!job.file_operation ? (
+        <button
+          type="button"
+          onClick={() => onDelete(job.id)}
+          disabled={deleting}
+          className="grid h-8 w-8 place-items-center rounded-lg border border-[#39363a] text-gray-500 hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-300 disabled:opacity-40"
+          title={tab === 'queue' ? 'Cancel job' : 'Remove from history'}
+        >
+          {tab === 'queue' ? <X className="h-3.5 w-3.5" /> : <Trash2 className="h-3.5 w-3.5" />}
+        </button>
+      ) : <div className="h-8 w-8" />}
     </div>
   );
 }
@@ -310,6 +327,7 @@ function WorkerCard({
     };
   });
   const totalSlots = limits.cpu + limits.gpus.reduce((sum, value) => sum + value, 0);
+  const computeJobsInUse = activeJobs.filter((job: any) => !job.file_operation).length;
   const ramTotal = numberValue(node.system_info?.ram_total);
   const ramUsage = percentage(node.ram_usage);
 
@@ -332,12 +350,12 @@ function WorkerCard({
               </span>
             </div>
             <p className="mt-1 truncate text-[11px] text-gray-500">
-              {activeJobs.length}/{totalSlots} slots in use · {node.system_info?.cpu_cores || '—'} cores · {gpus.length} GPU{gpus.length === 1 ? '' : 's'}
+              {computeJobsInUse}/{totalSlots} slots in use · {node.system_info?.cpu_cores || '—'} cores · {gpus.length} GPU{gpus.length === 1 ? '' : 's'}
             </p>
           </div>
         </div>
         <div className="text-right">
-          <p className="text-sm font-semibold tabular-nums text-white">{Math.max(0, totalSlots - activeJobs.length)} free</p>
+          <p className="text-sm font-semibold tabular-nums text-white">{Math.max(0, totalSlots - computeJobsInUse)} free</p>
           <p className="text-[10px] uppercase tracking-wider text-gray-600">worker slots</p>
         </div>
       </header>
@@ -473,28 +491,34 @@ function WorkerCard({
                   </div>
                   <div>
                     <p className="text-[9px] font-medium uppercase tracking-wider text-gray-600">Device</p>
-                    <p className="mt-1 text-xs font-medium text-gray-300">{job.gpu != null ? `GPU ${numberValue(job.gpu) + 1}` : 'CPU'}</p>
+                    <p className="mt-1 text-xs font-medium text-gray-300">{job.file_operation ? 'Storage' : job.gpu != null ? `GPU ${numberValue(job.gpu) + 1}` : 'CPU'}</p>
                     {elapsed && <p className="mt-0.5 text-[10px] tabular-nums text-gray-600">running {elapsed}</p>}
                   </div>
                   <div>
                     <p className="text-[9px] font-medium uppercase tracking-wider text-gray-600">Throughput</p>
-                    <p className="mt-1 text-xs tabular-nums text-gray-300">{job.fps ? `${Math.round(numberValue(job.fps))} fps` : '— fps'}</p>
-                    <p className="mt-0.5 text-[10px] tabular-nums text-gray-600">{job.ratio ? `${job.ratio} output` : 'Ratio unavailable'}</p>
+                    <p className="mt-1 text-xs tabular-nums text-gray-300">
+                      {job.file_operation ? `${numberValue(job.speed_mbps).toFixed(1)} MB/s` : job.fps ? `${Math.round(numberValue(job.fps))} fps` : '— fps'}
+                    </p>
+                    <p className="mt-0.5 text-[10px] tabular-nums text-gray-600">
+                      {job.file_operation
+                        ? `${formatBytes(numberValue(job.bytes_processed))} / ${formatBytes(numberValue(job.total_bytes))}`
+                        : job.ratio ? `${job.ratio} output` : 'Ratio unavailable'}
+                    </p>
                   </div>
                   <div>
                     <div className="mb-1.5 flex justify-between text-[11px] text-gray-500">
-                      <span>{job.eta ? `ETA ${job.eta}` : 'ETA unavailable'}</span><span className="font-medium text-gray-300">{percentage(job.progress).toFixed(1)}%</span>
+                      <span>{job.file_operation ? job.current_action : job.eta ? `ETA ${job.eta}` : 'ETA unavailable'}</span><span className="font-medium text-gray-300">{percentage(job.progress).toFixed(1)}%</span>
                     </div>
                     <ProgressBar value={job.progress} />
                   </div>
-                  <button
+                  {!job.file_operation ? <button
                     type="button"
                     onClick={() => onCancelJob(job.id)}
                     className="grid h-8 w-8 place-items-center rounded-lg border border-[#39363a] text-gray-500 hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-300"
                     title="Cancel active job"
                   >
                     <X className="h-3.5 w-3.5" />
-                  </button>
+                  </button> : <div className="grid h-8 w-8 place-items-center text-[#60a5fa]" title="Managed file operation"><HardDrive className="h-3.5 w-3.5" /></div>}
                 </div>
               );
             })}
@@ -511,6 +535,17 @@ export function Jobs() {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
   const [clearTarget, setClearTarget] = useState<JobTab | null>(null);
+  const [showStartJob, setShowStartJob] = useState(false);
+  const [jobLibraryId, setJobLibraryId] = useState('all');
+  const [analyzeSelected, setAnalyzeSelected] = useState(true);
+  const [transcodeSelected, setTranscodeSelected] = useState(false);
+  const [newJobQuickSelectId, setNewJobQuickSelectId] = useState('');
+  const [allowGpuRouting, setAllowGpuRouting] = useState(true);
+  const [allowCpuRouting, setAllowCpuRouting] = useState(false);
+  const [newJobPostAction, setNewJobPostAction] = useState<'keep' | 'replace' | 'backup_replace'>('keep');
+  const [includeTranscoded, setIncludeTranscoded] = useState(false);
+  const [autoReplaceConfirmed, setAutoReplaceConfirmed] = useState(false);
+  const [startResult, setStartResult] = useState<{ queued: number; skipped: number; total: number } | null>(null);
   const perPage = activeTab === 'queue' ? 5 : 15;
 
   useWebSocket({ channels: ['nodes', 'jobs'] });
@@ -520,6 +555,20 @@ export function Jobs() {
     queryFn: () => api.getNodes(),
     staleTime: Infinity,
   });
+
+  const { data: libraries = [] } = useQuery({
+    queryKey: ['libraries'],
+    queryFn: () => api.getLibraries(),
+  });
+
+  const { data: quickSelectPresets = [] } = useQuery({
+    queryKey: ['quick-select-presets'],
+    queryFn: () => api.getQuickSelectPresets(),
+  });
+
+  useEffect(() => {
+    if (!newJobQuickSelectId && quickSelectPresets.length > 0) setNewJobQuickSelectId(quickSelectPresets[0].id);
+  }, [newJobQuickSelectId, quickSelectPresets]);
 
   const { data: allJobs = [], isLoading, isFetching: jobsFetching, refetch: refetchJobs } = useQuery({
     queryKey: ['jobs'],
@@ -562,10 +611,10 @@ export function Jobs() {
     }, 0);
     return {
       slots,
-      free: Math.max(0, slots - activeJobs.length),
+      free: Math.max(0, slots - activeJobs.filter((job: any) => !job.file_operation).length),
       online: onlineNodes.length,
     };
-  }, [activeJobs.length, onlineNodes]);
+  }, [activeJobs, onlineNodes]);
 
   const selectedJobs = categorized[activeTab];
   const filteredJobs = useMemo(() => {
@@ -618,12 +667,30 @@ export function Jobs() {
     onSettled: () => queryClient.invalidateQueries({ queryKey: ['nodes'] }),
   });
 
+  const startJobMutation = useMutation({
+    mutationFn: () => api.createLibraryJob({
+      library_id: jobLibraryId,
+      analyze: analyzeSelected,
+      transcode: transcodeSelected,
+      quick_select_id: transcodeSelected ? newJobQuickSelectId : undefined,
+      allow_gpu: transcodeSelected ? allowGpuRouting : undefined,
+      allow_cpu: transcodeSelected ? allowCpuRouting : undefined,
+      post_action: transcodeSelected ? newJobPostAction : 'keep',
+      include_transcoded: transcodeSelected ? includeTranscoded : false,
+    }),
+    onSuccess: result => {
+      setStartResult(result);
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
+      queryClient.invalidateQueries({ queryKey: ['files'] });
+    },
+  });
+
   const confirmClear = () => {
     if (!clearTarget) return;
     const jobs = clearTarget === 'queue'
       ? categorized.queue
       : categorized[clearTarget];
-    bulkDeleteMutation.mutate(jobs.map((job: any) => job.id));
+    bulkDeleteMutation.mutate(jobs.filter((job: any) => !job.file_operation).map((job: any) => job.id));
     setClearTarget(null);
   };
 
@@ -657,14 +724,23 @@ export function Jobs() {
           <h1 className="text-3xl font-semibold tracking-tight text-white">Jobs</h1>
           <p className="mt-1.5 text-sm text-gray-500">Follow queued work, active encodes, and worker capacity in real time.</p>
         </div>
-        <button
-          type="button"
-          onClick={() => { refetchNodes(); refetchJobs(); }}
-          disabled={refreshing}
-          className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-[#39363a] bg-[#222123] px-3 text-xs font-medium text-gray-300 hover:bg-[#282729] disabled:opacity-40"
-        >
-          <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} /> Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => { setStartResult(null); setAutoReplaceConfirmed(false); setAllowGpuRouting(true); setAllowCpuRouting(false); setShowStartJob(true); }}
+            className="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-[#74c69d] px-4 text-xs font-semibold text-[#102019] hover:bg-[#8bd5ad]"
+          >
+            <Play className="h-3.5 w-3.5 fill-current" /> Start job
+          </button>
+          <button
+            type="button"
+            onClick={() => { refetchNodes(); refetchJobs(); }}
+            disabled={refreshing}
+            className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-[#39363a] bg-[#222123] px-3 text-xs font-medium text-gray-300 hover:bg-[#282729] disabled:opacity-40"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} /> Refresh
+          </button>
+        </div>
       </header>
 
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -816,6 +892,159 @@ export function Jobs() {
           </div>
         )}
       </section>
+
+      {showStartJob && (
+        <Dialog
+          open
+          onClose={() => { if (!startJobMutation.isPending) setShowStartJob(false); }}
+          title="Start a library job"
+          size="lg"
+        >
+          {startResult ? (
+            <div className="space-y-5">
+              <div className="rounded-xl border border-[#365a49] bg-[#1b3027] p-5 text-center">
+                <CheckCircle2 className="mx-auto h-8 w-8 text-[#74c69d]" />
+                <p className="mt-3 text-xl font-semibold text-white">{countFormatter.format(startResult.queued)} jobs queued</p>
+                <p className="mt-1 text-sm text-gray-400">
+                  {countFormatter.format(startResult.skipped)} of {countFormatter.format(startResult.total)} files were skipped because they were not eligible or already queued.
+                </p>
+              </div>
+              <div className="flex justify-end">
+                <button type="button" onClick={() => setShowStartJob(false)} className="h-9 rounded-lg bg-[#74c69d] px-5 text-xs font-semibold text-[#102019]">Done</button>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-5">
+              <div>
+                <label className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-500">Library</label>
+                <select
+                  value={jobLibraryId}
+                  onChange={event => setJobLibraryId(event.target.value)}
+                  className="mt-2 h-10 w-full rounded-lg border border-[#39363a] bg-[#1e1d1f] px-3 text-sm text-white outline-none focus:border-[#5b7869]"
+                >
+                  <option value="all">All libraries</option>
+                  {libraries.map((library: any) => <option key={library.id} value={library.id}>{library.name} · {countFormatter.format(library.file_count || 0)} files</option>)}
+                </select>
+              </div>
+
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-500">What should Encorr do?</p>
+                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                  {([
+                    { id: 'analyze', selected: analyzeSelected, toggle: () => setAnalyzeSelected(value => !value), title: 'Analyze files', detail: 'Read metadata where it is missing. When combined with transcode, each transcode waits for its analysis.', Icon: Scan },
+                    { id: 'transcode', selected: transcodeSelected, toggle: () => setTranscodeSelected(value => !value), title: 'Transcode files', detail: 'Process analyzed files—or files analyzed by this same workflow—with the selected preset.', Icon: Film },
+                  ] as const).map(option => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      onClick={option.toggle}
+                      aria-pressed={option.selected}
+                      className={`relative rounded-xl border p-4 text-left ${option.selected ? 'border-[#5b8f75] bg-[#1b3027]' : 'border-[#39363a] bg-[#222123]'}`}
+                    >
+                      <span className={`absolute right-3 top-3 grid h-5 w-5 place-items-center rounded border ${option.selected ? 'border-[#74c69d] bg-[#74c69d] text-[#102019]' : 'border-[#4a474b] text-transparent'}`}><CheckCircle2 className="h-3.5 w-3.5" /></span>
+                      <option.Icon className={`h-5 w-5 ${option.selected ? 'text-[#74c69d]' : 'text-gray-500'}`} />
+                      <p className="mt-3 text-sm font-semibold text-white">{option.title}</p>
+                      <p className="mt-1 text-xs leading-5 text-gray-500">{option.detail}</p>
+                    </button>
+                  ))}
+                </div>
+                {!analyzeSelected && !transcodeSelected && <p className="mt-2 text-xs text-amber-300">Select at least one operation. You can select both.</p>}
+              </div>
+
+              {transcodeSelected && (
+                <>
+                  <div>
+                    <label className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-500">Quick Select routing</label>
+                    <select
+                      value={newJobQuickSelectId}
+                      onChange={event => setNewJobQuickSelectId(event.target.value)}
+                      className="mt-2 h-10 w-full rounded-lg border border-[#39363a] bg-[#1e1d1f] px-3 text-sm text-white outline-none focus:border-[#5b7869]"
+                    >
+                      {quickSelectPresets.map((preset: any) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}
+                    </select>
+                    {quickSelectPresets.find((preset: any) => preset.id === newJobQuickSelectId)?.description && (
+                      <p className="mt-2 text-xs leading-5 text-gray-500">{quickSelectPresets.find((preset: any) => preset.id === newJobQuickSelectId)?.description}</p>
+                    )}
+                    <p className="mt-2 text-xs leading-5 text-blue-300/80">The server resolves this route against compatible workers at assignment time, using only the worker types enabled below.</p>
+                  </div>
+
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-500">Allowed worker types</p>
+                    <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={allowGpuRouting}
+                        onClick={() => setAllowGpuRouting(value => !value)}
+                        className={`flex items-center justify-between rounded-lg border p-3 text-left ${allowGpuRouting ? 'border-[#5b8f75] bg-[#1b3027]' : 'border-[#39363a] bg-[#222123]'}`}
+                      >
+                        <span><span className="block text-sm font-medium text-white">GPU transcoding</span><span className="mt-0.5 block text-xs text-gray-500">NVIDIA, AMD, and Intel routes</span></span>
+                        <span className={`relative h-5 w-9 rounded-full transition-colors ${allowGpuRouting ? 'bg-[#74c69d]' : 'bg-[#454247]'}`}><span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${allowGpuRouting ? 'translate-x-[18px]' : 'translate-x-0.5'}`} /></span>
+                      </button>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={allowCpuRouting}
+                        onClick={() => setAllowCpuRouting(value => !value)}
+                        className={`flex items-center justify-between rounded-lg border p-3 text-left ${allowCpuRouting ? 'border-[#5b8f75] bg-[#1b3027]' : 'border-[#39363a] bg-[#222123]'}`}
+                      >
+                        <span><span className="block text-sm font-medium text-white">CPU transcoding</span><span className="mt-0.5 block text-xs text-gray-500">Portable fallback route</span></span>
+                        <span className={`relative h-5 w-9 rounded-full transition-colors ${allowCpuRouting ? 'bg-[#74c69d]' : 'bg-[#454247]'}`}><span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${allowCpuRouting ? 'translate-x-[18px]' : 'translate-x-0.5'}`} /></span>
+                      </button>
+                    </div>
+                    {!allowGpuRouting && !allowCpuRouting && <p className="mt-2 text-xs text-amber-300">Enable at least one worker type.</p>}
+                  </div>
+
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-500">After each transcode</p>
+                    <div className="mt-2 space-y-2">
+                      {([
+                        { id: 'keep', title: 'Keep output separate', detail: 'Safest option. The transcoded output remains available in the Transcoded section for manual review.' },
+                        { id: 'backup_replace', title: 'Backup & Replace', detail: 'Rename the original to .org, then install the transcoded file. You can remove the backup later.' },
+                        { id: 'replace', title: 'Replace Original', detail: 'Automatically install the transcoded file without retaining an original backup.' },
+                      ] as const).map(option => (
+                        <label key={option.id} className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 ${newJobPostAction === option.id ? 'border-[#5b8f75] bg-[#1b3027]' : 'border-[#39363a] bg-[#222123]'}`}>
+                          <input type="radio" name="post-action" checked={newJobPostAction === option.id} onChange={() => { setNewJobPostAction(option.id); setAutoReplaceConfirmed(false); }} className="mt-1 accent-[#74c69d]" />
+                          <span><span className="block text-sm font-medium text-white">{option.title}</span><span className="mt-0.5 block text-xs leading-5 text-gray-500">{option.detail}</span></span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+
+                  <label className="flex items-start gap-3 rounded-lg border border-[#39363a] bg-[#222123] p-3">
+                    <input type="checkbox" checked={includeTranscoded} onChange={event => setIncludeTranscoded(event.target.checked)} className="mt-0.5 accent-[#74c69d]" />
+                    <span><span className="block text-sm text-gray-300">Include files that already have a completed transcode</span><span className="mt-0.5 block text-xs text-gray-500">Normally these are skipped to avoid generating duplicate outputs.</span></span>
+                  </label>
+
+                  {newJobPostAction === 'replace' && (
+                    <label className="flex cursor-pointer gap-3 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-xs leading-5 text-red-200">
+                      <input type="checkbox" checked={autoReplaceConfirmed} onChange={event => setAutoReplaceConfirmed(event.target.checked)} className="mt-1 shrink-0 accent-red-500" />
+                      <span><span className="flex items-center gap-1.5 font-semibold"><AlertTriangle className="h-4 w-4" /> Confirm automatic replacement</span><span className="mt-1 block">I understand that originals will be replaced automatically as each transcode completes and no .org backup will be retained.</span></span>
+                    </label>
+                  )}
+                </>
+              )}
+
+              {startJobMutation.isError && (
+                <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300">{startJobMutation.error instanceof Error ? startJobMutation.error.message : 'Could not create jobs.'}</div>
+              )}
+
+              <div className="flex justify-end gap-2 border-t border-[#39363a] pt-4">
+                <button type="button" onClick={() => setShowStartJob(false)} disabled={startJobMutation.isPending} className="h-9 rounded-lg border border-[#39363a] px-4 text-xs font-medium text-gray-300 disabled:opacity-40">Cancel</button>
+                <button
+                  type="button"
+                  onClick={() => startJobMutation.mutate()}
+                  disabled={startJobMutation.isPending || libraries.length === 0 || (!analyzeSelected && !transcodeSelected) || (transcodeSelected && (!newJobQuickSelectId || (!allowGpuRouting && !allowCpuRouting) || (newJobPostAction === 'replace' && !autoReplaceConfirmed)))}
+                  className="inline-flex h-9 items-center gap-2 rounded-lg bg-[#74c69d] px-5 text-xs font-semibold text-[#102019] disabled:opacity-40"
+                >
+                  {startJobMutation.isPending ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5 fill-current" />}
+                  {startJobMutation.isPending ? 'Queueing…' : 'Start jobs'}
+                </button>
+              </div>
+            </div>
+          )}
+        </Dialog>
+      )}
 
       {clearTarget && (
         <Dialog

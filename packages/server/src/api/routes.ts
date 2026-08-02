@@ -77,6 +77,10 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
 
     const nodesWithStatus = nodes.map(node => ({
       ...node,
+      active_jobs: (node.active_jobs || []).filter(activeJob => {
+        const job = db.getJobById(activeJob.id);
+        return job?.status === 'assigned' || job?.status === 'processing';
+      }),
       connected: connectedNodes.includes(node.id),
     }));
 
@@ -94,7 +98,14 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
 
     const connected = wsServer.isNodeConnected(id);
 
-    return sendSuccess({ ...node, connected });
+    return sendSuccess({
+      ...node,
+      active_jobs: (node.active_jobs || []).filter(activeJob => {
+        const job = db.getJobById(activeJob.id);
+        return job?.status === 'assigned' || job?.status === 'processing';
+      }),
+      connected,
+    });
   });
 
   fastify.delete('/nodes/:id', async (request, reply) => {
@@ -591,15 +602,13 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       return bTime - aTime;
     })[0];
 
-    // Get the job to find the output path and node
+    // Reports are permanent while completed jobs may be cleared from the Jobs
+    // page. Prefer the job when it still exists, otherwise use report data.
     const job = db.getJobById(latestReport.job_id);
-    if (!job || !job.output_path) {
-      reply.status(400);
-      return sendError('Transcoded file not found');
-    }
 
     // Get the node that processed this job
-    const node = job.node_id ? db.getNodeById(job.node_id) : null;
+    const completedNodeId = job?.node_id || latestReport.node_id;
+    const node = completedNodeId ? db.getNodeById(completedNodeId) : null;
     if (!node) {
       reply.status(400);
       return sendError('Node that processed this job is not available');
@@ -622,7 +631,8 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     }
 
     // Get the file entry to find the folder mapping used for this job
-    const fileEntry = db.getFileById(job.file_id);
+    const fileEntry = (job ? db.getFileById(job.file_id) : undefined)
+      || db.getFileForLibraryFile(id, node.id);
 
     if (!fileEntry) {
       reply.status(404);
@@ -663,6 +673,12 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       targetPath = `${mapping?.node_path || library.path}/${fileEntry.relative_path}`;
     }
 
+    // Older reports did not persist output_path. Their destination is still
+    // deterministic: transcodes are written beside the source as *_enc.mkv.
+    const outputPath = job?.output_path
+      || latestReport.output_path
+      || targetPath.replace(/\.[^.]+$/, '_enc.mkv');
+
     logger.info(`[FILE_REPLACE] Target path for node ${node.id}: ${targetPath}`);
 
     const reclaimId = db.createStorageReclaim({
@@ -673,18 +689,18 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       operation: 'replace',
       original_size: Number(latestReport.original_size || file.filesize || 0),
       replacement_size: Number(latestReport.output_size || 0),
-      job_id: job.id,
+      job_id: latestReport.job_id,
       node_id: node.id,
       node_name: node.name,
       original_path: targetPath,
-      replacement_path: job.output_path,
+      replacement_path: outputPath,
     });
 
     const sent = wsServer.sendFileReplaceCommand(node.id, {
       operation_id: reclaimId,
       file_id: id,
       operation: 'replace',
-      source_path: job.output_path,
+      source_path: outputPath,
       target_path: targetPath,
       original_filename: file.filename,
     });
@@ -730,15 +746,13 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       return bTime - aTime;
     })[0];
 
-    // Get the job to find the output path and node
+    // Reports are permanent while completed jobs may be cleared from the Jobs
+    // page. Prefer the job when it still exists, otherwise use report data.
     const job = db.getJobById(latestReport.job_id);
-    if (!job || !job.output_path) {
-      reply.status(400);
-      return sendError('Transcoded file not found');
-    }
 
     // Get the node that processed this job
-    const node = job.node_id ? db.getNodeById(job.node_id) : null;
+    const completedNodeId = job?.node_id || latestReport.node_id;
+    const node = completedNodeId ? db.getNodeById(completedNodeId) : null;
     if (!node) {
       reply.status(400);
       return sendError('Node that processed this job is not available');
@@ -761,7 +775,8 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     }
 
     // Get the file entry to find the folder mapping used for this job
-    const fileEntry = db.getFileById(job.file_id);
+    const fileEntry = (job ? db.getFileById(job.file_id) : undefined)
+      || db.getFileForLibraryFile(id, node.id);
 
     if (!fileEntry) {
       reply.status(404);
@@ -802,6 +817,12 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       targetPath = `${mapping?.node_path || library.path}/${fileEntry.relative_path}`;
     }
 
+    // Older reports did not persist output_path. Their destination is still
+    // deterministic: transcodes are written beside the source as *_enc.mkv.
+    const outputPath = job?.output_path
+      || latestReport.output_path
+      || targetPath.replace(/\.[^.]+$/, '_enc.mkv');
+
     logger.info(`[FILE_REPLACE] Target path for node ${node.id}: ${targetPath}`);
 
     const reclaimId = db.createStorageReclaim({
@@ -812,18 +833,18 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       operation: 'backup_replace',
       original_size: Number(latestReport.original_size || file.filesize || 0),
       replacement_size: Number(latestReport.output_size || 0),
-      job_id: job.id,
+      job_id: latestReport.job_id,
       node_id: node.id,
       node_name: node.name,
       original_path: targetPath,
-      replacement_path: job.output_path,
+      replacement_path: outputPath,
     });
 
     const sent = wsServer.sendFileReplaceCommand(node.id, {
       operation_id: reclaimId,
       file_id: id,
       operation: 'backup_replace',
-      source_path: job.output_path,
+      source_path: outputPath,
       target_path: targetPath,
       original_filename: file.filename,
     });
@@ -1068,6 +1089,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       all: allFiles.length,
       ready: 0,
       processing: 0,
+      transcoded: 0,
       completed: 0,
       failed: 0,
       cancelled: 0,
@@ -1079,10 +1101,12 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
         displayStatus = 'pending';
       } else if (activeAnalysisFileIds.has(file.id)) {
         displayStatus = 'processing';
+      } else if (file.status === 'completed' || file.status === 'backup_replaced') {
+        displayStatus = 'completed';
       } else {
         const latestReport = latestTranscodeReports.get(file.id);
         if (latestReport) {
-          displayStatus = latestReport.status;
+          displayStatus = latestReport.status === 'completed' ? 'transcoded' : latestReport.status;
         } else if (file.status === 'analyzed' || file.status === 'imported') {
           displayStatus = 'ready';
         }
@@ -1090,6 +1114,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
 
       if (displayStatus === 'ready') statusCounts.ready++;
       else if (displayStatus === 'processing') statusCounts.processing++;
+      else if (displayStatus === 'transcoded') statusCounts.transcoded++;
       else if (displayStatus === 'completed') statusCounts.completed++;
       else if (displayStatus === 'failed') statusCounts.failed++;
       else if (displayStatus === 'cancelled') statusCounts.cancelled++;
@@ -1339,6 +1364,92 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
   // Jobs
   // ========================================================================
 
+  fastify.post('/jobs/library', async (request, reply) => {
+    const data = (request.body || {}) as {
+      library_id: string;
+      analyze: boolean;
+      transcode: boolean;
+      quick_select_id?: string;
+      allow_gpu?: boolean;
+      allow_cpu?: boolean;
+      post_action?: 'keep' | 'replace' | 'backup_replace';
+      include_transcoded?: boolean;
+    };
+    const libraries = data.library_id === 'all'
+      ? db.getAllLibraries()
+      : [db.getLibraryById(data.library_id)].filter(Boolean) as any[];
+    if (libraries.length === 0) {
+      reply.status(404);
+      return sendError('Library not found');
+    }
+    if (!data.analyze && !data.transcode) {
+      reply.status(400);
+      return sendError('Choose analysis, transcoding, or both');
+    }
+    const quickSelect = data.quick_select_id ? db.getQuickSelectPresetById(data.quick_select_id) : null;
+    const routingPresetId = quickSelect
+      ? quickSelect.cpu_preset_id || quickSelect.nvidia_preset_id || quickSelect.amd_preset_id || quickSelect.intel_preset_id
+      : null;
+    if (data.transcode && (!quickSelect || !routingPresetId || !db.getPresetById(routingPresetId))) {
+      reply.status(400);
+      return sendError('Choose a valid Quick Select routing preset');
+    }
+    if (data.transcode && data.allow_gpu === false && data.allow_cpu === false) {
+      reply.status(400);
+      return sendError('Enable GPU routing, CPU routing, or both');
+    }
+
+    const libraryFiles = libraries.flatMap(library => db.getLibraryFiles(library.id));
+    const alreadyTranscoded = new Set(
+      db.getLatestTranscodeReports()
+        .filter((report: any) => report.status === 'completed')
+        .map((report: any) => report.library_file_id || report.file_id),
+    );
+    let queued = 0;
+    let filesQueued = 0;
+    for (let index = 0; index < libraryFiles.length; index++) {
+      const file = libraryFiles[index];
+      const replaced = file.status === 'completed' || file.status === 'backup_replaced';
+      let createdForFile = false;
+      let analysisJob: any = null;
+
+      if (data.analyze && !file.metadata?.video_codec && !replaced) {
+        analysisJob = db.createJobForLibraryFile(file.id, 'builtin-analyze');
+        if (analysisJob) {
+          queued++;
+          createdForFile = true;
+        }
+      }
+
+      const canTranscode = !replaced
+        && (file.metadata?.video_codec || analysisJob)
+        && (data.include_transcoded || !alreadyTranscoded.has(file.id));
+      if (data.transcode && canTranscode) {
+        const transcodeJob = db.createJobForLibraryFile(
+          file.id,
+          routingPresetId!,
+          undefined,
+          data.post_action || 'keep',
+          analysisJob?.id,
+          quickSelect!.id,
+          data.allow_gpu !== false,
+          data.allow_cpu === true,
+        );
+        if (transcodeJob) {
+          queued++;
+          createdForFile = true;
+        }
+      }
+
+      if (createdForFile) filesQueued++;
+      if ((index + 1) % 100 === 0) await new Promise<void>(resolve => setImmediate(resolve));
+    }
+
+    wsServer.broadcastJobsUpdate();
+    wsServer.assignJobsNow();
+    return sendSuccess({ queued, skipped: libraryFiles.length - filesQueued, total: libraryFiles.length });
+  });
+
   fastify.get('/jobs', async (request, reply) => {
     const { status, limit, offset } = request.query as {
       status?: string;
@@ -1357,6 +1468,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     const enrichedJobs = jobs.map(job => {
       const file = db.getFileById(job.file_id);
       const preset = db.getPresetById(job.preset_id);
+      const quickSelect = job.quick_select_id ? db.getQuickSelectPresetById(job.quick_select_id) : null;
       const node = job.node_id ? db.getNodeById(job.node_id) : null;
 
       // Check if this is a library file and get metadata
@@ -1386,8 +1498,12 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
         ...job,
         file_name: file?.relative_path,
         file_size: file?.original_size,
-        preset_name: preset?.name,
+        preset_name: quickSelect ? `Quick Select · ${quickSelect.name}` : preset?.name,
+        routed_preset_name: quickSelect ? preset?.name : null,
         job_type: (preset?.config as any)?.action === 'analyze' ? 'analyze' : 'transcode',
+        encoding_type: (preset?.config as any)?.action === 'analyze'
+          ? 'cpu'
+          : ((preset?.config as any)?.encoding_type || 'cpu'),
         node_name: node?.name,
         // Include metadata fields for display
         original_codec: codec,
@@ -1411,7 +1527,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
         operation_id: operation.id,
         file_id: operation.library_file_id,
         file_operation: true,
-        operation: operation.operation,
+        operation: cleanupInProgress ? 'cleanup_backup' : operation.operation,
         job_type: 'file_operation',
         status: mappedStatus,
         progress: Number(operation.progress || 0),
@@ -2159,11 +2275,11 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
   });
 
   fastify.get('/storage-reclaims', async (request, reply) => {
-    const { limit } = request.query as { limit?: string };
+    const { limit, file_id } = request.query as { limit?: string; file_id?: string };
     const parsedLimit = Math.min(1000, Math.max(1, Number.parseInt(limit || '250', 10) || 250));
     return sendSuccess({
       summary: db.getStorageReclaimStats(),
-      records: db.getStorageReclaims(parsedLimit),
+      records: db.getStorageReclaims(parsedLimit, file_id),
     });
   });
 

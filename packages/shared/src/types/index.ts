@@ -192,6 +192,11 @@ export interface Job {
   error_message: string | null;
   stats: string | null;
   output_path?: string | null;  // Path to the transcoded output file
+  post_action?: 'keep' | 'replace' | 'backup_replace';
+  depends_on_job_id?: string | null;
+  quick_select_id?: string | null;
+  allow_gpu?: boolean;
+  allow_cpu?: boolean;
   started_at: number | null;
   completed_at: number | null;
   created_at: number;
@@ -247,6 +252,7 @@ export interface JobReport {
   node_logs: string | null;
   original_size: number | null;
   output_size: number | null;
+  output_path: string | null;
   original_codec: string | null;
   output_codec: string | null;
   original_resolution: string | null;
@@ -398,6 +404,9 @@ export interface DashboardStats {
     net_change: number;
     replaced_files: number;
     backup_retained: number;
+    retained_original_size: number;
+    retained_replacement_size: number;
+    claimed_footprint: number;
   };
 }
 

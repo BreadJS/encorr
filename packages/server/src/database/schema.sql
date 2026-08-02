@@ -119,6 +119,11 @@ CREATE TABLE IF NOT EXISTS jobs (
     error_message TEXT,
     stats TEXT, -- JSON: Completion stats
     output_path TEXT, -- Path to the transcoded output file
+    post_action TEXT NOT NULL DEFAULT 'keep' CHECK(post_action IN ('keep', 'replace', 'backup_replace')),
+    depends_on_job_id TEXT,
+    quick_select_id TEXT,
+    allow_gpu BOOLEAN NOT NULL DEFAULT 1,
+    allow_cpu BOOLEAN NOT NULL DEFAULT 1,
     started_at INTEGER,
     completed_at INTEGER,
     created_at INTEGER DEFAULT (strftime('%s', 'now')),
@@ -181,6 +186,7 @@ CREATE TABLE IF NOT EXISTS job_reports (
     node_logs TEXT,
     original_size INTEGER,
     output_size INTEGER,
+    output_path TEXT,
     original_codec TEXT,
     output_codec TEXT,
     original_resolution TEXT,

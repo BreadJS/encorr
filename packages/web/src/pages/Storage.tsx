@@ -72,11 +72,15 @@ export function Storage() {
   const originalSize = safeNumber(summary?.original_size);
   const replacementSize = safeNumber(summary?.replacement_size);
   const reclaimed = safeNumber(summary?.saved_space);
-  const increased = safeNumber(summary?.storage_increased);
   const confirmedFiles = safeNumber(summary?.replaced_files);
   const retainedBackups = safeNumber(summary?.backup_retained);
+  const retainedOriginalSize = safeNumber(summary?.retained_original_size);
+  const retainedReplacementSize = safeNumber(summary?.retained_replacement_size);
+  const claimedFootprint = safeNumber(summary?.claimed_footprint);
   const reduction = percentage(reclaimed, originalSize);
-  const replacementShare = originalSize > 0 ? Math.min(100, (replacementSize / originalSize) * 100) : 0;
+  const trackedOriginalBaseline = originalSize + retainedOriginalSize;
+  const installedReplacementSize = replacementSize + retainedReplacementSize;
+  const claimedShare = trackedOriginalBaseline > 0 ? (claimedFootprint / trackedOriginalBaseline) * 100 : 0;
 
   if (query.isLoading) {
     return (
@@ -111,28 +115,28 @@ export function Storage() {
 
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <SummaryCard label="Storage reclaimed" value={formatBytes(reclaimed)} detail="Positive size difference from confirmed replacements" icon={ArrowDownRight} accent="#74c69d" />
-        <SummaryCard label="Confirmed files" value={numberFormatter.format(confirmedFiles)} detail="Direct replacements and cleaned backup replacements" icon={ShieldCheck} accent="#60a5fa" />
-        <SummaryCard label="Weighted reduction" value={`${reduction}%`} detail={`${formatBytes(originalSize)} original → ${formatBytes(replacementSize)} replacement`} icon={HardDrive} accent="#fbbf24" />
-        <SummaryCard label="Backups retained" value={numberFormatter.format(retainedBackups)} detail="Not counted as reclaimed until the .org backup is deleted" icon={Archive} accent="#a78bfa" />
+        <SummaryCard label="Claimed footprint" value={formatBytes(claimedFootprint)} detail="Installed replacements plus originals still retained on disk" icon={HardDrive} accent="#60a5fa" />
+        <SummaryCard label="Retained originals" value={formatBytes(retainedOriginalSize)} detail={`${numberFormatter.format(retainedBackups)} .org ${retainedBackups === 1 ? 'file still needs' : 'files still need'} review`} icon={Archive} accent="#fbbf24" />
+        <SummaryCard label="Confirmed files" value={numberFormatter.format(confirmedFiles)} detail={`${reduction}% weighted reduction after original removal`} icon={ShieldCheck} accent="#a78bfa" />
       </section>
 
       <section className={`${PANEL} p-5 sm:p-6`}>
         <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
           <div>
             <h2 className="font-semibold text-white">Confirmed footprint comparison</h2>
-            <p className="mt-1 text-xs text-gray-500">Only finalized replacement records are included.</p>
+            <p className="mt-1 text-xs text-gray-500">Includes retained originals so the actual claimed space is never hidden.</p>
           </div>
           <div className="grid grid-cols-2 gap-x-8 gap-y-3 sm:grid-cols-4">
-            <div><p className="text-[10px] uppercase tracking-wider text-gray-600">Original</p><p className="mt-1 text-sm font-medium text-gray-300">{formatBytes(originalSize)}</p></div>
-            <div><p className="text-[10px] uppercase tracking-wider text-gray-600">Replacement</p><p className="mt-1 text-sm font-medium text-gray-300">{formatBytes(replacementSize)}</p></div>
-            <div><p className="text-[10px] uppercase tracking-wider text-[#74c69d]">Reclaimed</p><p className="mt-1 text-sm font-semibold text-[#95d5b2]">{formatBytes(reclaimed)}</p></div>
-            <div><p className="text-[10px] uppercase tracking-wider text-amber-400">Size increases</p><p className="mt-1 text-sm font-medium text-amber-300">{formatBytes(increased)}</p></div>
+            <div><p className="text-[10px] uppercase tracking-wider text-gray-600">Original baseline</p><p className="mt-1 text-sm font-medium text-gray-300">{formatBytes(trackedOriginalBaseline)}</p></div>
+            <div><p className="text-[10px] uppercase tracking-wider text-gray-600">Replacements</p><p className="mt-1 text-sm font-medium text-gray-300">{formatBytes(installedReplacementSize)}</p></div>
+            <div><p className="text-[10px] uppercase tracking-wider text-amber-400">Originals retained</p><p className="mt-1 text-sm font-semibold text-amber-300">{formatBytes(retainedOriginalSize)}</p></div>
+            <div><p className="text-[10px] uppercase tracking-wider text-[#74c69d]">Claimed now</p><p className="mt-1 text-sm font-semibold text-[#95d5b2]">{formatBytes(claimedFootprint)}</p></div>
           </div>
         </div>
         <div className="mt-6 h-3 overflow-hidden rounded-full bg-white/[0.06]">
-          <div className="h-full rounded-full bg-gradient-to-r from-[#60a5fa] to-[#74c69d]" style={{ width: `${replacementShare}%` }} />
+          <div className={`h-full rounded-full ${claimedShare > 100 ? 'bg-amber-400' : 'bg-gradient-to-r from-[#60a5fa] to-[#74c69d]'}`} style={{ width: `${Math.min(100, claimedShare)}%` }} />
         </div>
-        <div className="mt-2 flex justify-between text-[10px] uppercase tracking-wider text-gray-600"><span>Replacement footprint</span><span>{replacementShare.toFixed(1)}% of original</span></div>
+        <div className="mt-2 flex justify-between text-[10px] uppercase tracking-wider text-gray-600"><span>Current claimed footprint</span><span>{claimedShare.toFixed(1)}% of original baseline</span></div>
       </section>
 
       <section className={`${PANEL} overflow-hidden`}>
@@ -156,7 +160,7 @@ export function Storage() {
                   <th className="px-4 py-3 text-right font-semibold">Original</th>
                   <th className="px-4 py-3 text-right font-semibold">Replacement</th>
                   <th className="px-4 py-3 text-right font-semibold">Difference</th>
-                  <th className="px-4 py-3 text-right font-semibold">Reduction</th>
+                  <th className="px-4 py-3 text-right font-semibold">Savings / action</th>
                   <th className="px-5 py-3 font-semibold">Confirmed</th>
                 </tr>
               </thead>
@@ -165,6 +169,7 @@ export function Storage() {
                   const presentation = statusPresentation(record.status);
                   const StatusIcon = presentation.icon;
                   const difference = safeNumber(record.bytes_reclaimed);
+                  const retainedImpact = record.status === 'backup_retained' ? safeNumber(record.replacement_size) : 0;
                   const rowReduction = percentage(Math.max(0, difference), safeNumber(record.original_size));
                   return (
                     <tr key={record.id}>
@@ -175,8 +180,8 @@ export function Storage() {
                       <td className="px-4 py-4"><span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium ${presentation.color}`}><StatusIcon className={`h-3 w-3 ${record.status === 'pending' ? 'animate-spin' : ''}`} />{presentation.label}</span></td>
                       <td className="px-4 py-4 text-right text-sm text-gray-400">{formatBytes(record.original_size)}</td>
                       <td className="px-4 py-4 text-right text-sm text-gray-400">{formatBytes(record.replacement_size)}</td>
-                      <td className={`px-4 py-4 text-right text-sm font-medium ${difference > 0 ? 'text-[#95d5b2]' : difference < 0 ? 'text-amber-300' : 'text-gray-500'}`}>{record.status === 'reclaimed' ? `${difference >= 0 ? '' : '+'}${formatBytes(Math.abs(difference))}` : 'Not counted'}</td>
-                      <td className="px-4 py-4 text-right text-sm text-gray-400">{record.status === 'reclaimed' ? `${rowReduction}%` : '—'}</td>
+                      <td className={`px-4 py-4 text-right text-sm font-medium ${record.status === 'backup_retained' ? 'text-amber-300' : difference > 0 ? 'text-[#95d5b2]' : difference < 0 ? 'text-amber-300' : 'text-gray-500'}`}>{record.status === 'reclaimed' ? `${difference >= 0 ? '' : '+'}${formatBytes(Math.abs(difference))}` : record.status === 'backup_retained' ? `+${formatBytes(retainedImpact)} claimed` : 'Not counted'}</td>
+                      <td className="px-4 py-4 text-right text-sm text-gray-400">{record.status === 'reclaimed' ? `${rowReduction}%` : record.status === 'backup_retained' ? `Remove ${formatBytes(record.original_size)}` : '—'}</td>
                       <td className="px-5 py-4 text-xs text-gray-500">{formatDate(record.reclaimed_at || record.created_at)}</td>
                     </tr>
                   );

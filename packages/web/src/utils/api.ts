@@ -162,6 +162,7 @@ export const api = {
         all: number;
         ready: number;
         processing: number;
+        transcoded: number;
         completed: number;
         failed: number;
         cancelled: number;
@@ -202,6 +203,19 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+  createLibraryJob: (data: {
+    library_id: string;
+    analyze: boolean;
+    transcode: boolean;
+    quick_select_id?: string;
+    allow_gpu?: boolean;
+    allow_cpu?: boolean;
+    post_action?: 'keep' | 'replace' | 'backup_replace';
+    include_transcoded?: boolean;
+  }) => request<{ queued: number; skipped: number; total: number }>('/jobs/library', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
   createSmartJob: (data: { file_ids: string[]; mode: 'auto' | 'gpu' | 'cpu'; preset_id?: string }) =>
     request<{
       success: boolean;
@@ -289,7 +303,7 @@ export const api = {
 
   // Stats
   getStats: () => request<any>('/stats'),
-  getStorageReclaims: (limit = 250) => request<{
+  getStorageReclaims: (limit = 250, fileId?: string) => request<{
     summary: {
       original_size: number;
       replacement_size: number;
@@ -298,6 +312,9 @@ export const api = {
       net_change: number;
       replaced_files: number;
       backup_retained: number;
+      retained_original_size: number;
+      retained_replacement_size: number;
+      claimed_footprint: number;
     };
     records: Array<{
       id: string;
@@ -311,11 +328,19 @@ export const api = {
       bytes_reclaimed: number;
       node_name?: string | null;
       original_path?: string | null;
+      replacement_path?: string | null;
       error_message?: string | null;
+      progress: number;
+      current_action?: string | null;
+      bytes_processed: number;
+      total_bytes: number;
+      speed_mbps: number;
+      started_at?: number | null;
+      completed_at?: number | null;
       created_at: number;
       reclaimed_at?: number | null;
     }>;
-  }>(`/storage-reclaims?limit=${limit}`),
+  }>(`/storage-reclaims?limit=${limit}${fileId ? `&file_id=${encodeURIComponent(fileId)}` : ''}`),
 
   // Worker availability
   getWorkerAvailability: () => request<{

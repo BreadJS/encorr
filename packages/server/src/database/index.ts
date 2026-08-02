@@ -75,8 +75,29 @@ export class EncorrDatabase {
     // Run migrations to add new columns to existing databases
     this.runMigrations();
 
+    // An assigned/processing job without a worker can never make progress.
+    // Older cancellation handling could leave these rows behind indefinitely.
+    this.reconcileOrphanedActiveJobs();
+
     // Seed built-in presets
     this.seedBuiltinPresets();
+  }
+
+  private reconcileOrphanedActiveJobs(): void {
+    const orphanedJobs = this.db.prepare(`
+      SELECT id
+      FROM jobs
+      WHERE status IN ('assigned', 'processing')
+        AND node_id IS NULL
+    `).all() as Array<{ id: string }>;
+
+    if (orphanedJobs.length === 0) return;
+
+    const cancelOrphans = this.db.transaction((jobs: Array<{ id: string }>) => {
+      for (const job of jobs) this.cancelJob(job.id);
+    });
+    cancelOrphans(orphanedJobs);
+    this.logger.warn(`[RECOVERY] Cancelled ${orphanedJobs.length} active job(s) without an assigned node`);
   }
 
   /**
@@ -90,6 +111,26 @@ export class EncorrDatabase {
     if (!hasOutputPath) {
       this.logger.info('[MIGRATION] Adding output_path column to jobs table');
       this.db.exec('ALTER TABLE jobs ADD COLUMN output_path TEXT');
+    }
+    if (!columns.some((col) => col.name === 'post_action')) {
+      this.logger.info('[MIGRATION] Adding post_action column to jobs table');
+      this.db.exec("ALTER TABLE jobs ADD COLUMN post_action TEXT NOT NULL DEFAULT 'keep'");
+    }
+    if (!columns.some((col) => col.name === 'depends_on_job_id')) {
+      this.logger.info('[MIGRATION] Adding depends_on_job_id column to jobs table');
+      this.db.exec('ALTER TABLE jobs ADD COLUMN depends_on_job_id TEXT');
+    }
+    if (!columns.some((col) => col.name === 'quick_select_id')) {
+      this.logger.info('[MIGRATION] Adding quick_select_id column to jobs table');
+      this.db.exec('ALTER TABLE jobs ADD COLUMN quick_select_id TEXT');
+    }
+    if (!columns.some((col) => col.name === 'allow_gpu')) {
+      this.logger.info('[MIGRATION] Adding allow_gpu column to jobs table');
+      this.db.exec('ALTER TABLE jobs ADD COLUMN allow_gpu BOOLEAN NOT NULL DEFAULT 1');
+    }
+    if (!columns.some((col) => col.name === 'allow_cpu')) {
+      this.logger.info('[MIGRATION] Adding allow_cpu column to jobs table');
+      this.db.exec('ALTER TABLE jobs ADD COLUMN allow_cpu BOOLEAN NOT NULL DEFAULT 1');
     }
 
     // Create job_reports table if it doesn't exist
@@ -113,6 +154,7 @@ export class EncorrDatabase {
           node_logs TEXT,
           original_size INTEGER,
           output_size INTEGER,
+          output_path TEXT,
           original_codec TEXT,
           output_codec TEXT,
           original_resolution TEXT,
@@ -130,6 +172,19 @@ export class EncorrDatabase {
         CREATE INDEX IF NOT EXISTS idx_job_reports_job ON job_reports(job_id);
         CREATE INDEX IF NOT EXISTS idx_job_reports_status ON job_reports(status);
         CREATE INDEX IF NOT EXISTS idx_job_reports_created ON job_reports(created_at);
+      `);
+    }
+
+    const reportColumns = this.db.pragma('table_info(job_reports)') as { name: string }[];
+    if (!reportColumns.some(column => column.name === 'output_path')) {
+      this.logger.info('[MIGRATION] Adding output_path column to job_reports table');
+      this.db.exec('ALTER TABLE job_reports ADD COLUMN output_path TEXT');
+      this.db.exec(`
+        UPDATE job_reports
+        SET output_path = (
+          SELECT jobs.output_path FROM jobs WHERE jobs.id = job_reports.job_id
+        )
+        WHERE job_type = 'transcode' AND output_path IS NULL
       `);
     }
 
@@ -824,6 +879,45 @@ export class EncorrDatabase {
     stmt.run(status, jobId || null, errorMessage || null, Math.floor(Date.now() / 1000), id);
   }
 
+  updateLibraryFileAfterReplacement(id: string, metadata: VideoMetadata, status: FileStatus): void {
+    const now = Math.floor(Date.now() / 1000);
+    this.db.prepare(`
+      UPDATE library_files
+      SET filesize = ?, format = ?, duration = ?, metadata = ?, status = ?,
+        progress = 100, error_message = NULL, updated_at = ?
+      WHERE id = ?
+    `).run(
+      metadata.size,
+      metadata.container,
+      metadata.duration,
+      JSON.stringify(metadata),
+      status,
+      now,
+      id,
+    );
+
+    const reclaim = this.db.prepare(`
+      SELECT job_id FROM storage_reclaims
+      WHERE library_file_id = ? ORDER BY created_at DESC LIMIT 1
+    `).get(id) as { job_id?: string } | undefined;
+    if (!reclaim?.job_id) return;
+    const job = this.getJobById(reclaim.job_id);
+    if (!job) return;
+    this.db.prepare(`
+      UPDATE files SET original_size = ?, original_format = ?, original_codec = ?,
+        duration = ?, resolution = ?, metadata = ?, status = 'completed'
+      WHERE id = ?
+    `).run(
+      metadata.size,
+      metadata.container,
+      metadata.video_codec,
+      metadata.duration,
+      `${metadata.width}x${metadata.height}`,
+      JSON.stringify(metadata),
+      job.file_id,
+    );
+  }
+
   updateLibraryFileProgress(id: string, progress: number): void {
     const stmt = this.db.prepare(`
       UPDATE library_files
@@ -905,6 +999,28 @@ export class EncorrDatabase {
   getFileById(id: string): VideoFile | undefined {
     const stmt = this.db.prepare('SELECT * FROM files WHERE id = ?');
     const row = stmt.get(id) as any;
+    return row ? this.parseFile(row) : undefined;
+  }
+
+  getFileForLibraryFile(libraryFileId: string, preferredNodeId?: string): VideoFile | undefined {
+    const libraryFile = this.getLibraryFileById(libraryFileId);
+    if (!libraryFile) return undefined;
+    const library = this.getLibraryById(libraryFile.library_id);
+    if (!library) return undefined;
+
+    const root = library.path.replace(/\\/g, '/').replace(/\/$/, '');
+    const fullPath = libraryFile.filepath.replace(/\\/g, '/');
+    const relativePath = fullPath.startsWith(`${root}/`)
+      ? fullPath.slice(root.length + 1)
+      : libraryFile.filename;
+    const row = this.db.prepare(`
+      SELECT files.*
+      FROM files
+      JOIN folder_mappings ON folder_mappings.id = files.folder_mapping_id
+      WHERE folder_mappings.server_path = ? AND files.relative_path = ?
+      ORDER BY CASE WHEN folder_mappings.node_id = ? THEN 0 ELSE 1 END
+      LIMIT 1
+    `).get(`library:${libraryFile.library_id}`, relativePath, preferredNodeId ?? '') as any;
     return row ? this.parseFile(row) : undefined;
   }
 
@@ -1031,16 +1147,21 @@ export class EncorrDatabase {
     file_id: string;
     preset_id: string;
     node_id?: string;
+    post_action?: 'keep' | 'replace' | 'backup_replace';
+    depends_on_job_id?: string;
+    quick_select_id?: string;
+    allow_gpu?: boolean;
+    allow_cpu?: boolean;
   }): Job {
     const id = uuidv4();
     const now = Math.floor(Date.now() / 1000);
 
     const stmt = this.db.prepare(`
-      INSERT INTO jobs (id, file_id, node_id, preset_id, status, created_at)
-      VALUES (?, ?, ?, ?, 'queued', ?)
+      INSERT INTO jobs (id, file_id, node_id, preset_id, status, post_action, depends_on_job_id, quick_select_id, allow_gpu, allow_cpu, created_at)
+      VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
     `);
 
-    stmt.run(id, data.file_id, data.node_id ?? null, data.preset_id, now);
+    stmt.run(id, data.file_id, data.node_id ?? null, data.preset_id, data.post_action ?? 'keep', data.depends_on_job_id ?? null, data.quick_select_id ?? null, data.allow_gpu === false ? 0 : 1, data.allow_cpu === false ? 0 : 1, now);
 
     // Update file status to queued
     this.updateFileStatus(data.file_id, 'queued');
@@ -1052,7 +1173,7 @@ export class EncorrDatabase {
    * Create a job for a library file
    * Creates a corresponding entry in the files table first
    */
-  createJobForLibraryFile(libraryFileId: string, presetId: string, nodeId?: string): Job | null {
+  createJobForLibraryFile(libraryFileId: string, presetId: string, nodeId?: string, postAction: 'keep' | 'replace' | 'backup_replace' = 'keep', dependsOnJobId?: string, quickSelectId?: string, allowGpu = true, allowCpu = true): Job | null {
     // Get the library file
     const libFile = this.getLibraryFileById(libraryFileId);
     if (!libFile) {
@@ -1149,18 +1270,33 @@ export class EncorrDatabase {
       && (job.status === 'queued' || job.status === 'assigned' || job.status === 'processing')
     );
     if (existingActiveJob) {
+      if (postAction !== 'keep' && existingActiveJob.post_action !== postAction) {
+        this.db.prepare('UPDATE jobs SET post_action = ? WHERE id = ?').run(postAction, existingActiveJob.id);
+        existingActiveJob.post_action = postAction;
+      }
+      if (quickSelectId) {
+        this.db.prepare('UPDATE jobs SET quick_select_id = ?, allow_gpu = ?, allow_cpu = ? WHERE id = ?')
+          .run(quickSelectId, allowGpu ? 1 : 0, allowCpu ? 1 : 0, existingActiveJob.id);
+        existingActiveJob.quick_select_id = quickSelectId;
+        existingActiveJob.allow_gpu = allowGpu;
+        existingActiveJob.allow_cpu = allowCpu;
+      }
       this.logger.debug(`Reusing active ${presetId} job ${existingActiveJob.id} for file ${fileId}`);
       return existingActiveJob;
     }
 
     // Now create the job
-    return this.createJob({ file_id: fileId, preset_id: presetId, node_id: nodeId });
+    return this.createJob({ file_id: fileId, preset_id: presetId, node_id: nodeId, post_action: postAction, depends_on_job_id: dependsOnJobId, quick_select_id: quickSelectId, allow_gpu: allowGpu, allow_cpu: allowCpu });
   }
 
   getJobById(id: string): Job | undefined {
     const stmt = this.db.prepare('SELECT * FROM jobs WHERE id = ?');
     const row = stmt.get(id) as any;
     return row ? this.parseJob(row) : undefined;
+  }
+
+  updateJobPreset(jobId: string, presetId: string): void {
+    this.db.prepare('UPDATE jobs SET preset_id = ? WHERE id = ?').run(presetId, jobId);
   }
 
   getJobsByFile(fileId: string): Job[] {
@@ -1599,6 +1735,11 @@ export class EncorrDatabase {
       error_message: row.error_message,
       stats: row.stats,
       output_path: row.output_path ?? undefined,
+      post_action: row.post_action ?? 'keep',
+      depends_on_job_id: row.depends_on_job_id ?? null,
+      quick_select_id: row.quick_select_id ?? null,
+      allow_gpu: Boolean(row.allow_gpu),
+      allow_cpu: Boolean(row.allow_cpu),
       started_at: row.started_at,
       completed_at: row.completed_at,
       created_at: row.created_at,
@@ -1979,7 +2120,7 @@ export class EncorrDatabase {
     if (operation === 'backup_replace') {
       this.db.prepare(`
         UPDATE storage_reclaims SET status = 'backup_retained', progress = 100,
-          current_action = 'Backup retained', speed_mbps = 0, completed_at = ?, error_message = NULL
+          current_action = 'Backup retained', completed_at = ?, error_message = NULL
         WHERE id = ?
       `).run(Math.floor(Date.now() / 1000), record.id);
       if (Number(record.replacement_size) > 0) {
@@ -1993,7 +2134,7 @@ export class EncorrDatabase {
     this.db.prepare(`
       UPDATE storage_reclaims
       SET status = 'reclaimed', bytes_reclaimed = ?, reclaimed_at = ?, progress = 100,
-        current_action = 'Replacement complete', speed_mbps = 0, completed_at = ?, error_message = NULL
+        current_action = 'Replacement complete', completed_at = ?, error_message = NULL
       WHERE id = ?
     `).run(reclaimed, Math.floor(Date.now() / 1000), Math.floor(Date.now() / 1000), record.id);
     if (Number(record.replacement_size) > 0) {
@@ -2014,7 +2155,7 @@ export class EncorrDatabase {
     this.db.prepare(`
       UPDATE storage_reclaims
       SET status = 'reclaimed', bytes_reclaimed = ?, reclaimed_at = ?, progress = 100,
-        current_action = 'Backup deleted', speed_mbps = 0, completed_at = ?, error_message = NULL
+        current_action = 'Backup deleted', completed_at = ?, error_message = NULL
       WHERE id = ?
     `).run(reclaimed, Math.floor(Date.now() / 1000), Math.floor(Date.now() / 1000), record.id);
   }
@@ -2037,12 +2178,14 @@ export class EncorrDatabase {
   }): void {
     this.db.prepare(`
       UPDATE storage_reclaims SET progress = ?, current_action = ?, bytes_processed = ?,
-        total_bytes = ?, speed_mbps = ?, started_at = COALESCE(started_at, ?)
+        total_bytes = ?, speed_mbps = CASE WHEN ? > 0 THEN ? ELSE speed_mbps END,
+        started_at = COALESCE(started_at, ?)
       WHERE id = ?
     `).run(
       Math.max(0, Math.min(100, data.progress)), data.current_action,
       Math.max(0, data.bytes_processed), Math.max(0, data.total_bytes),
-      Math.max(0, data.speed_mbps), Math.floor(Date.now() / 1000), operationId,
+      Math.max(0, data.speed_mbps), Math.max(0, data.speed_mbps),
+      Math.floor(Date.now() / 1000), operationId,
     );
   }
 
@@ -2059,7 +2202,7 @@ export class EncorrDatabase {
   failStorageReplacement(libraryFileId: string, operation: 'replace' | 'backup_replace', errorMessage: string): void {
     this.db.prepare(`
       UPDATE storage_reclaims
-      SET status = 'failed', current_action = 'Operation failed', speed_mbps = 0,
+      SET status = 'failed', current_action = 'Operation failed',
         completed_at = ?, error_message = ?
       WHERE id = (
         SELECT id FROM storage_reclaims
@@ -2077,6 +2220,9 @@ export class EncorrDatabase {
     net_change: number;
     replaced_files: number;
     backup_retained: number;
+    retained_original_size: number;
+    retained_replacement_size: number;
+    claimed_footprint: number;
   } {
     const totals = this.db.prepare(`
       SELECT
@@ -2089,16 +2235,33 @@ export class EncorrDatabase {
       FROM storage_reclaims
       WHERE status = 'reclaimed'
     `).get() as any;
-    const pending = this.db.prepare(`
-      SELECT COUNT(*) AS count FROM storage_reclaims WHERE status = 'backup_retained'
-    `).get() as { count: number };
-    return { ...totals, backup_retained: pending.count };
+    const retained = this.db.prepare(`
+      SELECT COUNT(*) AS count,
+        COALESCE(SUM(original_size), 0) AS original_size,
+        COALESCE(SUM(replacement_size), 0) AS replacement_size
+      FROM storage_reclaims WHERE status = 'backup_retained'
+    `).get() as { count: number; original_size: number; replacement_size: number };
+    return {
+      ...totals,
+      backup_retained: retained.count,
+      retained_original_size: retained.original_size,
+      retained_replacement_size: retained.replacement_size,
+      claimed_footprint: Number(totals.replacement_size || 0) + Number(retained.original_size || 0) + Number(retained.replacement_size || 0),
+    };
   }
 
-  getStorageReclaims(limit = 250): any[] {
+  getStorageReclaims(limit = 250, libraryFileId?: string): any[] {
+    if (libraryFileId) {
+      return this.db.prepare(`
+        SELECT * FROM storage_reclaims
+        WHERE library_file_id = ?
+        ORDER BY COALESCE(completed_at, reclaimed_at, created_at) DESC
+        LIMIT ?
+      `).all(libraryFileId, limit);
+    }
     return this.db.prepare(`
       SELECT * FROM storage_reclaims
-      ORDER BY COALESCE(reclaimed_at, created_at) DESC
+      ORDER BY COALESCE(completed_at, reclaimed_at, created_at) DESC
       LIMIT ?
     `).all(limit);
   }
@@ -2165,6 +2328,9 @@ export class EncorrDatabase {
         net_change: storageStats.net_change,
         replaced_files: storageStats.replaced_files,
         backup_retained: storageStats.backup_retained,
+        retained_original_size: storageStats.retained_original_size,
+        retained_replacement_size: storageStats.retained_replacement_size,
+        claimed_footprint: storageStats.claimed_footprint,
       },
     };
   }
@@ -2188,6 +2354,7 @@ export class EncorrDatabase {
     node_logs?: string | null;
     original_size?: number | null;
     output_size?: number | null;
+    output_path?: string | null;
     original_codec?: string | null;
     output_codec?: string | null;
     original_resolution?: string | null;
@@ -2204,10 +2371,10 @@ export class EncorrDatabase {
       INSERT INTO job_reports (
         id, job_id, file_id, library_file_id, node_id, node_name,
         job_type, preset_id, preset_name, status, error_message,
-        ffmpeg_logs, node_logs, original_size, output_size,
+        ffmpeg_logs, node_logs, original_size, output_size, output_path,
         original_codec, output_codec, original_resolution, output_resolution,
         duration_seconds, avg_fps, started_at, completed_at, config, metadata
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id, report.job_id, report.file_id,
       report.library_file_id ?? null, report.node_id ?? null, report.node_name ?? null,
@@ -2215,6 +2382,7 @@ export class EncorrDatabase {
       report.status, report.error_message ?? null,
       report.ffmpeg_logs ?? null, report.node_logs ?? null,
       report.original_size ?? null, report.output_size ?? null,
+      report.output_path ?? null,
       report.original_codec ?? null, report.output_codec ?? null,
       report.original_resolution ?? null, report.output_resolution ?? null,
       report.duration_seconds ?? null, report.avg_fps ?? null,

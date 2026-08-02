@@ -363,6 +363,18 @@ export const FileReplaceResultPayloadSchema = z.object({
   success: z.boolean(),
   error: z.string().optional(),
   new_file_path: z.string().optional(), // Path after replacement (for status updates)
+  new_metadata: z.object({
+    container: z.string(),
+    video_codec: z.string(),
+    audio_codecs: z.array(z.string()),
+    subtitle_count: z.number(),
+    duration: z.number(),
+    width: z.number(),
+    height: z.number(),
+    fps: z.number(),
+    bitrate: z.number(),
+    size: z.number(),
+  }).optional(),
 });
 
 export type FileReplaceResultPayload = z.infer<typeof FileReplaceResultPayloadSchema>;

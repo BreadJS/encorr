@@ -465,27 +465,45 @@ export class EncorrNode {
   }
 
   private async handleFileReplace(payload: {
+    operation_id: string;
     file_id: string;
     operation: 'replace' | 'backup_replace' | 'cleanup_backup';
     source_path: string;
     target_path: string;
     original_filename: string;
   }): Promise<void> {
-    const { file_id, operation, source_path, target_path, original_filename } = payload;
+    const { operation_id, file_id, operation, source_path, target_path, original_filename } = payload;
 
     this.logger.info(`[FILE_REPLACE] ${operation} for file ${file_id}: ${original_filename}`);
     this.logger.info(`[FILE_REPLACE]   source: ${source_path}`);
     this.logger.info(`[FILE_REPLACE]   target: ${target_path}`);
 
     try {
-      const { promises: fs } = require('fs');
-      const { resolve, dirname } = require('path');
+      const fsModule = require('fs');
+      const { promises: fs } = fsModule;
+      const { dirname } = require('path');
+
+      const reportProgress = (
+        progress: number,
+        current_action: string,
+        bytes_processed = 0,
+        total_bytes = 0,
+        speed_mbps = 0,
+      ) => {
+        this.wsClient.send(createMessage('FILE_REPLACE_PROGRESS', {
+          operation_id, file_id, operation, progress, current_action,
+          bytes_processed, total_bytes, speed_mbps,
+        }));
+      };
 
       // Helper function to move files across devices
-      const moveFile = async (src: string, dest: string): Promise<void> => {
+      const moveFile = async (src: string, dest: string, startProgress: number, endProgress: number): Promise<void> => {
+        const sourceSize = Number((await fs.stat(src)).size || 0);
+        reportProgress(startProgress, 'Moving transcoded file', 0, sourceSize, 0);
         try {
           // Try rename first (fast, works on same filesystem)
           await fs.rename(src, dest);
+          reportProgress(endProgress, 'Transcoded file moved', sourceSize, sourceSize, 0);
           this.logger.debug(`[FILE_REPLACE] Moved file using rename (same device)`);
         } catch (error: any) {
           // If cross-device link error, use copy+delete
@@ -493,9 +511,31 @@ export class EncorrNode {
             this.logger.info(`[FILE_REPLACE] Cross-device move detected, using copy+delete`);
             // Ensure target directory exists
             await fs.mkdir(dirname(dest), { recursive: true });
-            // Copy file
-            await fs.copyFile(src, dest);
+            const startedAt = Date.now();
+            let copied = 0;
+            let lastReport = 0;
+            await new Promise<void>((resolveCopy, rejectCopy) => {
+              const reader = fsModule.createReadStream(src);
+              const writer = fsModule.createWriteStream(dest);
+              reader.on('data', (chunk: Buffer) => {
+                copied += chunk.length;
+                const now = Date.now();
+                if (now - lastReport >= 200 || copied >= sourceSize) {
+                  lastReport = now;
+                  const fraction = sourceSize > 0 ? copied / sourceSize : 1;
+                  const progress = startProgress + fraction * (endProgress - startProgress);
+                  const seconds = Math.max((now - startedAt) / 1000, 0.001);
+                  const speed = copied / 1024 / 1024 / seconds;
+                  reportProgress(progress, 'Copying transcoded file', copied, sourceSize, speed);
+                }
+              });
+              reader.on('error', rejectCopy);
+              writer.on('error', rejectCopy);
+              writer.on('finish', resolveCopy);
+              reader.pipe(writer);
+            });
             // Delete source
+            reportProgress(endProgress, 'Removing temporary transcoded file', sourceSize, sourceSize, 0);
             await fs.unlink(src);
             this.logger.debug(`[FILE_REPLACE] Moved file using copy+delete (cross-device)`);
           } else {
@@ -506,6 +546,7 @@ export class EncorrNode {
 
       // Verify source file exists (for replace operations)
       if (operation === 'replace' || operation === 'backup_replace') {
+        reportProgress(3, 'Checking transcoded file');
         const sourceExists = await fs.access(source_path).then(() => true).catch(() => false);
         if (!sourceExists) {
           throw new Error(`Source file not found: ${source_path}`);
@@ -514,16 +555,21 @@ export class EncorrNode {
 
       // Verify target file exists (for cleanup operations)
       if (operation === 'cleanup_backup') {
+        reportProgress(10, 'Checking backup file');
         const targetExists = await fs.access(target_path).then(() => true).catch(() => false);
         if (!targetExists) {
           throw new Error(`Backup file not found: ${target_path}`);
         }
       }
 
+      let replacementMetadata: Awaited<ReturnType<FileAnalyzer['analyzeFile']>> | undefined;
+
       // Perform the operation
       if (operation === 'replace') {
         // Direct replace: move transcoded file to original location
-        await moveFile(source_path, target_path);
+        await moveFile(source_path, target_path, 10, 92);
+        reportProgress(97, 'Verifying replacement');
+        await fs.stat(target_path);
         this.logger.info(`[FILE_REPLACE] Replaced original file with transcoded version`);
       } else if (operation === 'backup_replace') {
         // Backup original to .org, then move transcoded file to original location
@@ -538,24 +584,42 @@ export class EncorrNode {
         }
 
         // Rename original to .org (same device, should work)
+        reportProgress(12, 'Backing up original file');
         await fs.rename(target_path, backupPath);
+        reportProgress(25, 'Original backed up');
         this.logger.info(`[FILE_REPLACE] Backed up original to: ${backupPath}`);
 
         // Move transcoded file to original location (may be cross-device)
-        await moveFile(source_path, target_path);
+        await moveFile(source_path, target_path, 25, 92);
+        reportProgress(97, 'Verifying replacement');
+        await fs.stat(target_path);
         this.logger.info(`[FILE_REPLACE] Moved transcoded file to: ${target_path}`);
       } else if (operation === 'cleanup_backup') {
         // Delete the .org backup file
+        reportProgress(60, 'Deleting original backup');
         await fs.unlink(target_path);
         this.logger.info(`[FILE_REPLACE] Deleted backup file: ${target_path}`);
       }
 
+      if (operation === 'replace' || operation === 'backup_replace') {
+        reportProgress(98, 'Reading installed file metadata');
+        try {
+          replacementMetadata = await this.fileAnalyzer?.analyzeFile(target_path);
+        } catch (metadataError) {
+          this.logger.warn(`[FILE_REPLACE] Replacement succeeded but metadata refresh failed: ${metadataError instanceof Error ? metadataError.message : String(metadataError)}`);
+        }
+      }
+
+      reportProgress(100, operation === 'cleanup_backup' ? 'Backup deleted' : 'Replacement complete');
+
       // Send success result
       this.wsClient.send(createMessage('FILE_REPLACE_RESULT', {
+        operation_id,
         file_id: file_id,
         operation: operation,
         success: true,
         new_file_path: target_path,
+        new_metadata: replacementMetadata,
       }));
 
       this.logger.info(`[FILE_REPLACE] Successfully completed ${operation} for file ${file_id}`);
@@ -565,6 +629,7 @@ export class EncorrNode {
 
       // Send failure result
       this.wsClient.send(createMessage('FILE_REPLACE_RESULT', {
+        operation_id,
         file_id: file_id,
         operation: operation,
         success: false,

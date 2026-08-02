@@ -10,7 +10,6 @@ import {
   Database,
   FileVideo,
   Folder,
-  Gauge,
   HardDrive,
   ListTodo,
   RefreshCw,
@@ -147,14 +146,26 @@ export function Dashboard() {
   const isLoading = statsQuery.isLoading || nodesQuery.isLoading || jobsQuery.isLoading;
   const isRefreshing = statsQuery.isFetching || librariesQuery.isFetching || nodesQuery.isFetching || jobsQuery.isFetching || logsQuery.isFetching;
 
-  const activeJobs = jobs.filter((job: any) => job.status === 'processing' || job.status === 'assigned');
-  const queuedJobs = jobs.filter((job: any) => job.status === 'queued');
   const onlineNodes = nodes.filter((node: any) => node.connected || node.status === 'online' || node.status === 'busy');
+  const connectedNodes = nodes.filter((node: any) => node.connected === true);
+  const connectedNodeIds = new Set(connectedNodes.map((node: any) => node.id));
+  // A job cannot be doing work unless it belongs to a currently connected
+  // node. This also prevents stale/aborted rows from inflating the dashboard.
+  const activeJobs = jobs.filter((job: any) =>
+    (job.status === 'processing' || job.status === 'assigned')
+    && Boolean(job.node_id)
+    && connectedNodeIds.has(job.node_id),
+  );
+  const queuedJobs = jobs.filter((job: any) => job.status === 'queued');
+  const workloadJobs = jobs.filter((job: any) => !job.file_operation && job.job_type !== 'file_operation');
   const totalLibraryFiles = libraries.reduce((sum: number, library: any) => sum + safeNumber(library.file_count), 0);
 
-  const completedJobs = safeNumber(stats?.jobs?.completed);
-  const failedJobs = safeNumber(stats?.jobs?.failed);
-  const processingJobs = safeNumber(stats?.jobs?.processing);
+  const completedJobs = workloadJobs.filter((job: any) => job.status === 'completed').length;
+  const transcodedJobs = workloadJobs.filter((job: any) => job.status === 'completed' && job.job_type === 'transcode').length;
+  const analyzedJobs = workloadJobs.filter((job: any) => job.status === 'completed' && job.job_type === 'analyze').length;
+  const failedJobs = workloadJobs.filter((job: any) => job.status === 'failed').length;
+  const cancelledJobs = workloadJobs.filter((job: any) => job.status === 'cancelled').length;
+  const processingJobs = activeJobs.length;
   const totalFinishedJobs = completedJobs + failedJobs;
   const successRate = percentage(completedJobs, totalFinishedJobs);
   const originalSize = safeNumber(stats?.storage?.original_size);
@@ -162,14 +173,18 @@ export function Dashboard() {
   const savedSpace = safeNumber(stats?.storage?.saved_space);
   const replacedFiles = safeNumber(stats?.storage?.replaced_files);
   const retainedBackups = safeNumber(stats?.storage?.backup_retained);
+  const retainedOriginalSize = safeNumber(stats?.storage?.retained_original_size);
+  const claimedFootprint = safeNumber(stats?.storage?.claimed_footprint);
   const storageReduction = percentage(savedSpace, originalSize);
 
-  const totalWorkerSlots = nodes.reduce((sum: number, node: any) => {
-    const cpuWorkers = safeNumber(node.max_workers?.cpu);
-    const gpuWorkers = (node.max_workers?.gpus || []).reduce((gpuSum: number, slots: unknown) => gpuSum + safeNumber(slots), 0);
-    return sum + cpuWorkers + gpuWorkers;
-  }, 0);
-  const activeWorkerSlots = activeJobs.length;
+  const totalCpuSlots = connectedNodes.reduce((sum: number, node: any) => sum + safeNumber(node.max_workers?.cpu), 0);
+  const totalGpuSlots = connectedNodes.reduce((sum: number, node: any) => (
+    sum + (node.max_workers?.gpus || []).reduce((gpuSum: number, slots: unknown) => gpuSum + safeNumber(slots), 0)
+  ), 0);
+  const totalWorkerSlots = totalCpuSlots + totalGpuSlots;
+  const activeEncoderJobs = activeJobs.filter((job: any) => !job.file_operation && job.job_type !== 'file_operation');
+  const activeGpuSlots = activeEncoderJobs.filter((job: any) => job.encoding_type === 'gpu').length;
+  const activeCpuSlots = activeEncoderJobs.length - activeGpuSlots;
 
   const refreshAll = () => {
     void Promise.all([
@@ -278,8 +293,8 @@ export function Dashboard() {
         />
         <MetricCard
           label="Queue workload"
-          value={safeNumber(stats?.jobs?.queued) + processingJobs}
-          detail={`${processingJobs} processing · ${safeNumber(stats?.jobs?.queued)} waiting`}
+          value={queuedJobs.length + processingJobs}
+          detail={`${processingJobs} processing · ${queuedJobs.length} waiting`}
           icon={ListTodo}
           accent="#a78bfa"
         />
@@ -293,8 +308,10 @@ export function Dashboard() {
         <MetricCard
           label="Storage reclaimed"
           value={formatBytes(savedSpace)}
-          detail={replacedFiles > 0
-            ? `${storageReduction}% across ${replacedFiles} confirmed ${replacedFiles === 1 ? 'replacement' : 'replacements'}`
+          detail={retainedBackups > 0
+            ? `${retainedBackups} retained ${retainedBackups === 1 ? 'original' : 'originals'} still use ${formatBytes(retainedOriginalSize)}`
+            : replacedFiles > 0
+              ? `${storageReduction}% across ${replacedFiles} confirmed ${replacedFiles === 1 ? 'replacement' : 'replacements'}`
             : 'No confirmed file replacements yet'}
           icon={HardDrive}
           accent="#fbbf24"
@@ -356,38 +373,74 @@ export function Dashboard() {
         <div className={`${PANEL} overflow-hidden`}>
           <div className="border-b border-[#39363a] px-5 py-4">
             <h2 className="font-semibold text-white">Job performance</h2>
-            <p className="mt-0.5 text-xs text-gray-500">Lifetime completion health</p>
+            <p className="mt-0.5 text-xs text-gray-500">Lifetime workload and live encoder capacity</p>
           </div>
-          <div className="space-y-6 p-5">
-            <div className="flex items-end justify-between">
+          <div className="space-y-5 p-5">
+            <div className="grid grid-cols-2 gap-4">
               <div>
                 <p className="text-4xl font-semibold tracking-tight text-white">{successRate}%</p>
                 <p className="mt-1 text-xs text-gray-500">Successful finished jobs</p>
               </div>
-              <div className="rounded-xl bg-[#74c69d]/10 p-2.5 text-[#74c69d]"><Gauge className="h-5 w-5" /></div>
+              <div className="border-l border-[#39363a] pl-5">
+                <p className="text-4xl font-semibold tracking-tight text-white">{workloadJobs.length.toLocaleString()}</p>
+                <p className="mt-1 text-xs text-gray-500">Total jobs created</p>
+              </div>
             </div>
             <div>
               <div className="flex h-2.5 overflow-hidden rounded-full bg-white/[0.05]">
                 <div className="bg-[#74c69d]" style={{ width: `${percentage(completedJobs, Math.max(1, totalFinishedJobs))}%` }} />
                 <div className="bg-red-400" style={{ width: `${percentage(failedJobs, Math.max(1, totalFinishedJobs))}%` }} />
               </div>
-              <div className="mt-3 grid grid-cols-2 gap-3">
+              <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
                 <div className={`${MUTED_PANEL} p-3`}>
-                  <div className="flex items-center gap-2 text-xs text-gray-400"><span className="h-2 w-2 rounded-full bg-[#74c69d]" />Completed</div>
-                  <p className="mt-2 text-xl font-semibold text-white">{completedJobs}</p>
+                  <div className="flex items-center gap-2 text-[11px] text-gray-400"><span className="h-2 w-2 rounded-full bg-[#74c69d]" />Transcoded</div>
+                  <p className="mt-2 text-xl font-semibold text-white">{transcodedJobs.toLocaleString()}</p>
                 </div>
                 <div className={`${MUTED_PANEL} p-3`}>
-                  <div className="flex items-center gap-2 text-xs text-gray-400"><span className="h-2 w-2 rounded-full bg-red-400" />Failed</div>
-                  <p className="mt-2 text-xl font-semibold text-white">{failedJobs}</p>
+                  <div className="flex items-center gap-2 text-[11px] text-gray-400"><span className="h-2 w-2 rounded-full bg-[#60a5fa]" />Analyzed</div>
+                  <p className="mt-2 text-xl font-semibold text-white">{analyzedJobs.toLocaleString()}</p>
                 </div>
+                <div className={`${MUTED_PANEL} p-3`}>
+                  <div className="flex items-center gap-2 text-[11px] text-gray-400"><span className="h-2 w-2 rounded-full bg-red-400" />Failed</div>
+                  <p className="mt-2 text-xl font-semibold text-white">{failedJobs.toLocaleString()}</p>
+                </div>
+                <div className={`${MUTED_PANEL} p-3`}>
+                  <div className="flex items-center gap-2 text-[11px] text-gray-400"><span className="h-2 w-2 rounded-full bg-gray-500" />Cancelled</div>
+                  <p className="mt-2 text-xl font-semibold text-white">{cancelledJobs.toLocaleString()}</p>
+                </div>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 px-1 text-[11px] text-gray-500">
+                <span><strong className="font-semibold text-amber-300">{activeEncoderJobs.length.toLocaleString()}</strong> active</span>
+                <span><strong className="font-semibold text-violet-300">{queuedJobs.length.toLocaleString()}</strong> queued</span>
+                <span><strong className="font-semibold text-gray-300">{completedJobs.toLocaleString()}</strong> completed total</span>
               </div>
             </div>
             <div className="border-t border-[#39363a] pt-4">
-              <div className="mb-2 flex items-center justify-between text-xs">
-                <span className="text-gray-400">Worker utilization</span>
-                <span className="font-medium text-white">{activeWorkerSlots}/{totalWorkerSlots} slots</span>
+              <div className="mb-3 flex items-center justify-between">
+                <div>
+                  <p className="text-xs font-medium text-gray-300">Encoder slots</p>
+                  <p className="mt-0.5 text-[11px] text-gray-600">Capacity on currently connected nodes</p>
+                </div>
+                <span className="rounded-lg bg-white/[0.04] px-2 py-1 text-[11px] text-gray-400">{totalWorkerSlots} total</span>
               </div>
-              <UsageBar value={percentage(activeWorkerSlots, totalWorkerSlots)} color="#a78bfa" />
+              <div className="grid grid-cols-2 gap-3">
+                <div className={`${MUTED_PANEL} p-3`}>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 text-xs text-gray-300"><Cpu className="h-4 w-4 text-[#60a5fa]" />CPU</div>
+                    <span className="font-mono text-xs font-semibold text-white">{activeCpuSlots}/{totalCpuSlots}</span>
+                  </div>
+                  <div className="mt-3"><UsageBar value={percentage(activeCpuSlots, totalCpuSlots)} color="#60a5fa" /></div>
+                  <p className="mt-2 text-[10px] text-gray-600">{Math.max(0, totalCpuSlots - activeCpuSlots)} free</p>
+                </div>
+                <div className={`${MUTED_PANEL} p-3`}>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 text-xs text-gray-300"><Zap className="h-4 w-4 text-[#a3e635]" />GPU</div>
+                    <span className="font-mono text-xs font-semibold text-white">{activeGpuSlots}/{totalGpuSlots}</span>
+                  </div>
+                  <div className="mt-3"><UsageBar value={percentage(activeGpuSlots, totalGpuSlots)} color="#84cc16" /></div>
+                  <p className="mt-2 text-[10px] text-gray-600">{Math.max(0, totalGpuSlots - activeGpuSlots)} free</p>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -499,15 +552,22 @@ export function Dashboard() {
             <div>
               <div className="flex items-center gap-2"><HardDrive className="h-4 w-4 text-amber-300" /><h2 className="font-semibold text-white">Confirmed storage impact</h2></div>
               <p className="mt-1.5 text-xs text-gray-500">
-                Based only on replaced originals{retainedBackups > 0 ? ` · ${retainedBackups} retained ${retainedBackups === 1 ? 'backup is' : 'backups are'} not counted yet` : ''}.
+                Current disk footprint includes installed replacements and every retained `.org` original.
               </p>
             </div>
-            <div className="grid grid-cols-3 gap-6 sm:text-right">
+            <div className="grid grid-cols-2 gap-6 sm:grid-cols-4 sm:text-right">
               <div><p className="text-[10px] uppercase tracking-wider text-gray-600">Original</p><p className="mt-1 text-sm font-medium text-gray-300">{formatBytes(originalSize)}</p></div>
               <div><p className="text-[10px] uppercase tracking-wider text-gray-600">Output</p><p className="mt-1 text-sm font-medium text-gray-300">{formatBytes(transcodedSize)}</p></div>
               <div><p className="text-[10px] uppercase tracking-wider text-[#74c69d]">Saved</p><p className="mt-1 text-sm font-semibold text-[#95d5b2]">{formatBytes(savedSpace)}</p></div>
+              <div><p className="text-[10px] uppercase tracking-wider text-amber-400">Claimed now</p><p className="mt-1 text-sm font-semibold text-amber-300">{formatBytes(claimedFootprint)}</p></div>
             </div>
           </div>
+          {retainedBackups > 0 && (
+            <div className="mt-4 flex items-start justify-between gap-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
+              <div className="flex gap-2.5"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" /><div><p className="text-xs font-semibold text-amber-200">{retainedBackups} original {retainedBackups === 1 ? 'file is' : 'files are'} still retained</p><p className="mt-1 text-xs text-amber-300/70">Removing verified `.org` backups would release {formatBytes(retainedOriginalSize)}.</p></div></div>
+              <Link to="/storage" className="shrink-0 text-xs font-medium text-amber-200 hover:text-white">Review</Link>
+            </div>
+          )}
           <div className="mt-5"><UsageBar value={storageReduction} color="#fbbf24" /></div>
           <div className="mt-4 flex justify-end">
             <Link to="/storage" className="flex items-center gap-1.5 text-xs font-medium text-[#95d5b2] hover:text-[#b7e4c7]">

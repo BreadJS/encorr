@@ -3,9 +3,10 @@ import { api, formatBytes } from '@/utils/api';
 import { Card, CardContent } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { SmartTranscodeDialog } from '@/components/ui/SmartTranscodeDialog';
+import { Dialog } from '@/components/ui/Dialog';
 import { RefreshCw, ChevronLeft, ChevronRight, Film, Folder, FolderOpen, Check, Search, Filter, Scan, Sparkles, Clock, Zap, AlertTriangle, FileText, MoreVertical, Replace, Copy, X, Ban } from 'lucide-react';
 import { ReportDrawer } from '@/components/ReportDrawer';
-import { useState, useMemo } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import type { TranscodeMode } from '@encorr/shared';
 
@@ -25,6 +26,7 @@ function formatDuration(seconds: number | undefined, isAnalyzed: boolean = false
 }
 
 type ViewMode = 'all' | 'folder';
+type ReplacementOperation = 'replace' | 'backup_replace' | 'cleanup_backup';
 
 export function Files() {
   const queryClient = useQueryClient();
@@ -43,6 +45,20 @@ export function Files() {
   // Track file replacement operations in progress
   const [pendingFileReplacements, setPendingFileReplacements] = useState<Set<string>>(new Set());
   const [replacementProgress, setReplacementProgress] = useState<{ current: number; total: number } | null>(null);
+  const [replacementConfirmation, setReplacementConfirmation] = useState<{
+    operation: ReplacementOperation;
+    fileIds: string[];
+  } | null>(null);
+  const [replacementConfirmed, setReplacementConfirmed] = useState(false);
+  const [replacementNotice, setReplacementNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [openActionsFileId, setOpenActionsFileId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!openActionsFileId) return;
+    const closeMenu = () => setOpenActionsFileId(null);
+    window.addEventListener('click', closeMenu);
+    return () => window.removeEventListener('click', closeMenu);
+  }, [openActionsFileId]);
 
   // Enable WebSocket for real-time updates
   useWebSocket({ enabled: true });
@@ -148,12 +164,17 @@ export function Files() {
         displayStatus = isAnalyzeJob ? 'processing' : 'pending';
         displayProgress = activeJob.progress || 0;
       }
-      // Priority 2: Latest transcode report overrides file status
+      // Priority 2: A replacement is the terminal library-file state.
+      else if (file.status === 'completed' || file.status === 'backup_replaced') {
+        displayStatus = 'completed';
+        displayProgress = 100;
+      }
+      // Priority 3: Completed transcode output exists but is not installed yet.
       else if (latestReport) {
-        displayStatus = latestReport.status;
+        displayStatus = latestReport.status === 'completed' ? 'transcoded' : latestReport.status;
         displayProgress = latestReport.status === 'completed' ? 100 : 0;
       }
-      // Priority 3: File status from backend
+      // Priority 4: File status from backend
       else {
         // Map backend statuses to display statuses
         if (file.status === 'completed') {
@@ -182,6 +203,7 @@ export function Files() {
       all: filesWithJobStatus.length,
       ready: 0,
       processing: 0,
+      transcoded: 0,
       completed: 0,
       failed: 0,
       cancelled: 0,
@@ -189,6 +211,7 @@ export function Files() {
     filesWithJobStatus.forEach((file: any) => {
       if (file.displayStatus === 'ready') counts.ready++;
       else if (file.displayStatus === 'processing') counts.processing++;
+      else if (file.displayStatus === 'transcoded') counts.transcoded++;
       else if (file.displayStatus === 'completed') counts.completed++;
       else if (file.displayStatus === 'failed') counts.failed++;
       else if (file.displayStatus === 'cancelled') counts.cancelled++;
@@ -255,6 +278,7 @@ export function Files() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['files'] });
       queryClient.invalidateQueries({ queryKey: ['libraries'] });
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
     },
     onError: (error: Error) => {
       console.error('Failed to replace original file:', error);
@@ -279,6 +303,7 @@ export function Files() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['files'] });
       queryClient.invalidateQueries({ queryKey: ['libraries'] });
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
     },
     onError: (error: Error) => {
       console.error('Failed to backup and replace file:', error);
@@ -311,11 +336,73 @@ export function Files() {
   // Helper function to process files one by one for bulk operations
   const processFilesBulk = async (fileIds: string[], mutation: typeof replaceOriginalMutation) => {
     setReplacementProgress({ current: 0, total: fileIds.length });
-    for (let i = 0; i < fileIds.length; i++) {
-      await mutation.mutateAsync(fileIds[i]);
-      setReplacementProgress({ current: i + 1, total: fileIds.length });
+    const successfulIds: string[] = [];
+    const failures: string[] = [];
+    try {
+      for (let i = 0; i < fileIds.length; i++) {
+        try {
+          await mutation.mutateAsync(fileIds[i]);
+          successfulIds.push(fileIds[i]);
+        } catch (error) {
+          failures.push(error instanceof Error ? error.message : 'Unknown replacement error');
+        }
+        setReplacementProgress({ current: i + 1, total: fileIds.length });
+      }
+    } finally {
+      setReplacementProgress(null);
     }
-    setReplacementProgress(null);
+
+    if (successfulIds.length > 0) {
+      setSelectedFiles(previous => {
+        const next = new Set(previous);
+        successfulIds.forEach(id => next.delete(id));
+        return next;
+      });
+    }
+    setReplacementNotice(failures.length > 0
+      ? {
+          type: 'error',
+          message: `${successfulIds.length.toLocaleString()} queued, ${failures.length.toLocaleString()} failed. ${failures[0]}`,
+        }
+      : {
+          type: 'success',
+          message: `${successfulIds.length.toLocaleString()} file replacement${successfulIds.length === 1 ? '' : 's'} added to Jobs.`,
+        });
+  };
+
+  const requestReplacement = (operation: ReplacementOperation, fileIds: string[]) => {
+    if (fileIds.length === 0) return;
+    setOpenActionsFileId(null);
+    setReplacementNotice(null);
+    setReplacementConfirmed(false);
+    setReplacementConfirmation({ operation, fileIds });
+  };
+
+  const confirmReplacement = async () => {
+    if (!replacementConfirmation || !replacementConfirmed) return;
+    const { operation, fileIds } = replacementConfirmation;
+    setReplacementConfirmation(null);
+    if (operation === 'cleanup_backup') {
+      try {
+        await cleanupBackupMutation.mutateAsync(fileIds[0]);
+        setSelectedFiles(previous => {
+          const next = new Set(previous);
+          next.delete(fileIds[0]);
+          return next;
+        });
+        setReplacementNotice({ type: 'success', message: 'Original backup removal added to Jobs.' });
+      } catch (error) {
+        setReplacementNotice({
+          type: 'error',
+          message: error instanceof Error ? error.message : 'Could not queue original backup removal.',
+        });
+      }
+      return;
+    }
+    await processFilesBulk(
+      fileIds,
+      operation === 'replace' ? replaceOriginalMutation : backupAndReplaceMutation,
+    );
   };
 
   // Apply client-side search filter and status filter
@@ -402,10 +489,27 @@ export function Files() {
     }
 
     if (status === 'completed') {
+      if (file.status === 'backup_replaced') {
+        return (
+          <div className="flex items-center gap-2" title="Completed; original .org backup is still retained">
+            <Copy className="h-3.5 w-3.5 text-amber-400 flex-shrink-0" />
+            <span className="text-amber-300 text-xs">Completed + backup</span>
+          </div>
+        );
+      }
       return (
         <div className="flex items-center gap-2">
           <Check className="h-3.5 w-3.5 text-green-400 flex-shrink-0" />
           <span className="text-green-400 text-xs">Completed</span>
+        </div>
+      );
+    }
+
+    if (status === 'transcoded') {
+      return (
+        <div className="flex items-center gap-2">
+          <Sparkles className="h-3.5 w-3.5 flex-shrink-0 text-violet-400" />
+          <span className="text-violet-300 text-xs">Transcoded</span>
         </div>
       );
     }
@@ -475,21 +579,21 @@ export function Files() {
             </>
           )}
 
-          {/* File Management Buttons - show when completed files are selected */}
+          {/* File Management Buttons - show when transcoded outputs are selected */}
           {(() => {
-            const completedSelectedCount = Array.from(selectedFiles).filter(id =>
-              filesWithJobStatus.find((f: any) => f.id === id && f.displayStatus === 'completed')
+            const transcodedSelectedCount = Array.from(selectedFiles).filter(id =>
+              filesWithJobStatus.find((f: any) => f.id === id && f.displayStatus === 'transcoded')
             ).length;
 
-            return completedSelectedCount > 0 ? (
+            return transcodedSelectedCount > 0 ? (
               <>
                 <div className="h-6 w-px bg-gray-500 mx-2 hidden sm:block" />
                 <Button
                   onClick={() => {
                     const completedFileIds = Array.from(selectedFiles).filter(id =>
-                      filesWithJobStatus.find((f: any) => f.id === id && f.displayStatus === 'completed')
+                      filesWithJobStatus.find((f: any) => f.id === id && f.displayStatus === 'transcoded')
                     );
-                    processFilesBulk(completedFileIds, replaceOriginalMutation);
+                    requestReplacement('replace', completedFileIds);
                   }}
                   disabled={replaceOriginalMutation.isPending || pendingFileReplacements.size > 0}
                   style={{ borderColor: '#39363a', color: '#ffffff' }}
@@ -500,14 +604,14 @@ export function Files() {
                   <span className="hidden sm:inline">
                     {replacementProgress ? ` (${replacementProgress.current}/${replacementProgress.total})` : 'Replace Original'}
                   </span>
-                  <span className="sm:hidden">Replace</span> ({completedSelectedCount})
+                  <span className="sm:hidden">Replace</span> ({transcodedSelectedCount})
                 </Button>
                 <Button
                   onClick={() => {
                     const completedFileIds = Array.from(selectedFiles).filter(id =>
-                      filesWithJobStatus.find((f: any) => f.id === id && f.displayStatus === 'completed')
+                      filesWithJobStatus.find((f: any) => f.id === id && f.displayStatus === 'transcoded')
                     );
-                    processFilesBulk(completedFileIds, backupAndReplaceMutation);
+                    requestReplacement('backup_replace', completedFileIds);
                   }}
                   disabled={backupAndReplaceMutation.isPending || pendingFileReplacements.size > 0}
                   style={{ borderColor: '#39363a', color: '#ffffff' }}
@@ -518,7 +622,7 @@ export function Files() {
                   <span className="hidden sm:inline">
                     {replacementProgress ? ` (${replacementProgress.current}/${replacementProgress.total})` : 'Backup & Replace'}
                   </span>
-                  <span className="sm:hidden">Backup</span> ({completedSelectedCount})
+                  <span className="sm:hidden">Backup</span> ({transcodedSelectedCount})
                 </Button>
                 <div className="h-6 w-px bg-gray-500 mx-2 hidden sm:block" />
               </>
@@ -578,6 +682,22 @@ export function Files() {
         </div>
       </div>
 
+      {replacementNotice && (
+        <div className={`flex items-start justify-between gap-4 rounded-xl border px-4 py-3 ${replacementNotice.type === 'success'
+          ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+          : 'border-red-500/30 bg-red-500/10 text-red-200'}`}>
+          <div className="flex items-start gap-2.5">
+            {replacementNotice.type === 'success'
+              ? <Check className="mt-0.5 h-4 w-4 shrink-0" />
+              : <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />}
+            <p className="text-sm">{replacementNotice.message}</p>
+          </div>
+          <button type="button" onClick={() => setReplacementNotice(null)} className="rounded p-0.5 opacity-70 hover:bg-white/10 hover:opacity-100" aria-label="Dismiss message">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+
       {(analyzeMutation.error || analyzeSelectedMutation.error) && (
         <div className="flex items-center gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
           <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
@@ -621,6 +741,16 @@ export function Files() {
             }`}
           >
             Processing ({statusCounts.processing})
+          </button>
+          <button
+            onClick={() => { setSelectedStatus('transcoded'); setCurrentPage(1); }}
+            className={`px-3 sm:px-4 py-2 rounded-t-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
+              selectedStatus === 'transcoded'
+                ? 'bg-[#252326] text-white'
+                : 'text-gray-400 hover:text-white hover:bg-[#252326]/50'
+            }`}
+          >
+            Transcoded ({statusCounts.transcoded})
           </button>
           <button
             onClick={() => { setSelectedStatus('completed'); setCurrentPage(1); }}
@@ -737,6 +867,7 @@ export function Files() {
                     <option value="all">All Statuses</option>
                     <option value="ready">Transcodeable</option>
                     <option value="processing">Processing</option>
+                    <option value="transcoded">Transcoded</option>
                     <option value="completed">Completed</option>
                     <option value="failed">Failed</option>
                     <option value="cancelled">Cancelled</option>
@@ -844,7 +975,7 @@ export function Files() {
                           <div className="text-xs text-gray-500 mt-0.5 flex items-center gap-2">
                             <span className="truncate">{file.library_name || file.folder_name || 'Unknown'}</span>
                             <span className="flex-shrink-0">•</span>
-                            <span className="flex-shrink-0">{formatDuration(file.duration, file.status === 'analyzed' || file.status === 'imported' || file.status === 'completed')}</span>
+                            <span className="flex-shrink-0">{formatDuration(file.duration, file.status === 'analyzed' || file.status === 'imported' || file.status === 'completed' || file.status === 'backup_replaced')}</span>
                           </div>
                           {/* Job info for processing files */}
                           {(file.displayStatus === 'processing' || file.displayStatus === 'failed') && file.job && (
@@ -891,7 +1022,7 @@ export function Files() {
                         {/* New Codec (from transcode report) */}
                         <div className="w-28 flex-shrink-0">
                           {(() => {
-                            if (file.displayStatus === 'completed' && file.job?.config) {
+                            if (file.displayStatus === 'transcoded' && file.job?.config) {
                               let config: any = null;
                               try {
                                 config = typeof file.job.config === 'string' ? JSON.parse(file.job.config) : file.job.config;
@@ -931,7 +1062,7 @@ export function Files() {
 
                         {/* New Size (only if transcoded) */}
                         <div className="w-20 flex-shrink-0 text-sm text-gray-400 truncate">
-                          {file.displayStatus === 'completed' && file.outputSize ? (
+                          {(file.displayStatus === 'transcoded' || file.displayStatus === 'completed') && file.outputSize ? (
                             <span className="text-green-400">{formatBytes(file.outputSize)}</span>
                           ) : (
                             <span className="text-gray-600">—</span>
@@ -953,22 +1084,27 @@ export function Files() {
 
                         {/* Actions */}
                         <div className="w-12 flex-shrink-0 flex items-center justify-center gap-1">
-                          {/* File actions dropdown for completed files */}
-                          {file.displayStatus === 'completed' ? (
-                            <div className="relative group">
+                          {/* Replacement actions for pending outputs; cleanup for retained originals. */}
+                          {(file.displayStatus === 'transcoded' || file.status === 'backup_replaced') ? (
+                            <div className="relative" onClick={event => event.stopPropagation()}>
                               <button
+                                type="button"
+                                onClick={() => setOpenActionsFileId(current => current === file.id ? null : file.id)}
                                 className="p-1 rounded transition-colors hover:bg-white/10"
                                 style={{ color: '#9ca3af' }}
                                 title="File actions"
+                                aria-label={`Actions for ${file.filename || file.name || 'file'}`}
+                                aria-haspopup="menu"
+                                aria-expanded={openActionsFileId === file.id}
                               >
                                 <MoreVertical className="h-3.5 w-3.5" />
                               </button>
                               {/* Dropdown menu */}
-                              <div className="absolute right-0 top-full mt-1 w-48 rounded-lg shadow-xl opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity z-50">
+                              {openActionsFileId === file.id && <div role="menu" className="absolute right-0 top-full mt-1 w-56 rounded-lg shadow-xl z-50">
                                 <div style={{ backgroundColor: '#252326', border: '1px solid #39363a' }}>
                                   <div className="p-1">
                                     <button
-                                      onClick={() => replaceOriginalMutation.mutate(file.id)}
+                                      onClick={() => requestReplacement('replace', [file.id])}
                                       disabled={replaceOriginalMutation.isPending || pendingFileReplacements.has(file.id)}
                                       className="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-white/5 rounded transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                                       title="Replace original file with transcoded version"
@@ -978,17 +1114,17 @@ export function Files() {
                                     </button>
                                     {file.status === 'backup_replaced' ? (
                                       <button
-                                        onClick={() => cleanupBackupMutation.mutate(file.id)}
+                                        onClick={() => requestReplacement('cleanup_backup', [file.id])}
                                         disabled={cleanupBackupMutation.isPending || pendingFileReplacements.has(file.id)}
                                         className="w-full text-left px-3 py-2 text-sm text-green-400 hover:bg-white/5 rounded transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                                        title="Delete the .org backup file"
+                                        title="Permanently remove the retained original .org file"
                                       >
                                         <Copy className={`h-4 w-4 ${pendingFileReplacements.has(file.id) ? 'animate-spin' : ''}`} />
-                                        {pendingFileReplacements.has(file.id) ? 'Cleaning...' : 'Cleanup Backup (.org)'}
+                                        {pendingFileReplacements.has(file.id) ? 'Removing...' : 'Remove Original Backup (.org)'}
                                       </button>
                                     ) : (
                                       <button
-                                        onClick={() => backupAndReplaceMutation.mutate(file.id)}
+                                        onClick={() => requestReplacement('backup_replace', [file.id])}
                                         disabled={backupAndReplaceMutation.isPending || pendingFileReplacements.has(file.id)}
                                         className="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-white/5 rounded transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                                         title="Rename original to .org and put new file in place"
@@ -999,7 +1135,7 @@ export function Files() {
                                     )}
                                   </div>
                                 </div>
-                              </div>
+                              </div>}
                             </div>
                           ) : null}
 
@@ -1079,6 +1215,87 @@ export function Files() {
         </div>
       </div>
     </div>
+
+    <Dialog
+      open={!!replacementConfirmation}
+      onClose={() => {
+        setReplacementConfirmation(null);
+        setReplacementConfirmed(false);
+      }}
+      title={replacementConfirmation?.operation === 'cleanup_backup'
+        ? 'Confirm Original Backup Removal'
+        : replacementConfirmation?.operation === 'backup_replace' ? 'Confirm Backup & Replace' : 'Confirm Replace Original'}
+      size="md"
+      footer={
+        <div className="flex w-full justify-end gap-2">
+          <Button
+            onClick={() => setReplacementConfirmation(null)}
+            className="border border-[#39363a] text-gray-300"
+          >
+            Cancel
+          </Button>
+          <Button
+            onClick={confirmReplacement}
+            disabled={!replacementConfirmed}
+            className={replacementConfirmation?.operation === 'replace' || replacementConfirmation?.operation === 'cleanup_backup'
+              ? 'bg-red-600 text-white hover:bg-red-500 disabled:opacity-40'
+              : 'bg-[#4f7d68] text-white hover:bg-[#5c8d76] disabled:opacity-40'}
+          >
+            {replacementConfirmation?.operation === 'cleanup_backup'
+              ? 'Permanently Remove Original'
+              : replacementConfirmation?.operation === 'backup_replace' ? 'Backup & Replace' : 'Replace Original'}
+          </Button>
+        </div>
+      }
+    >
+      {replacementConfirmation && (
+        <div className="space-y-4">
+          <div className={`rounded-lg border p-4 ${replacementConfirmation.operation === 'replace' || replacementConfirmation.operation === 'cleanup_backup' ? 'border-red-500/35 bg-red-500/10' : 'border-amber-500/35 bg-amber-500/10'}`}>
+            <div className="flex items-start gap-3">
+              <AlertTriangle className={`mt-0.5 h-5 w-5 shrink-0 ${replacementConfirmation.operation === 'replace' || replacementConfirmation.operation === 'cleanup_backup' ? 'text-red-400' : 'text-amber-400'}`} />
+              <div>
+                <p className="font-medium text-white">
+                  This will affect {replacementConfirmation.fileIds.length.toLocaleString()} file{replacementConfirmation.fileIds.length === 1 ? '' : 's'}.
+                </p>
+                <p className="mt-1.5 text-sm leading-6 text-gray-300">
+                  {replacementConfirmation.operation === 'cleanup_backup'
+                    ? 'The retained .org original will be permanently deleted. The installed transcoded file remains in place, but the original version cannot be restored afterward.'
+                    : replacementConfirmation.operation === 'replace'
+                      ? 'Each transcoded output will be moved into the original file path. The current original is overwritten and no automatic backup is kept. This cannot be undone from Encorr.'
+                      : 'Each current original will first be renamed with a .org extension. The transcoded output is then moved into the original path. Both copies use disk space until you explicitly remove the original backup.'}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="max-h-32 overflow-auto rounded-lg border border-[#39363a] bg-[#1e1d1f] p-3">
+            {replacementConfirmation.fileIds.slice(0, 10).map(id => {
+              const file = filesWithJobStatus.find((item: any) => item.id === id);
+              return <p key={id} className="truncate py-0.5 text-xs text-gray-400">{file?.filename || file?.name || id}</p>;
+            })}
+            {replacementConfirmation.fileIds.length > 10 && (
+              <p className="pt-1 text-xs text-gray-500">and {(replacementConfirmation.fileIds.length - 10).toLocaleString()} more…</p>
+            )}
+          </div>
+
+          <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-[#39363a] bg-[#252326] p-3">
+            <input
+              type="checkbox"
+              checked={replacementConfirmed}
+              onChange={event => setReplacementConfirmed(event.target.checked)}
+              className="mt-0.5 h-4 w-4 accent-[#74c69d]"
+            />
+            <span className="text-sm text-gray-300">
+              I understand exactly what will happen to {replacementConfirmation.fileIds.length === 1 ? 'this file' : 'these files'} and want to continue.
+            </span>
+          </label>
+
+          <p className="text-xs text-gray-500">
+            Once confirmed, every move appears on the Jobs page with its current step, exact progress, transferred bytes, and live MB/s.
+          </p>
+        </div>
+      )}
+    </Dialog>
 
     {/* Smart Transcode Dialog - outside space-y-4 to avoid margin */}
     <SmartTranscodeDialog

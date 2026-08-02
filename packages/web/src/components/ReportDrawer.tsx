@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, formatBytes } from '@/utils/api';
 import { StatusBadge } from '@/components/ui/Badge';
-import { X, ChevronDown, ChevronRight, Clock, Cpu, HardDrive, Zap, FileText, Settings } from 'lucide-react';
+import { X, ChevronDown, ChevronRight, Clock, Cpu, HardDrive, Zap, FileText, Settings, ArrowRightLeft, Archive, CheckCircle2, AlertTriangle } from 'lucide-react';
 
 interface ReportDrawerProps {
   fileId: string;
@@ -34,6 +34,28 @@ interface ReportData {
   created_at: number;
 }
 
+interface TransferData {
+  id: string;
+  operation: 'replace' | 'backup_replace';
+  status: 'pending' | 'backup_retained' | 'reclaimed' | 'failed';
+  original_size: number;
+  replacement_size: number;
+  bytes_reclaimed: number;
+  bytes_processed: number;
+  total_bytes: number;
+  speed_mbps: number;
+  progress: number;
+  current_action: string | null;
+  node_name: string | null;
+  original_path: string | null;
+  replacement_path: string | null;
+  error_message: string | null;
+  created_at: number;
+  started_at: number | null;
+  completed_at: number | null;
+  reclaimed_at: number | null;
+}
+
 function formatDuration(seconds: number): string {
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
@@ -46,19 +68,25 @@ function formatTimestamp(ts: number): string {
 
 export function ReportDrawer({ fileId, fileName, open, onClose }: ReportDrawerProps) {
   const [reports, setReports] = useState<ReportData[]>([]);
+  const [transfers, setTransfers] = useState<TransferData[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedLogs, setExpandedLogs] = useState<Set<string>>(new Set());
-  const [activeTab, setActiveTab] = useState<'reports' | 'settings'>('reports');
+  const [activeTab, setActiveTab] = useState<'reports' | 'transfers' | 'settings'>('reports');
 
   useEffect(() => {
     if (open && fileId) {
       setLoading(true);
-      api.getReportsForFile(fileId)
-        .then((data) => {
-          setReports(data || []);
+      Promise.all([
+        api.getReportsForFile(fileId),
+        api.getStorageReclaims(100, fileId),
+      ])
+        .then(([reportData, transferData]) => {
+          setReports(reportData || []);
+          setTransfers((transferData.records || []) as TransferData[]);
         })
         .catch(() => {
           setReports([]);
+          setTransfers([]);
         })
         .finally(() => {
           setLoading(false);
@@ -108,6 +136,18 @@ export function ReportDrawer({ fileId, fileName, open, onClose }: ReportDrawerPr
               )}
             </button>
             <button
+              onClick={() => setActiveTab('transfers')}
+              className={`px-4 py-3 text-sm font-medium transition-colors relative ${
+                activeTab === 'transfers' ? 'text-white' : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              File transfers
+              {transfers.length > 0 && <span className="ml-1.5 text-xs text-gray-500">{transfers.length}</span>}
+              {activeTab === 'transfers' && (
+                <div className="absolute bottom-0 left-0 right-0 h-0.5" style={{ backgroundColor: '#60a5fa' }} />
+              )}
+            </button>
+            <button
               onClick={() => setActiveTab('settings')}
               className={`px-4 py-3 text-sm font-medium transition-colors relative ${
                 activeTab === 'settings' ? 'text-white' : 'text-gray-400 hover:text-white'
@@ -127,6 +167,86 @@ export function ReportDrawer({ fileId, fileName, open, onClose }: ReportDrawerPr
               <div className="flex items-center justify-center py-12 text-gray-400">
                 Loading reports...
               </div>
+            ) : activeTab === 'transfers' ? (
+              transfers.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-gray-400">
+                  <ArrowRightLeft className="mb-3 h-8 w-8 text-gray-600" />
+                  <p>No file transfers yet</p>
+                  <p className="mt-1 text-sm text-gray-500">Replace and backup operations will appear here.</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {transfers.map(transfer => {
+                    const startedAt = transfer.started_at || transfer.created_at;
+                    const endedAt = transfer.completed_at || transfer.reclaimed_at;
+                    const durationSeconds = endedAt ? Math.max(0, endedAt - startedAt) : null;
+                    const speed = Number(transfer.speed_mbps || 0);
+                    const isFailed = transfer.status === 'failed';
+                    const isPending = transfer.status === 'pending';
+                    const retained = transfer.status === 'backup_retained';
+                    const StatusIcon = isFailed ? AlertTriangle : retained ? Archive : isPending ? Clock : CheckCircle2;
+                    const statusLabel = isFailed ? 'Failed' : retained ? 'Completed · original retained' : isPending ? 'In progress' : 'Completed';
+                    const statusColor = isFailed ? 'text-red-400' : retained ? 'text-amber-300' : isPending ? 'text-blue-300' : 'text-[#8bd5ad]';
+                    return (
+                      <div key={transfer.id} className="rounded-lg border border-[#38363a] bg-[#1E1D1F] p-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <ArrowRightLeft className="h-4 w-4 shrink-0 text-[#60a5fa]" />
+                            <div className="min-w-0">
+                              <p className="text-sm font-medium text-white">
+                                {transfer.operation === 'backup_replace' ? 'Backup & Replace' : 'Replace Original'}
+                              </p>
+                              <p className={`mt-0.5 flex items-center gap-1.5 text-xs ${statusColor}`}>
+                                <StatusIcon className="h-3 w-3" /> {statusLabel}
+                              </p>
+                            </div>
+                          </div>
+                          <span className="shrink-0 text-xs text-gray-500">{formatTimestamp(transfer.created_at)}</span>
+                        </div>
+
+                        <div className="mt-4 grid grid-cols-2 gap-3 text-xs">
+                          <div className="rounded-md bg-white/[0.025] p-2.5">
+                            <p className="text-[10px] uppercase tracking-wider text-gray-600">Transferred</p>
+                            <p className="mt-1 text-gray-300">{formatBytes(transfer.bytes_processed || transfer.total_bytes || transfer.replacement_size)}</p>
+                          </div>
+                          <div className="rounded-md bg-white/[0.025] p-2.5">
+                            <p className="text-[10px] uppercase tracking-wider text-gray-600">Transfer speed</p>
+                            <p className="mt-1 text-gray-300">{speed > 0 ? `${speed.toFixed(1)} MB/s` : 'Atomic / unavailable'}</p>
+                          </div>
+                          <div className="rounded-md bg-white/[0.025] p-2.5">
+                            <p className="text-[10px] uppercase tracking-wider text-gray-600">File size</p>
+                            <p className="mt-1 text-gray-300">{formatBytes(transfer.original_size)} → {formatBytes(transfer.replacement_size)}</p>
+                          </div>
+                          <div className="rounded-md bg-white/[0.025] p-2.5">
+                            <p className="text-[10px] uppercase tracking-wider text-gray-600">Duration</p>
+                            <p className="mt-1 text-gray-300">{durationSeconds != null ? formatDuration(durationSeconds) : 'In progress'}</p>
+                          </div>
+                        </div>
+
+                        <div className="mt-3 space-y-1.5 text-xs text-gray-400">
+                          {transfer.node_name && <p><span className="text-gray-600">Node:</span> {transfer.node_name}</p>}
+                          <p><span className="text-gray-600">Step:</span> {transfer.current_action || statusLabel}</p>
+                          {transfer.bytes_reclaimed !== 0 && (
+                            <p><span className="text-gray-600">Storage change:</span> <span className={transfer.bytes_reclaimed > 0 ? 'text-[#8bd5ad]' : 'text-amber-300'}>{transfer.bytes_reclaimed > 0 ? '-' : '+'}{formatBytes(Math.abs(transfer.bytes_reclaimed))}</span></p>
+                          )}
+                          {transfer.original_path && <p className="break-all"><span className="text-gray-600">Installed path:</span> {transfer.original_path}</p>}
+                        </div>
+
+                        {isPending && (
+                          <div className="mt-3">
+                            <div className="mb-1 flex justify-between text-[10px] text-gray-500"><span>Progress</span><span>{Number(transfer.progress || 0).toFixed(1)}%</span></div>
+                            <div className="h-1.5 overflow-hidden rounded-full bg-[#38363a]"><div className="h-full bg-[#60a5fa]" style={{ width: `${Math.max(0, Math.min(100, transfer.progress || 0))}%` }} /></div>
+                          </div>
+                        )}
+
+                        {transfer.error_message && (
+                          <div className="mt-3 rounded border border-red-500/20 bg-red-500/10 p-2 text-xs text-red-300">{transfer.error_message}</div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )
             ) : reports.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 text-gray-400">
                 <FileText className="h-8 w-8 text-gray-600 mb-3" />

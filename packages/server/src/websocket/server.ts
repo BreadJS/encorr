@@ -856,6 +856,7 @@ export class EncorrWebSocketServer {
           node_logs: payload.decoder_info ?? null,
           original_size: payload.stats?.original_size ?? null,
           output_size: payload.stats?.transcoded_size ?? null,
+          output_path: payload.stats ? payload.output_path : null,
           duration_seconds: payload.stats?.duration_seconds ?? null,
           avg_fps: payload.stats?.avg_fps ?? null,
           started_at: job.started_at ?? null,
@@ -866,6 +867,10 @@ export class EncorrWebSocketServer {
       }
     } catch (reportErr) {
       this.logger.error(`[REPORT] Failed to create report: ${reportErr instanceof Error ? reportErr.message : String(reportErr)}`);
+    }
+
+    if (payload.stats) {
+      this.startPostTranscodeAction(payload.job_id);
     }
 
     this.eventHandlers.jobCompleted?.(payload.job_id, metadata);
@@ -1024,11 +1029,18 @@ export class EncorrWebSocketServer {
       // Update file status based on operation
       if (payload.operation === 'backup_replace') {
         // Set status to backup_replaced so user can cleanup later
-        this.db.updateLibraryFileStatus(payload.file_id, 'backup_replaced');
+        if (payload.new_metadata) {
+          this.db.updateLibraryFileAfterReplacement(payload.file_id, payload.new_metadata, 'backup_replaced');
+        } else {
+          this.db.updateLibraryFileStatus(payload.file_id, 'backup_replaced');
+        }
         this.db.confirmStorageReplacement(payload.file_id, 'backup_replace');
       } else if (payload.operation === 'replace') {
-        // Keep status as completed (already was completed)
-        this.db.updateLibraryFileStatus(payload.file_id, 'completed');
+        if (payload.new_metadata) {
+          this.db.updateLibraryFileAfterReplacement(payload.file_id, payload.new_metadata, 'completed');
+        } else {
+          this.db.updateLibraryFileStatus(payload.file_id, 'completed');
+        }
         this.db.confirmStorageReplacement(payload.file_id, 'replace');
       } else if (payload.operation === 'cleanup_backup') {
         // After cleanup, keep as completed
@@ -1219,6 +1231,7 @@ export class EncorrWebSocketServer {
         preset = this.db.getPresetById(job.preset_id);
         presets.set(job.preset_id, preset);
       }
+      const quickSelect = job.quick_select_id ? this.db.getQuickSelectPresetById(job.quick_select_id) : null;
       let node = null;
       if (job.node_id) {
         node = nodes.get(job.node_id);
@@ -1255,8 +1268,12 @@ export class EncorrWebSocketServer {
         ...job,
         file_name: file?.relative_path,
         file_size: file?.original_size,
-        preset_name: preset?.name,
+        preset_name: quickSelect ? `Quick Select · ${quickSelect.name}` : preset?.name,
+        routed_preset_name: quickSelect ? preset?.name : null,
         job_type: preset?.config?.action === 'analyze' ? 'analyze' : 'transcode',
+        encoding_type: preset?.config?.action === 'analyze'
+          ? 'cpu'
+          : (preset?.config?.encoding_type || 'cpu'),
         node_name: node?.name,
         original_codec: codec,
         resolution: resolution,
@@ -1279,7 +1296,7 @@ export class EncorrWebSocketServer {
         operation_id: operation.id,
         file_id: operation.library_file_id,
         file_operation: true,
-        operation: isCleanup ? 'cleanup_backup' : operation.operation,
+        operation: cleanupInProgress || isCleanup ? 'cleanup_backup' : operation.operation,
         job_type: 'file_operation',
         status,
         progress: Number(operation.progress || 0),
@@ -1539,26 +1556,29 @@ export class EncorrWebSocketServer {
 
   cancelJob(jobId: string, reason?: string): void {
     const job = this.db.getJobById(jobId);
-    if (!job || !job.node_id) return;
+    if (!job) return;
 
-    const message = createMessage('JOB_CANCEL', { job_id: jobId, reason });
-    this.sendToNode(job.node_id, message);
-
-    this.db.cancelJob(jobId);
-
-    // Clear pending assignments for this job's node
-    const preset = job.preset_id ? this.db.getPresetById(job.preset_id) : null;
-    const nodeId = job.node_id;
-
-    // Decrement pending assignment count
-    const pending = this.pendingAssignments.get(nodeId) || 0;
-    if (pending > 0) {
-      this.pendingAssignments.set(nodeId, pending - 1);
-      this.logger.info(`[CANCEL] Cleared pending assignment for node ${nodeId}, now ${pending - 1}`);
+    if (job.node_id) {
+      const message = createMessage('JOB_CANCEL', { job_id: jobId, reason });
+      this.sendToNode(job.node_id, message);
     }
 
-    this.releaseGpuAssignment(nodeId, jobId);
-    this.releaseCpuAssignment(nodeId, jobId);
+    // Cancellation is authoritative in the server database even when the
+    // worker disappeared (or an older malformed job never received node_id).
+    this.db.cancelJob(jobId);
+
+    const nodeId = job.node_id;
+    if (nodeId) {
+      // Decrement pending assignment count
+      const pending = this.pendingAssignments.get(nodeId) || 0;
+      if (pending > 0) {
+        this.pendingAssignments.set(nodeId, pending - 1);
+        this.logger.info(`[CANCEL] Cleared pending assignment for node ${nodeId}, now ${pending - 1}`);
+      }
+
+      this.releaseGpuAssignment(nodeId, jobId);
+      this.releaseCpuAssignment(nodeId, jobId);
+    }
 
     // Create job report for cancelled job
     try {
@@ -1613,6 +1633,68 @@ export class EncorrWebSocketServer {
   ): boolean {
     const message = createMessage('FILE_REPLACE', data);
     return this.sendToNode(nodeId, message);
+  }
+
+  private startPostTranscodeAction(jobId: string): void {
+    const job = this.db.getJobById(jobId);
+    const operation = job?.post_action;
+    if (!job || !job.output_path || !job.node_id || !operation || operation === 'keep') return;
+
+    const libraryFileId = this.resolveLibraryFileId(job.file_id);
+    const libraryFile = libraryFileId ? this.db.getLibraryFileById(libraryFileId) : null;
+    const library = libraryFile ? this.db.getLibraryById(libraryFile.library_id) : null;
+    const file = this.db.getFileById(job.file_id);
+    const node = this.db.getNodeById(job.node_id);
+    if (!libraryFile || !library || !file || !node) {
+      this.logger.error(`[POST_ACTION] Could not resolve replacement paths for job ${jobId}`);
+      return;
+    }
+
+    let mapping = this.db.getFolderMappingById(file.folder_mapping_id);
+    if (mapping?.server_path?.startsWith('library:')) {
+      const nodeMapping = this.db.getFolderMappingsByNode(node.id)
+        .find(item => item.server_path === `library:${library.id}`);
+      if (nodeMapping) mapping = nodeMapping;
+    }
+    const basePath = mapping?.node_path || library.path;
+    const targetPath = /\.(mkv|mp4|avi|mov|webm)$/i.test(basePath)
+      ? basePath
+      : `${basePath.replace(/[\\/]$/, '')}/${file.relative_path}`;
+    let stats: any = {};
+    try {
+      stats = typeof job.stats === 'string' ? JSON.parse(job.stats || '{}') : (job.stats || {});
+    } catch {
+      this.logger.warn(`[POST_ACTION] Could not parse completion stats for job ${jobId}`);
+    }
+    const reclaimId = this.db.createStorageReclaim({
+      library_file_id: libraryFile.id,
+      library_id: library.id,
+      library_name: library.name,
+      filename: libraryFile.filename,
+      operation,
+      original_size: Number(stats.original_size || libraryFile.filesize || 0),
+      replacement_size: Number(stats.transcoded_size || 0),
+      job_id: job.id,
+      node_id: node.id,
+      node_name: node.name,
+      original_path: targetPath,
+      replacement_path: job.output_path,
+    });
+    const sent = this.sendFileReplaceCommand(node.id, {
+      operation_id: reclaimId,
+      file_id: libraryFile.id,
+      operation,
+      source_path: job.output_path,
+      target_path: targetPath,
+      original_filename: libraryFile.filename,
+    });
+    if (!sent) {
+      this.db.failStorageReplacement(libraryFile.id, operation, 'Node disconnected before automatic post-action was sent');
+      this.logger.error(`[POST_ACTION] Node ${node.id} unavailable for job ${jobId}`);
+    } else {
+      this.logger.info(`[POST_ACTION] Started ${operation} for completed job ${jobId}`);
+      this.scheduleWebUpdates();
+    }
   }
 
   // ========================================================================
@@ -1884,8 +1966,53 @@ export class EncorrWebSocketServer {
     return null;
   }
 
+  private resolveQuickSelectRoute(job: any, onlineNodes: any[]): { node: any; preset: any; gpuDeviceId?: number } | null {
+    if (!job.quick_select_id) return null;
+    const route = this.db.getQuickSelectPresetById(job.quick_select_id);
+    if (!route) return null;
+
+    if (job.allow_gpu !== false) for (const node of onlineNodes) {
+      const available = this.getAvailableWorkers(node);
+      const gpus = node.system_info?.gpus || [];
+      for (let gpuDeviceId = 0; gpuDeviceId < available.gpus.length; gpuDeviceId++) {
+        if (available.gpus[gpuDeviceId] <= 0) continue;
+        const identity = `${gpus[gpuDeviceId]?.vendor || ''} ${gpus[gpuDeviceId]?.name || ''}`.toLowerCase();
+        const presetId = identity.includes('nvidia')
+          ? route.nvidia_preset_id
+          : identity.includes('amd') || identity.includes('radeon')
+            ? route.amd_preset_id
+            : identity.includes('intel') ? route.intel_preset_id : null;
+        const preset = presetId ? this.db.getPresetById(presetId) : null;
+        if (preset?.config?.encoding_type === 'gpu') {
+          const advertisedEncoders = node.system_info?.ffmpeg_encoders;
+          const supported = !Array.isArray(advertisedEncoders) || advertisedEncoders.length === 0
+            || advertisedEncoders.some((encoder: any) => encoder.available !== false
+              && encoder.type === 'gpu'
+              && encoder.gpu_type === preset.config.gpu_type
+              && encoder.codec === preset.config.video_codec);
+          if (supported) return { node, preset, gpuDeviceId };
+        }
+      }
+    }
+
+    const cpuPreset = route.cpu_preset_id ? this.db.getPresetById(route.cpu_preset_id) : null;
+    if (job.allow_cpu !== false && cpuPreset) {
+      const node = this.findNodeWithAvailableCpu(onlineNodes);
+      if (node) return { node, preset: cpuPreset };
+    }
+    return null;
+  }
+
   private assignQueuedJobs(): void {
-    const queuedJobs = this.db.getJobsByStatus('queued');
+    const queuedJobs = this.db.getJobsByStatus('queued').filter(job => {
+      if (!job.depends_on_job_id) return true;
+      const dependency = this.db.getJobById(job.depends_on_job_id);
+      if (dependency?.status === 'completed') return true;
+      if (!dependency || dependency.status === 'failed' || dependency.status === 'cancelled') {
+        this.db.failJob(job.id, dependency ? `Required analysis ${dependency.status}` : 'Required analysis job was removed');
+      }
+      return false;
+    });
     const allNodes = this.db.getAllNodes();
     const onlineNodes = allNodes.filter(n => n.status === 'online' || n.status === 'busy');
 
@@ -1996,6 +2123,20 @@ export class EncorrWebSocketServer {
     let gpuCapacityExhausted = false;
     let cpuCapacityExhausted = false;
     for (const { job, preset } of transcodeJobs) {
+      if (job.quick_select_id) {
+        const route = this.resolveQuickSelectRoute(job, onlineNodes);
+        if (!route) {
+          this.logger.debug(`[QUICK_SELECT] No compatible capacity currently available for job ${job.id}`);
+          continue;
+        }
+        this.db.updateJobPreset(job.id, route.preset.id);
+        job.preset_id = route.preset.id;
+        if (this.assignJobToNodeWithRetry(route.node, job, route.preset, route.gpuDeviceId)) {
+          assignedCount++;
+          this.logger.info(`[QUICK_SELECT] Routed job ${job.id} through ${route.preset.name} on ${route.node.name}`);
+        }
+        continue;
+      }
       // Check if preset uses GPU encoding
       const usesGpu = preset?.config?.encoding_type === 'gpu';
 
