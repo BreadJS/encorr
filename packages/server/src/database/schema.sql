@@ -74,6 +74,8 @@ CREATE TABLE IF NOT EXISTS library_files (
 );
 
 CREATE INDEX IF NOT EXISTS idx_library_files_library ON library_files(library_id);
+CREATE INDEX IF NOT EXISTS idx_library_files_library_path ON library_files(library_id, filepath);
+CREATE INDEX IF NOT EXISTS idx_library_files_library_filename ON library_files(library_id, filename);
 CREATE INDEX IF NOT EXISTS idx_library_files_status ON library_files(status);
 CREATE INDEX IF NOT EXISTS idx_library_files_format ON library_files(format);
 
@@ -197,6 +199,45 @@ CREATE INDEX IF NOT EXISTS idx_job_reports_library_file ON job_reports(library_f
 CREATE INDEX IF NOT EXISTS idx_job_reports_job ON job_reports(job_id);
 CREATE INDEX IF NOT EXISTS idx_job_reports_status ON job_reports(status);
 CREATE INDEX IF NOT EXISTS idx_job_reports_created ON job_reports(created_at);
+
+-- ============================================================================
+-- Storage Reclaims Table
+-- Only confirmed file replacements become reclaimed storage. Backup-and-
+-- replace remains pending until its retained .org file is deleted.
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS storage_reclaims (
+    id TEXT PRIMARY KEY,
+    library_file_id TEXT NOT NULL,
+    library_id TEXT,
+    library_name TEXT,
+    filename TEXT NOT NULL,
+    operation TEXT NOT NULL CHECK(operation IN ('replace', 'backup_replace')),
+    status TEXT NOT NULL CHECK(status IN ('pending', 'backup_retained', 'reclaimed', 'failed')),
+    original_size INTEGER NOT NULL DEFAULT 0,
+    replacement_size INTEGER NOT NULL DEFAULT 0,
+    bytes_reclaimed INTEGER NOT NULL DEFAULT 0,
+    job_id TEXT,
+    node_id TEXT,
+    node_name TEXT,
+    original_path TEXT,
+    replacement_path TEXT,
+    error_message TEXT,
+    progress REAL NOT NULL DEFAULT 0,
+    current_action TEXT DEFAULT 'Waiting for node',
+    bytes_processed INTEGER NOT NULL DEFAULT 0,
+    total_bytes INTEGER NOT NULL DEFAULT 0,
+    speed_mbps REAL NOT NULL DEFAULT 0,
+    started_at INTEGER,
+    completed_at INTEGER,
+    created_at INTEGER DEFAULT (strftime('%s', 'now')),
+    reclaimed_at INTEGER,
+    FOREIGN KEY (library_file_id) REFERENCES library_files(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_storage_reclaims_file ON storage_reclaims(library_file_id);
+CREATE INDEX IF NOT EXISTS idx_storage_reclaims_status ON storage_reclaims(status);
+CREATE INDEX IF NOT EXISTS idx_storage_reclaims_created ON storage_reclaims(created_at);
 
 -- ============================================================================
 -- Presets Table

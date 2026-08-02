@@ -14,6 +14,7 @@ import {
   ChevronLeft,
   ChevronRight,
   RefreshCw,
+  HardDrive,
 } from 'lucide-react';
 import logo from '@/assets/logo.png';
 import { useWebSocket } from '@/hooks/useWebSocket';
@@ -24,6 +25,7 @@ const navItems = [
   { path: '/mappings', label: 'Mappings', icon: FolderOpen },
   { path: '/library', label: 'Library', icon: Folder },
   { path: '/files', label: 'Files', icon: FileVideo },
+  { path: '/storage', label: 'Storage', icon: HardDrive },
   { path: '/jobs', label: 'Jobs', icon: ListTodo },
   { path: '/presets', label: 'Presets', icon: Film },
   { path: '/settings', label: 'Settings', icon: Settings },

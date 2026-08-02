@@ -8,6 +8,7 @@ import { Jobs } from './pages/Jobs';
 import { Presets } from './pages/Presets';
 import { Settings } from './pages/Settings';
 import { Library } from './pages/Library';
+import { Storage } from './pages/Storage';
 
 function App() {
   return (
@@ -18,6 +19,7 @@ function App() {
         <Route path="/nodes" element={<Nodes />} />
         <Route path="/mappings" element={<Mappings />} />
         <Route path="/files" element={<Files />} />
+        <Route path="/storage" element={<Storage />} />
         <Route path="/library" element={<Library />} />
         <Route path="/jobs" element={<Jobs />} />
         <Route path="/presets" element={<Presets />} />

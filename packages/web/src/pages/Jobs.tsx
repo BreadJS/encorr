@@ -1,138 +1,590 @@
-import { api } from '@/utils/api';
-import { Card, CardContent } from '@/components/ui/Card';
-import { Button } from '@/components/ui/Button';
-import { StatusBadge } from '@/components/ui/Badge';
+import { useMemo, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  Activity,
+  AlertTriangle,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  Clock3,
+  Cpu,
+  Database,
+  Film,
+  Gauge,
+  Layers3,
+  Minus,
+  Monitor,
+  Plus,
+  RefreshCw,
+  Scan,
+  Search,
+  Server,
+  Trash2,
+  X,
+  XCircle,
+} from 'lucide-react';
 import { Dialog } from '@/components/ui/Dialog';
-import { RefreshCw, Cpu, HardDrive, Zap, Pause, Play, Trash2, ChevronLeft, ChevronRight, X, Settings, Plus, Minus, AlertTriangle, Scan, Film } from 'lucide-react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useMemo, useState, useCallback, useRef, Fragment as ReactFragment } from 'react';
 import { useWebSocket } from '@/hooks/useWebSocket';
+import { api, formatBytes } from '@/utils/api';
+
+type JobTab = 'queue' | 'failed' | 'success';
+
+interface WorkerLimits {
+  cpu: number;
+  gpus: number[];
+}
+
+const countFormatter = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
+const surfaceClass = 'rounded-xl border border-[#39363a] bg-[#222123]';
+
+function numberValue(value: unknown, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function percentage(value: unknown) {
+  return Math.max(0, Math.min(100, numberValue(value)));
+}
+
+function cleanGpuName(name?: string) {
+  if (!name) return 'Unknown GPU';
+  const bracketMatch = name.match(/\[([^\]]+)\]/);
+  return bracketMatch?.[1] || name.replace(/^(NVIDIA Corporation|NVIDIA|AMD|Intel Corporation|Intel)\s*/i, '');
+}
+
+function vendorColor(vendor?: string) {
+  const value = vendor?.toLowerCase() || '';
+  if (value.includes('nvidia')) return '#76b900';
+  if (value.includes('amd') || value.includes('radeon')) return '#ed1c24';
+  if (value.includes('intel')) return '#00a6fb';
+  return '#74c69d';
+}
+
+function jobType(job: any) {
+  const analyze = job.type === 'analyze'
+    || job.preset_id === 'builtin-analyze'
+    || job.preset_name?.toLowerCase().includes('analyze');
+  return analyze
+    ? { label: 'Analyze', color: '#f59e0b', Icon: Scan }
+    : { label: 'Transcode', color: '#74c69d', Icon: Film };
+}
+
+function jobName(job: any) {
+  return job.file_name || job.name || job.filename || `Job ${String(job.id).slice(0, 8)}`;
+}
+
+function isActiveJobStatus(status: unknown) {
+  return status === 'assigned' || status === 'processing';
+}
+
+function formatTimestamp(value?: string | number) {
+  if (!value) return 'Time unavailable';
+  const numeric = typeof value === 'number' ? value : /^\d+$/.test(value) ? Number(value) : null;
+  const timestamp = numeric === null ? new Date(value).getTime() : numeric < 1_000_000_000_000 ? numeric * 1000 : numeric;
+  if (!Number.isFinite(timestamp)) return 'Time unavailable';
+  return new Date(timestamp).toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function formatElapsed(value?: string | number) {
+  if (!value) return null;
+  const numeric = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  const timestamp = numeric < 1_000_000_000_000 ? numeric * 1000 : numeric;
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+function parseStats(value: unknown) {
+  if (!value) return null;
+  try {
+    return typeof value === 'string' ? JSON.parse(value) : value;
+  } catch {
+    return null;
+  }
+}
+
+function limitsForNode(node: any): WorkerLimits {
+  const gpuCount = node.system_info?.gpus?.length || 0;
+  const legacyGpu = numberValue(node.max_workers?.gpu, 0);
+  return {
+    cpu: Math.max(0, numberValue(node.max_workers?.cpu, 1)),
+    gpus: Array.from({ length: gpuCount }, (_, index) =>
+      Math.max(0, numberValue(node.max_workers?.gpus?.[index], legacyGpu || 1)),
+    ),
+  };
+}
+
+function ProgressBar({ value, color = '#74c69d' }: { value: unknown; color?: string }) {
+  return (
+    <div className="h-1.5 overflow-hidden rounded-full bg-[#39363a]">
+      <div
+        className="h-full rounded-full transition-[width] duration-500"
+        style={{ width: `${percentage(value)}%`, backgroundColor: color }}
+      />
+    </div>
+  );
+}
+
+function MetricCard({
+  icon: Icon,
+  label,
+  value,
+  detail,
+  color,
+}: {
+  icon: typeof Activity;
+  label: string;
+  value: string | number;
+  detail: string;
+  color: string;
+}) {
+  return (
+    <div className={`${surfaceClass} p-4`}>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-medium uppercase tracking-[0.16em] text-gray-500">{label}</p>
+          <p className="mt-2 text-2xl font-semibold tracking-tight text-white">{value}</p>
+          <p className="mt-1 text-xs text-gray-500">{detail}</p>
+        </div>
+        <div className="rounded-lg border border-[#39363a] bg-[#282729] p-2.5" style={{ color }}>
+          <Icon className="h-4 w-4" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Stepper({
+  value,
+  onChange,
+  disabled,
+  max,
+  label,
+}: {
+  value: number;
+  onChange: (value: number) => void;
+  disabled?: boolean;
+  max?: number;
+  label: string;
+}) {
+  return (
+    <div className="flex items-center rounded-md border border-[#39363a] bg-[#282729]">
+      <button
+        type="button"
+        aria-label={`Decrease ${label}`}
+        onClick={() => onChange(Math.max(0, value - 1))}
+        disabled={disabled || value <= 0}
+        className="grid h-7 w-7 place-items-center text-gray-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
+      >
+        <Minus className="h-3.5 w-3.5" />
+      </button>
+      <span className="min-w-7 border-x border-[#39363a] text-center text-[11px] font-semibold tabular-nums text-white">
+        {value}
+      </span>
+      <button
+        type="button"
+        aria-label={`Increase ${label}`}
+        onClick={() => onChange(value + 1)}
+        disabled={disabled || (max !== undefined && value >= max)}
+        className="grid h-7 w-7 place-items-center text-gray-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
+      >
+        <Plus className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  );
+}
+
+function JobRow({ job, tab, onDelete, deleting }: {
+  job: any;
+  tab: JobTab;
+  onDelete: (id: string) => void;
+  deleting: boolean;
+}) {
+  const type = jobType(job);
+  const stats = parseStats(job.stats);
+  const originalSize = numberValue(stats?.original_size || job.file_size);
+  const transcodedSize = numberValue(stats?.transcoded_size);
+  const saving = originalSize > 0 && transcodedSize > 0
+    ? Math.max(0, Math.round((1 - transcodedSize / originalSize) * 100))
+    : null;
+
+  return (
+    <div className="grid gap-3 border-t border-[#39363a] px-4 py-3.5 first:border-t-0 lg:grid-cols-[110px_minmax(0,1fr)_170px_140px_40px] lg:items-center">
+      <div className="flex items-center gap-2">
+        <type.Icon className="h-4 w-4" style={{ color: type.color }} />
+        <span className="text-xs font-semibold" style={{ color: type.color }}>{type.label}</span>
+      </div>
+
+      <div className="min-w-0">
+        <p className="truncate text-sm font-medium text-white" title={jobName(job)}>{jobName(job)}</p>
+        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-gray-500">
+          <span>{job.preset_name || 'No preset information'}</span>
+          {job.original_codec && job.target_codec && (
+            <span>{String(job.original_codec).toUpperCase()} → {String(job.target_codec).toUpperCase()}</span>
+          )}
+          {job.resolution && <span>{job.resolution}</span>}
+          {job.error_message && <span className="truncate text-red-400">{job.error_message}</span>}
+        </div>
+      </div>
+
+      <div className="text-xs text-gray-400">
+        <p className="truncate">{job.node_name || (tab === 'queue' ? 'Awaiting worker' : 'Unknown node')}</p>
+        <p className="mt-1 text-[11px] text-gray-600">
+          {tab === 'success' ? `Finished ${formatTimestamp(job.completed_at)}` : `Created ${formatTimestamp(job.created_at)}`}
+        </p>
+      </div>
+
+      <div>
+        {tab === 'success' ? (
+          <div className="text-xs">
+            <p className="font-medium text-[#8bd5ad]">Completed</p>
+            <p className="mt-1 text-[11px] text-gray-500">
+              {saving !== null ? `${saving}% smaller` : transcodedSize > 0 ? formatBytes(transcodedSize) : 'Output ready'}
+            </p>
+          </div>
+        ) : tab === 'failed' ? (
+          <div className="inline-flex items-center gap-1.5 text-xs font-medium text-red-400">
+            <XCircle className="h-3.5 w-3.5" /> Failed
+          </div>
+        ) : (
+          <div>
+            <div className="mb-1.5 flex justify-between text-[11px] text-gray-500">
+              <span>Queued</span><span>{percentage(job.progress).toFixed(0)}%</span>
+            </div>
+            <ProgressBar value={job.progress} color="#f59e0b" />
+          </div>
+        )}
+      </div>
+
+      <button
+        type="button"
+        onClick={() => onDelete(job.id)}
+        disabled={deleting}
+        className="grid h-8 w-8 place-items-center rounded-lg border border-[#39363a] text-gray-500 hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-300 disabled:opacity-40"
+        title={tab === 'queue' ? 'Cancel job' : 'Remove from history'}
+      >
+        {tab === 'queue' ? <X className="h-3.5 w-3.5" /> : <Trash2 className="h-3.5 w-3.5" />}
+      </button>
+    </div>
+  );
+}
+
+function WorkerCard({
+  node,
+  onLimitsChange,
+  updating,
+  onCancelJob,
+  jobDetails,
+  authoritativeJobs,
+}: {
+  node: any;
+  onLimitsChange: (node: any, limits: WorkerLimits) => void;
+  updating: boolean;
+  onCancelJob: (id: string) => void;
+  jobDetails: Map<string, any>;
+  authoritativeJobs: any[];
+}) {
+  const limits = limitsForNode(node);
+  const gpus = node.system_info?.gpus || [];
+  const telemetryById = new Map<string, any>();
+  (node.active_jobs || []).forEach((job: any) => {
+    if (job?.id) telemetryById.set(job.id, job);
+  });
+  const activeJobs = authoritativeJobs.map((detail: any) => {
+    const telemetry = telemetryById.get(detail.id) || {};
+    return {
+      ...detail,
+      ...telemetry,
+      // Lifecycle state comes from the jobs table; high-frequency execution
+      // fields come from the node heartbeat.
+      status: detail.status,
+      file_name: detail.file_name || telemetry.file_name,
+    };
+  });
+  const totalSlots = limits.cpu + limits.gpus.reduce((sum, value) => sum + value, 0);
+  const ramTotal = numberValue(node.system_info?.ram_total);
+  const ramUsage = percentage(node.ram_usage);
+
+  return (
+    <article className="overflow-hidden rounded-xl border border-[#39363a] bg-[#282729]">
+      <header className="flex flex-col gap-3 border-b border-[#39363a] px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-[#365a49] bg-[#1b3027] text-[#74c69d]">
+            <Server className="h-4.5 w-4.5" />
+          </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <h3 className="truncate text-sm font-semibold text-white">{node.name}</h3>
+              <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${
+                activeJobs.length > 0
+                  ? 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+                  : 'border-[#365a49] bg-[#1b3027] text-[#8bd5ad]'
+              }`}>
+                {activeJobs.length > 0 ? 'Working' : 'Available'}
+              </span>
+            </div>
+            <p className="mt-1 truncate text-[11px] text-gray-500">
+              {activeJobs.length}/{totalSlots} slots in use · {node.system_info?.cpu_cores || '—'} cores · {gpus.length} GPU{gpus.length === 1 ? '' : 's'}
+            </p>
+          </div>
+        </div>
+        <div className="text-right">
+          <p className="text-sm font-semibold tabular-nums text-white">{Math.max(0, totalSlots - activeJobs.length)} free</p>
+          <p className="text-[10px] uppercase tracking-wider text-gray-600">worker slots</p>
+        </div>
+      </header>
+
+      <div className="jobs-worker-grid grid gap-3 p-4">
+        <section className="rounded-lg border border-[#39363a] bg-[#222123] p-3">
+          <div className="mb-3 flex items-center justify-between">
+            <div>
+              <h4 className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-400">Resource load</h4>
+              <p className="mt-1 text-[11px] text-gray-600">Live device utilization</p>
+            </div>
+            <Gauge className="h-4 w-4 text-gray-600" />
+          </div>
+
+          <div
+            className="grid gap-x-4 gap-y-3"
+            style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}
+          >
+            <div>
+              <div className="mb-2 flex items-center justify-between gap-3 text-xs">
+                <span className="flex min-w-0 items-center gap-2 text-gray-400">
+                  <Cpu className="h-3.5 w-3.5 shrink-0 text-[#74c69d]" />
+                  <span className="truncate">{node.system_info?.cpu || 'CPU'}</span>
+                </span>
+                <span className="tabular-nums text-gray-300">{Math.round(percentage(node.cpu_usage))}%</span>
+              </div>
+              <ProgressBar value={node.cpu_usage} />
+            </div>
+
+            <div>
+              <div className="mb-2 flex items-center justify-between text-xs">
+                <span className="flex items-center gap-2 text-gray-400"><Database className="h-3.5 w-3.5 text-[#60a5fa]" />Memory</span>
+                <span className="tabular-nums text-gray-300">{Math.round(ramUsage)}%</span>
+              </div>
+              <ProgressBar value={ramUsage} color="#60a5fa" />
+              <p className="mt-1 text-[10px] text-gray-500">{ramTotal ? `${formatBytes(ramTotal)} installed` : 'Capacity unavailable'}</p>
+            </div>
+
+            {gpus.map((gpu: any, index: number) => {
+              const color = vendorColor(gpu.vendor);
+              return (
+                <div key={`${gpu.name}-${index}`}>
+                  <div className="mb-2 flex items-center justify-between gap-3 text-xs">
+                    <span className="flex min-w-0 items-center gap-2 text-gray-400">
+                      <Monitor className="h-3.5 w-3.5 shrink-0" style={{ color }} />
+                      <span className="truncate">GPU {index + 1} · {cleanGpuName(gpu.name)}</span>
+                    </span>
+                    <span className="shrink-0 tabular-nums text-gray-300">
+                      {Math.round(percentage(gpu.utilizationGpu))}%{gpu.temperatureGpu != null ? ` · ${Math.round(numberValue(gpu.temperatureGpu))}°C` : ''}
+                    </span>
+                  </div>
+                  <ProgressBar value={gpu.utilizationGpu} color={color} />
+                  <p className="mt-1 text-[10px] text-gray-500">
+                    {gpu.memory ? `${formatBytes(numberValue(gpu.memoryUsed))} / ${formatBytes(numberValue(gpu.memory))} VRAM` : 'VRAM unavailable'}
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        <section className="rounded-lg border border-[#39363a] bg-[#222123] p-3">
+          <div className="mb-3 flex items-center justify-between">
+            <div>
+              <h4 className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-400">Worker allocation</h4>
+              <p className="mt-1 text-[10px] text-gray-600">Concurrent jobs</p>
+            </div>
+            {updating && <span className="text-[11px] text-[#74c69d]">Saving…</span>}
+          </div>
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-xs text-gray-300"><Cpu className="h-3.5 w-3.5 text-gray-500" />CPU workers</div>
+              <Stepper
+                value={limits.cpu}
+                max={numberValue(node.system_info?.cpu_cores, 1)}
+                label={`${node.name} CPU workers`}
+                disabled={updating}
+                onChange={(cpu) => onLimitsChange(node, { ...limits, cpu })}
+              />
+            </div>
+            {gpus.map((gpu: any, index: number) => (
+              <div key={`${gpu.name}-workers-${index}`} className="flex items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-2 text-xs text-gray-300">
+                  <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: vendorColor(gpu.vendor) }} />
+                  <span className="truncate">GPU {index + 1}</span>
+                </div>
+                <Stepper
+                  value={limits.gpus[index]}
+                  label={`${node.name} GPU ${index + 1} workers`}
+                  disabled={updating}
+                  onChange={(value) => {
+                    const nextGpus = [...limits.gpus];
+                    nextGpus[index] = value;
+                    onLimitsChange(node, { ...limits, gpus: nextGpus });
+                  }}
+                />
+              </div>
+            ))}
+          </div>
+
+        </section>
+      </div>
+
+      <section className="border-t border-[#39363a] bg-[#222123] px-4 py-3">
+        <div className={`flex items-center justify-between ${activeJobs.length > 0 ? 'mb-2.5' : ''}`}>
+          <h4 className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-400">Active work</h4>
+          <span className="text-[11px] text-gray-600">{activeJobs.length} running</span>
+        </div>
+        {activeJobs.length === 0 ? (
+          <div className="flex items-center gap-2 text-[11px] text-gray-500">
+            <Clock3 className="h-3.5 w-3.5" /> Idle · waiting for queued work
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {activeJobs.map((activeJob: any) => {
+              const job = { ...(jobDetails.get(activeJob.id) || {}), ...activeJob };
+              const type = jobType(job);
+              const elapsed = formatElapsed(job.started_at);
+              return (
+                <div key={job.id} className="grid gap-3 rounded-lg border border-[#39363a] bg-[#282729] p-3 lg:grid-cols-[minmax(0,1fr)_100px_125px_220px_32px] lg:items-center">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <type.Icon className="h-3.5 w-3.5 shrink-0" style={{ color: type.color }} />
+                      <p className="truncate text-xs font-medium text-white" title={jobName(job)}>{jobName(job)}</p>
+                    </div>
+                    <div className="mt-1 flex min-w-0 items-center gap-1.5 overflow-hidden pl-5 text-[10px] text-gray-500">
+                      <span className="shrink-0 text-gray-400">{job.current_action || type.label}</span>
+                      {job.preset_name && <><span>·</span><span className="truncate">{job.preset_name}</span></>}
+                      {job.target_codec && <><span>·</span><span className="shrink-0 uppercase">{job.target_codec}</span></>}
+                      {job.file_size && <><span>·</span><span className="shrink-0">{formatBytes(numberValue(job.file_size))}</span></>}
+                    </div>
+                  </div>
+                  <div>
+                    <p className="text-[9px] font-medium uppercase tracking-wider text-gray-600">Device</p>
+                    <p className="mt-1 text-xs font-medium text-gray-300">{job.gpu != null ? `GPU ${numberValue(job.gpu) + 1}` : 'CPU'}</p>
+                    {elapsed && <p className="mt-0.5 text-[10px] tabular-nums text-gray-600">running {elapsed}</p>}
+                  </div>
+                  <div>
+                    <p className="text-[9px] font-medium uppercase tracking-wider text-gray-600">Throughput</p>
+                    <p className="mt-1 text-xs tabular-nums text-gray-300">{job.fps ? `${Math.round(numberValue(job.fps))} fps` : '— fps'}</p>
+                    <p className="mt-0.5 text-[10px] tabular-nums text-gray-600">{job.ratio ? `${job.ratio} output` : 'Ratio unavailable'}</p>
+                  </div>
+                  <div>
+                    <div className="mb-1.5 flex justify-between text-[11px] text-gray-500">
+                      <span>{job.eta ? `ETA ${job.eta}` : 'ETA unavailable'}</span><span className="font-medium text-gray-300">{percentage(job.progress).toFixed(1)}%</span>
+                    </div>
+                    <ProgressBar value={job.progress} />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onCancelJob(job.id)}
+                    className="grid h-8 w-8 place-items-center rounded-lg border border-[#39363a] text-gray-500 hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-300"
+                    title="Cancel active job"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
+    </article>
+  );
+}
 
 export function Jobs() {
   const queryClient = useQueryClient();
+  const [activeTab, setActiveTab] = useState<JobTab>('queue');
+  const [page, setPage] = useState(1);
+  const [search, setSearch] = useState('');
+  const [clearTarget, setClearTarget] = useState<JobTab | null>(null);
+  const perPage = activeTab === 'queue' ? 5 : 15;
 
-  // Tab state
-  const [activeTab, setActiveTab] = useState<'queue' | 'failed' | 'success'>('queue');
-  const [isQueuePaused, setIsQueuePaused] = useState(false);
+  useWebSocket({ channels: ['nodes', 'jobs'] });
 
-  // Tab transition state
-  const [tabVisible, setTabVisible] = useState(true);
-  const fadeTimer = useRef<ReturnType<typeof setTimeout>>();
-
-  const switchTab = useCallback((tab: 'queue' | 'failed' | 'success') => {
-    if (tab === activeTab) return;
-    if (fadeTimer.current) clearTimeout(fadeTimer.current);
-    setTabVisible(false);
-    fadeTimer.current = setTimeout(() => {
-      setActiveTab(tab);
-      setTabVisible(true);
-    }, 120);
-  }, [activeTab]);
-
-  // Queue pagination state
-  const [queuePage, setQueuePage] = useState(1);
-  const queuePerPage = 20;
-
-  // Failed pagination state
-  const [failedPage, setFailedPage] = useState(1);
-  const failedPerPage = 20;
-
-  // Success pagination state
-  const [successPage, setSuccessPage] = useState(1);
-  const successPerPage = 20;
-
-  // Node settings state
-  const [expandedNodeSettings, setExpandedNodeSettings] = useState<string | null>(null);
-  const [nodeWorkers, setNodeWorkers] = useState<Record<string, { cpu: number; gpus: number[] }>>({});
-  const [pausedNodes, setPausedNodes] = useState<Set<string>>(new Set());
-  const [showClearDialog, setShowClearDialog] = useState(false);
-
-  // Connect to WebSocket for real-time updates
-  useWebSocket({
-    channels: ['nodes', 'jobs'],
-  });
-
-  // Fetch nodes from API (real-time updates via WebSocket)
-  const { data: nodes = [], refetch: refetchNodes } = useQuery({
+  const { data: nodes = [], isFetching: nodesFetching, refetch: refetchNodes } = useQuery({
     queryKey: ['nodes'],
     queryFn: () => api.getNodes(),
-    staleTime: Infinity, // Data is fresh, WebSocket will update cache
+    staleTime: Infinity,
   });
 
-  // Fetch jobs from API (real-time updates via WebSocket)
-  const { data: allJobs = [], isLoading: jobsLoading, refetch: refetchJobs } = useQuery({
+  const { data: allJobs = [], isLoading, isFetching: jobsFetching, refetch: refetchJobs } = useQuery({
     queryKey: ['jobs'],
     queryFn: () => api.getJobs(),
-    staleTime: Infinity, // Data is fresh, WebSocket will update cache
+    staleTime: Infinity,
   });
 
-  // Fetch worker availability
   const { data: workerAvailability } = useQuery({
     queryKey: ['worker-availability'],
     queryFn: () => api.getWorkerAvailability(),
-    staleTime: 5000, // Refresh every 5 seconds
+    staleTime: 5000,
+    refetchInterval: 5000,
   });
 
-  // Filter online nodes only (by status or connected flag)
-  const onlineNodes = useMemo(() => {
-    return nodes.filter((node: any) => node.status === 'online' || node.connected === true);
-  }, [nodes]);
+  const onlineNodes = useMemo(
+    () => nodes.filter((node: any) => node.connected || node.status === 'online'),
+    [nodes],
+  );
 
-  // Categorize jobs by status
-  const { queue, failed, success } = useMemo(() => {
-    // Queue only shows jobs waiting to be picked up (not assigned/processing)
-    const queue = allJobs.filter((j: any) => j.status === 'queued');
-    const failed = allJobs.filter((j: any) => j.status === 'failed');
-    const success = allJobs.filter((j: any) => j.status === 'completed');
-    return { queue, failed, success };
-  }, [allJobs]);
+  const categorized = useMemo(() => ({
+    queue: allJobs.filter((job: any) => job.status === 'queued'),
+    failed: allJobs.filter((job: any) => job.status === 'failed'),
+    success: allJobs.filter((job: any) => job.status === 'completed'),
+  }), [allJobs]);
 
-  // Get current tab data
-  const getCurrentData = () => {
-    switch (activeTab) {
-      case 'queue':
-        return { items: queue, perPage: queuePerPage, page: queuePage };
-      case 'failed':
-        return { items: failed, perPage: failedPerPage, page: failedPage };
-      case 'success':
-        return { items: success, perPage: successPerPage, page: successPage };
-    }
-  };
+  const activeJobs = useMemo(
+    () => allJobs.filter((job: any) => isActiveJobStatus(job.status)),
+    [allJobs],
+  );
 
-  const currentData = getCurrentData();
+  const jobDetails = useMemo(
+    () => new Map<string, any>(allJobs.map((job: any) => [job.id, job])),
+    [allJobs],
+  );
 
-  // Calculate pagination
-  const totalItems = currentData.items.length;
-  const totalPages = Math.ceil(totalItems / currentData.perPage);
-  const startIndex = (currentData.page - 1) * currentData.perPage;
-  const endIndex = startIndex + currentData.perPage;
-  const displayedItems = currentData.items.slice(startIndex, endIndex);
+  const stats = useMemo(() => {
+    const slots = onlineNodes.reduce((sum: number, node: any) => {
+      const limits = limitsForNode(node);
+      return sum + limits.cpu + limits.gpus.reduce((gpuSum, value) => gpuSum + value, 0);
+    }, 0);
+    return {
+      slots,
+      free: Math.max(0, slots - activeJobs.length),
+      online: onlineNodes.length,
+    };
+  }, [activeJobs.length, onlineNodes]);
 
-  // Queue page change
-  const handleQueuePageChange = (newPage: number) => {
-    if (newPage >= 1 && newPage <= totalPages) {
-      setQueuePage(newPage);
-    }
-  };
+  const selectedJobs = categorized[activeTab];
+  const filteredJobs = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    if (!term) return selectedJobs;
+    return selectedJobs.filter((job: any) => [
+      jobName(job),
+      job.preset_name,
+      job.node_name,
+      job.error_message,
+      job.target_codec,
+    ].filter(Boolean).join(' ').toLowerCase().includes(term));
+  }, [search, selectedJobs]);
 
-  // Failed page change
-  const handleFailedPageChange = (newPage: number) => {
-    const failedPages = Math.ceil(failed.length / failedPerPage);
-    if (newPage >= 1 && newPage <= failedPages) {
-      setFailedPage(newPage);
-    }
-  };
+  const totalPages = Math.max(1, Math.ceil(filteredJobs.length / perPage));
+  const currentPage = Math.min(page, totalPages);
+  const displayedJobs = filteredJobs.slice((currentPage - 1) * perPage, currentPage * perPage);
 
-  // Success page change
-  const handleSuccessPageChange = (newPage: number) => {
-    const successPages = Math.ceil(success.length / successPerPage);
-    if (newPage >= 1 && newPage <= successPages) {
-      setSuccessPage(newPage);
-    }
-  };
-
-  // Delete job mutation
-  const deleteJobMutation = useMutation({
+  const deleteMutation = useMutation({
     mutationFn: (jobId: string) => api.deleteJob(jobId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['jobs'] });
@@ -140,954 +592,258 @@ export function Jobs() {
     },
   });
 
-  // Update node workers mutation
-  const updateNodeMutation = useMutation({
-    mutationFn: ({ nodeId, maxWorkers }: { nodeId: string; maxWorkers: { cpu: number; gpus: number[] } }) =>
-      api.updateNode(nodeId, { max_workers: maxWorkers }),
-    onSuccess: (data) => {
-      console.log('Node update successful, received:', data);
+  const bulkDeleteMutation = useMutation({
+    mutationFn: (jobIds: string[]) => api.deleteJobs(jobIds),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
       queryClient.invalidateQueries({ queryKey: ['nodes'] });
-    },
-    onError: (error) => {
-      console.error('Failed to update node workers:', error);
-      alert('Failed to update worker settings. Please try again.');
     },
   });
 
-  // Save workers for a node instantly
-  const saveNodeWorkers = (nodeId: string, cpu: number, gpus: number[]) => {
-    console.log('Saving node workers:', { nodeId, cpu, gpus, maxWorkers: { cpu, gpus } });
+  const updateNodeMutation = useMutation({
+    mutationFn: ({ nodeId, limits }: { nodeId: string; limits: WorkerLimits }) =>
+      api.updateNode(nodeId, { max_workers: limits }),
+    onMutate: async ({ nodeId, limits }) => {
+      await queryClient.cancelQueries({ queryKey: ['nodes'] });
+      const previous = queryClient.getQueryData<any[]>(['nodes']);
+      queryClient.setQueryData<any[]>(['nodes'], (current = []) =>
+        current.map(node => node.id === nodeId ? { ...node, max_workers: limits } : node),
+      );
+      return { previous };
+    },
+    onError: (_error, _variables, context) => {
+      if (context?.previous) queryClient.setQueryData(['nodes'], context.previous);
+      window.alert('Failed to update worker settings. Please try again.');
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['nodes'] }),
+  });
 
-    // Update local state immediately
-    setNodeWorkers(prev => ({
-      ...prev,
-      [nodeId]: { cpu, gpus }
-    }));
-
-    updateNodeMutation.mutate({ nodeId, maxWorkers: { cpu, gpus } });
+  const confirmClear = () => {
+    if (!clearTarget) return;
+    const jobs = clearTarget === 'queue'
+      ? categorized.queue
+      : categorized[clearTarget];
+    bulkDeleteMutation.mutate(jobs.map((job: any) => job.id));
+    setClearTarget(null);
   };
 
-  // Clear queue mutation
-  const handleClearQueue = () => {
-    setShowClearDialog(true);
-  };
+  const refreshing = nodesFetching || jobsFetching;
+  const noWorkers = categorized.queue.length > 0
+    && workerAvailability
+    && !workerAvailability.hasCpuWorkers
+    && !workerAvailability.hasGpuWorkers;
+  const analyzeJobsBlocked = categorized.queue.some((job: any) => jobType(job).label === 'Analyze')
+    && workerAvailability
+    && !workerAvailability.hasCpuWorkers;
 
-  const confirmClearQueue = () => {
-    setShowClearDialog(false);
-    // Delete all queued/assigned jobs
-    const queuedJobs = allJobs.filter((j: any) => j.status === 'queued' || j.status === 'assigned');
-    queuedJobs.forEach((job: any) => {
-      deleteJobMutation.mutate(job.id);
-    });
-  };
-
-  // Clear failed mutation
-  const handleClearFailed = () => {
-    const failedJobs = allJobs.filter((j: any) => j.status === 'failed');
-    failedJobs.forEach((job: any) => {
-      deleteJobMutation.mutate(job.id);
-    });
-  };
-
-  // Clear success mutation
-  const handleClearSuccess = () => {
-    const successJobs = allJobs.filter((j: any) => j.status === 'completed');
-    successJobs.forEach((job: any) => {
-      deleteJobMutation.mutate(job.id);
-    });
-  };
-
-  // Helper function to get vendor color
-  const getVendorColor = (type: 'cpu' | 'gpu', cpuName?: string, gpuVendor?: string) => {
-    if (type === 'cpu') {
-      if (cpuName?.toLowerCase().includes('intel')) return '#0071C5'; // Intel blue
-      if (cpuName?.toLowerCase().includes('amd') || cpuName?.toLowerCase().includes('ryzen')) return '#ED1C24'; // AMD red
-      return '#74c69d'; // Default green
-    } else {
-      if (gpuVendor?.toLowerCase().includes('nvidia')) return '#76b900'; // NVIDIA green
-      if (gpuVendor?.toLowerCase().includes('amd') || gpuVendor?.toLowerCase().includes('radeon')) return '#ED1C24'; // AMD red
-      if (gpuVendor?.toLowerCase().includes('intel')) return '#0071C5'; // Intel blue
-      return '#9C27B0'; // Default purple
-    }
-  };
-
-  // Get job type info
-  const getJobTypeInfo = (job: any) => {
-    let type = 'transcode';
-    if (job.type === 'analyze' || job.type === 'transcode') {
-      type = job.type;
-    } else if (job.preset_id?.includes('analyze') || job.preset_name?.toLowerCase().includes('analyze')) {
-      type = 'analyze';
-    }
-    const isAnalyze = type === 'analyze';
-
-    return {
-      type,
-      isAnalyze,
-      icon: isAnalyze ? 'Scan' : 'Film',
-      color: isAnalyze ? '#f59e0b' : '#74c69d',
-      label: isAnalyze ? 'Analyze' : 'Transcode'
-    };
-  };
+  if (isLoading) {
+    return (
+      <div className="grid h-64 place-items-center">
+        <div className="text-center">
+          <div className="mx-auto h-7 w-7 animate-spin rounded-full border-2 border-[#39363a] border-t-[#74c69d]" />
+          <p className="mt-3 text-sm text-gray-500">Loading job orchestration…</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="space-y-6">
-      {/* Warning banners for worker availability */}
-      {workerAvailability && queue.length > 0 && (
-        <>
-          {/* Check for analyze jobs that need CPU workers */}
-          {!workerAvailability.hasCpuWorkers && queue.some((job: any) => job.preset_id === 'builtin-analyze') && (
-            <div className="bg-amber-900/30 border border-amber-600/50 rounded-lg p-4 flex items-center gap-3">
-              <AlertTriangle className="h-5 w-5 text-amber-500 flex-shrink-0" />
-              <div>
-                <p className="text-amber-200 font-medium">No CPU Workers Available</p>
-                <p className="text-amber-300/80 text-sm">
-                  Analyze jobs require CPU processing but no nodes are available.
-                  Make sure your nodes are online.
-                </p>
-              </div>
-            </div>
-          )}
-          {/* Check for transcode jobs with no workers at all */}
-          {!workerAvailability.hasCpuWorkers && !workerAvailability.hasGpuWorkers && queue.some((job: any) => job.preset_id !== 'builtin-analyze') && (
-            <div className="bg-amber-900/30 border border-amber-600/50 rounded-lg p-4 flex items-center gap-3">
-              <AlertTriangle className="h-5 w-5 text-amber-500 flex-shrink-0" />
-              <div>
-                <p className="text-amber-200 font-medium">No Workers Available</p>
-                <p className="text-amber-300/80 text-sm">
-                  There are queued jobs but no nodes are online to process them.
-                  Make sure your nodes are running and connected.
-                </p>
-              </div>
-            </div>
-          )}
-        </>
+    <div className="space-y-6 pb-10">
+      <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.2em] text-[#74c69d]">
+            <Gauge className="h-3.5 w-3.5" /> Work orchestration
+          </div>
+          <h1 className="text-3xl font-semibold tracking-tight text-white">Jobs</h1>
+          <p className="mt-1.5 text-sm text-gray-500">Follow queued work, active encodes, and worker capacity in real time.</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => { refetchNodes(); refetchJobs(); }}
+          disabled={refreshing}
+          className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-[#39363a] bg-[#222123] px-3 text-xs font-medium text-gray-300 hover:bg-[#282729] disabled:opacity-40"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} /> Refresh
+        </button>
+      </header>
+
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <MetricCard icon={Activity} label="Processing" value={activeJobs.length} detail="Jobs currently running" color="#74c69d" />
+        <MetricCard icon={Layers3} label="Queued" value={categorized.queue.length} detail="Waiting for an available slot" color="#f59e0b" />
+        <MetricCard icon={Cpu} label="Worker capacity" value={`${stats.free}/${stats.slots}`} detail="Free slots across the fleet" color="#a78bfa" />
+        <MetricCard icon={Server} label="Online nodes" value={`${stats.online}/${nodes.length}`} detail={`${categorized.success.length} completed · ${categorized.failed.length} failed`} color="#60a5fa" />
+      </section>
+
+      {(noWorkers || analyzeJobsBlocked) && (
+        <section className="flex items-start gap-3 rounded-xl border border-amber-600/40 bg-amber-900/20 p-4">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+          <div>
+            <p className="text-sm font-medium text-amber-200">
+              {noWorkers ? 'Queued jobs have no available workers' : 'Analyze jobs need a CPU worker'}
+            </p>
+            <p className="mt-1 text-xs text-amber-300/70">
+              {noWorkers
+                ? 'Connect a node or increase its CPU/GPU worker allocation to resume assignment.'
+                : 'Increase CPU worker allocation on an online node to process the waiting analysis jobs.'}
+            </p>
+          </div>
+        </section>
       )}
 
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold text-white">Jobs</h1>
-          <p className="text-gray-400">Active transcoding jobs by node</p>
-        </div>
-        <Button
-          onClick={() => {
-            refetchNodes();
-            refetchJobs();
-          }}
-          disabled={jobsLoading}
-          style={{ borderColor: '#39363a', color: '#ffffff' }}
-          className="border"
-        >
-          <RefreshCw className={`mr-2 h-4 w-4 ${jobsLoading ? 'animate-spin' : ''}`} />
-          Refresh
-        </Button>
-      </div>
-
-      {/* Queue/Failed/Success Section */}
-      <Card style={{ backgroundColor: '#272528', border: 'none' }}>
-        <CardContent className="p-0 rounded-lg overflow-hidden">
-          {/* Tabs */}
-          <div className="flex border-b border-[#39363a]" style={{ backgroundColor: '#242325', borderTopLeftRadius: '0.5rem', borderTopRightRadius: '0.5rem' }}>
-            <button
-              onClick={() => switchTab('queue')}
-              className={`px-6 py-3 text-sm font-medium transition-colors relative ${
-                activeTab === 'queue' ? 'text-white' : 'text-gray-400 hover:text-white'
-              }`}
-            >
-              Queue ({queue.length})
-              {activeTab === 'queue' && (
-                <div className="absolute bottom-0 left-0 right-0 h-0.5" style={{ backgroundColor: '#f59e0b' }} />
-              )}
-            </button>
-            <button
-              onClick={() => switchTab('failed')}
-              className={`px-6 py-3 text-sm font-medium transition-colors relative ${
-                activeTab === 'failed' ? 'text-white' : 'text-gray-400 hover:text-white'
-              }`}
-            >
-              Failed ({failed.length})
-              {activeTab === 'failed' && (
-                <div className="absolute bottom-0 left-0 right-0 h-0.5" style={{ backgroundColor: '#ef4444' }} />
-              )}
-            </button>
-            <button
-              onClick={() => switchTab('success')}
-              className={`px-6 py-3 text-sm font-medium transition-colors relative ${
-                activeTab === 'success' ? 'text-white' : 'text-gray-400 hover:text-white'
-              }`}
-            >
-              Success ({success.length})
-              {activeTab === 'success' && (
-                <div className="absolute bottom-0 left-0 right-0 h-0.5" style={{ backgroundColor: '#74c69d' }} />
-              )}
-            </button>
-
-            {/* Tab controls */}
-            <div className="ml-auto flex items-center gap-2 pr-4">
-              <div
-                className="tab-content-transition flex items-center gap-2"
-                style={{ opacity: tabVisible ? 1 : 0, transform: tabVisible ? 'translateY(0)' : 'translateY(4px)' }}
+      <section className={`${surfaceClass} overflow-hidden`}>
+        <div className="flex flex-col gap-3 border-b border-[#39363a] p-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-center gap-1 rounded-lg bg-[#1e1d1f] p-1">
+            {([
+              { id: 'queue', label: 'Queue', count: categorized.queue.length, color: '#f59e0b' },
+              { id: 'failed', label: 'Failed', count: categorized.failed.length, color: '#ef4444' },
+              { id: 'success', label: 'Completed', count: categorized.success.length, color: '#74c69d' },
+            ] as const).map(tab => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => { setActiveTab(tab.id); setPage(1); }}
+                className={`rounded-md px-3 py-2 text-xs font-medium transition-colors ${activeTab === tab.id ? 'bg-[#39363a] text-white' : 'text-gray-500 hover:text-gray-300'}`}
               >
-                {activeTab === 'queue' && (
-                  <>
-                    <Button
-                      onClick={() => setIsQueuePaused(!isQueuePaused)}
-                      size="sm"
-                      style={{
-                        borderColor: isQueuePaused ? '#f59e0b' : '#38363a',
-                        color: '#ffffff',
-                        backgroundColor: isQueuePaused ? 'rgba(245, 158, 11, 0.2)' : 'transparent'
-                      }}
-                      className="border hover:bg-gray-800"
-                    >
-                      {isQueuePaused ? <Play className="mr-2 h-4 w-4" /> : <Pause className="mr-2 h-4 w-4" />}
-                      {isQueuePaused ? 'Resume Queue' : 'Pause Queue'}
-                    </Button>
-                    <Button
-                      onClick={handleClearQueue}
-                      size="sm"
-                      style={{ backgroundColor: '#ef4444', color: '#ffffff' }}
-                      className="hover:bg-red-600"
-                    >
-                      <Trash2 className="mr-2 h-4 w-4" />
-                      Cancel ({queue.length})
-                    </Button>
-                  </>
-                )}
-                {activeTab === 'failed' && (
-                  <Button
-                    onClick={handleClearFailed}
-                    size="sm"
-                    style={{ backgroundColor: '#ef4444', color: '#ffffff' }}
-                    className="hover:bg-red-600"
-                  >
-                    <Trash2 className="mr-2 h-4 w-4" />
-                    Clear ({failed.length})
-                  </Button>
-                )}
-                {activeTab === 'success' && (
-                  <Button
-                    onClick={handleClearSuccess}
-                    size="sm"
-                    style={{ backgroundColor: '#ef4444', color: '#ffffff' }}
-                    className="hover:bg-red-600"
-                  >
-                    <Trash2 className="mr-2 h-4 w-4" />
-                    Clear ({success.length})
-                  </Button>
-                )}
-              </div>
-            </div>
+                {tab.label} <span className="ml-1 tabular-nums" style={{ color: activeTab === tab.id ? tab.color : undefined }}>{countFormatter.format(tab.count)}</span>
+              </button>
+            ))}
           </div>
 
-          {/* Jobs Table */}
-          <div
-            className="tab-content-transition h-[500px] overflow-y-auto overflow-hidden"
-            style={{ opacity: tabVisible ? 1 : 0, transform: tabVisible ? 'translateY(0)' : 'translateY(4px)' }}
-          >
-            {displayedItems.length === 0 ? (
-              <div className="py-16 text-center">
-                <div className="text-gray-500">
-                  {activeTab === 'queue' && (isQueuePaused ? 'Queue is paused' : 'Queue is empty')}
-                  {activeTab === 'failed' && 'No failed jobs'}
-                  {activeTab === 'success' && 'No completed jobs yet'}
-                </div>
-              </div>
-            ) : (
-              <table className="w-full">
-                <thead className="sticky top-0 text-left text-xs text-gray-400 uppercase" style={{ backgroundColor: '#302d31', borderTopLeftRadius: '0.5rem', borderTopRightRadius: '0.5rem' }}>
-                  <tr>
-                    <th className="px-4 py-3 font-medium" style={{ width: '80px' }}>Type</th>
-                    <th className="px-4 py-3 font-medium">File Name</th>
-                    {activeTab !== 'queue' && (
-                      <th className="px-4 py-3 font-medium" style={{ width: '100px' }}>Node</th>
-                    )}
-                    <th className="px-4 py-3 font-medium" style={{ width: '80px' }}>Progress</th>
-                    {activeTab !== 'success' && (
-                      <th className="px-4 py-3 font-medium" style={{ width: '120px' }}>Action</th>
-                    )}
-                  </tr>
-                </thead>
-                <tbody>
-                  {displayedItems.map((job: any) => {
-                    const jobType = getJobTypeInfo(job);
-                    const node = onlineNodes.find((n: any) => n.id === job.node_id);
-                    const nodeName = node?.name || (job.node_name || 'Unknown');
-                    const progress = job.progress || 0;
-
-                    return (
-                      <tr
-                        key={job.id}
-                        className="border-t border-[#39363a] hover:bg-white/5 transition-colors"
-                      >
-                        {/* Type */}
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-2">
-                            {jobType.icon === 'Scan' ? (
-                              <Scan className="h-4 w-4" style={{ color: jobType.color }} />
-                            ) : (
-                              <Film className="h-4 w-4" style={{ color: jobType.color }} />
-                            )}
-                            <span className="text-xs font-medium" style={{ color: jobType.color }}>
-                              {jobType.label}
-                            </span>
-                          </div>
-                        </td>
-
-                        {/* File Name */}
-                        <td className="px-4 py-3">
-                          <div className="text-white text-sm truncate" title={job.file_name || job.name}>
-                            {job.file_name || job.name}
-                          </div>
-                          {/* Show codec conversion info for transcode jobs */}
-                          {job.target_codec && (
-                            <div className="text-xs text-gray-500">
-                              {job.original_codec?.toUpperCase()} → {job.target_codec.toUpperCase()}
-                            </div>
-                          )}
-                          {/* Show codec and resolution for analyze jobs or when available */}
-                          {!job.target_codec && (job.original_codec || job.resolution) && (
-                            <div className="text-xs text-gray-500">
-                              {job.original_codec?.toUpperCase() || '---'}
-                              {job.resolution && ` • ${job.resolution}`}
-                            </div>
-                          )}
-                        </td>
-
-                        {/* Node - only show for non-queue tabs */}
-                        {activeTab !== 'queue' && (
-                          <td className="px-4 py-3">
-                            <span className={`text-gray-300 ${activeTab === 'queue' ? 'text-sm' : 'text-base'}`}>
-                              {nodeName}
-                            </span>
-                          </td>
-                        )}
-
-                        {/* Progress */}
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-2">
-                            <div className="w-16 h-2 bg-gray-700 rounded-full overflow-hidden">
-                              <div
-                                className="h-full transition-all"
-                                style={{ width: `${progress}%`, backgroundColor: '#74c69d' }}
-                              />
-                            </div>
-                            <span className="text-xs text-gray-400">{progress.toFixed(1)}%</span>
-                          </div>
-                        </td>
-
-                        {/* Action */}
-                        {activeTab !== 'success' && (
-                          <td className="px-4 py-3">
-                            {(activeTab === 'queue' || activeTab === 'failed') && (
-                              <button
-                                onClick={() => deleteJobMutation.mutate(job.id)}
-                                className="h-8 w-8 rounded-full flex items-center justify-center transition-all hover:scale-110 active:scale-95"
-                                style={{ backgroundColor: '#ef4444', color: '#ffffff' }}
-                                title="Remove job"
-                              >
-                                <X className="h-3 w-3" />
-                              </button>
-                            )}
-                          </td>
-                        )}
-                        {/* Empty cell for success tab to maintain spacing */}
-                        {activeTab === 'success' && <td></td>}
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <label className="relative block sm:w-64">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-600" />
+              <input
+                value={search}
+                onChange={(event) => { setSearch(event.target.value); setPage(1); }}
+                placeholder="Search jobs…"
+                className="h-9 w-full rounded-lg border border-[#39363a] bg-[#1e1d1f] pl-9 pr-3 text-xs text-white outline-none placeholder:text-gray-600 focus:border-[#5b7869]"
+              />
+            </label>
+            {selectedJobs.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setClearTarget(activeTab)}
+                className="inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-[#39363a] px-3 text-xs font-medium text-gray-400 hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-300"
+              >
+                <Trash2 className="h-3.5 w-3.5" /> Clear {activeTab === 'success' ? 'history' : activeTab}
+              </button>
             )}
           </div>
+        </div>
 
-          {/* Pagination */}
-          {totalPages > 1 && (
-            <div className="flex items-center justify-between p-3 border-t border-[#39363a]">
-              <div className="text-sm text-gray-400">
-                Showing {totalItems > 0 ? startIndex + 1 : 0} to {Math.min(endIndex, totalItems)} of {totalItems} jobs
-              </div>
-              <div className="flex items-center gap-1">
-                <Button
-                  size="sm"
-                  onClick={() => {
-                    if (activeTab === 'queue') handleQueuePageChange(1);
-                    else if (activeTab === 'failed') handleFailedPageChange(1);
-                    else handleSuccessPageChange(1);
-                  }}
-                  disabled={currentData.page === 1}
-                  style={{ borderColor: '#39363a', color: '#ffffff' }}
-                  className="border hover:bg-gray-800"
-                >
-                  First
-                </Button>
-                <Button
-                  size="sm"
-                  onClick={() => {
-                    if (activeTab === 'queue') handleQueuePageChange(Math.max(1, currentData.page - 1));
-                    else if (activeTab === 'failed') handleFailedPageChange(Math.max(1, currentData.page - 1));
-                    else handleSuccessPageChange(Math.max(1, currentData.page - 1));
-                  }}
-                  disabled={currentData.page === 1}
-                  style={{ borderColor: '#39363a', color: '#ffffff' }}
-                  className="border hover:bg-gray-800"
-                >
-                  <ChevronLeft className="h-4 w-4" />
-                </Button>
-                <span className="px-3 text-sm text-gray-400">
-                  Page {currentData.page} of {totalPages}
-                </span>
-                <Button
-                  size="sm"
-                  onClick={() => {
-                    if (activeTab === 'queue') handleQueuePageChange(Math.min(totalPages, currentData.page + 1));
-                    else if (activeTab === 'failed') handleFailedPageChange(Math.min(totalPages, currentData.page + 1));
-                    else handleSuccessPageChange(Math.min(totalPages, currentData.page + 1));
-                  }}
-                  disabled={currentData.page === totalPages}
-                  style={{ borderColor: '#39363a', color: '#ffffff' }}
-                  className="border hover:bg-gray-800"
-                >
-                  <ChevronRight className="h-4 w-4" />
-                </Button>
-                <Button
-                  size="sm"
-                  onClick={() => {
-                    if (activeTab === 'queue') handleQueuePageChange(totalPages);
-                    else if (activeTab === 'failed') handleFailedPageChange(totalPages);
-                    else handleSuccessPageChange(totalPages);
-                  }}
-                  disabled={currentData.page === totalPages}
-                  style={{ borderColor: '#39363a', color: '#ffffff' }}
-                  className="border hover:bg-gray-800"
-                >
-                  Last
-                </Button>
-              </div>
+        {displayedJobs.length === 0 ? (
+          <div className="grid min-h-52 place-items-center px-6 py-10 text-center">
+            <div>
+              {activeTab === 'queue' ? <Layers3 className="mx-auto h-6 w-6 text-gray-600" />
+                : activeTab === 'failed' ? <CheckCircle2 className="mx-auto h-6 w-6 text-[#74c69d]" />
+                  : <Clock3 className="mx-auto h-6 w-6 text-gray-600" />}
+              <p className="mt-3 text-sm font-medium text-gray-300">
+                {search ? 'No matching jobs' : activeTab === 'queue' ? 'Queue is clear' : activeTab === 'failed' ? 'No failed jobs' : 'No completed jobs yet'}
+              </p>
+              <p className="mt-1 text-xs text-gray-600">
+                {search ? 'Try another filename, node, or preset.' : activeTab === 'queue' ? 'New jobs will appear here while they wait for a worker.' : 'Job history will appear here.'}
+              </p>
             </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Section Divider */}
-      <div className="flex items-center gap-4">
-        <div className="flex-1 h-px" style={{ backgroundColor: '#39363a' }}></div>
-        <h2 className="text-lg font-semibold text-gray-400">Active Nodes ({onlineNodes.length})</h2>
-        <div className="flex-1 h-px" style={{ backgroundColor: '#39363a' }}></div>
-      </div>
-
-      {/* Nodes and Jobs */}
-      <div className="space-y-6">
-        {onlineNodes.length === 0 ? (
-          <Card style={{ backgroundColor: '#252326', border: '1px solid #39363a' }}>
-            <CardContent className="p-8 text-center">
-              <div className="text-gray-500">No online nodes</div>
-              <div className="text-xs text-gray-600 mt-1">Add nodes to get started</div>
-            </CardContent>
-          </Card>
+          </div>
         ) : (
-          onlineNodes.map((node: any) => (
-            <Card key={node.id} style={{ border: 'none' }}>
-              <CardContent className="p-0 rounded-lg overflow-hidden">
-                {/* Node Header */}
-                <div className="border-b border-[#39363a]" style={{ backgroundColor: '#252326', borderTopLeftRadius: '0.5rem', borderTopRightRadius: '0.5rem' }}>
-                  {/* Settings Panel (Expandable) */}
-                  <div
-                    className={`transition-all duration-300 ease-in-out ${
-                      expandedNodeSettings === node.id ? 'max-h-[800px] overflow-visible' : 'max-h-0 overflow-hidden'
-                    }`}
-                  >
-                    <div className="p-4">
-                      {/* Device Settings - Simple List */}
-                      <div className="flex flex-wrap gap-y-4">
-                        {/* CPU Device */}
-                        <div className="flex items-center gap-3 pr-8">
-                          <div className="flex items-center gap-2 w-32 flex-shrink-0">
-                            <Cpu className="h-4 w-4" style={{ color: getVendorColor('cpu', node.system_info?.cpu) }} />
-                            <div>
-                              <div className="text-sm font-medium text-white">CPU</div>
-                              <div className="text-xs text-gray-500">{node.system_info?.cpu_cores || '—'} cores</div>
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={() => {
-                                const currentValue = nodeWorkers[node.id]?.cpu ?? node.max_workers?.cpu ?? 1;
-                                if (currentValue > 0) {
-                                  const newValue = currentValue - 1;
-                                  saveNodeWorkers(node.id, newValue, nodeWorkers[node.id]?.gpus || []);
-                                }
-                              }}
-                              disabled={(nodeWorkers[node.id]?.cpu ?? node.max_workers?.cpu ?? 1) <= 0}
-                              className="h-6 w-6 rounded-full flex items-center justify-center transition-all disabled:cursor-not-allowed"
-                              style={{
-                                backgroundColor: (nodeWorkers[node.id]?.cpu ?? node.max_workers?.cpu ?? 1) <= 0 ? '#38363a' : '#4a454a',
-                              }}
-                            >
-                              <Minus className="h-2.5 w-2.5" />
-                            </button>
-                            <div className="w-12 text-center">
-                              <span className="text-lg font-bold text-white">{nodeWorkers[node.id]?.cpu ?? node.max_workers?.cpu ?? 1}</span>
-                            </div>
-                            <button
-                              onClick={() => {
-                                const currentValue = nodeWorkers[node.id]?.cpu ?? node.max_workers?.cpu ?? 1;
-                                const maxCpu = node.system_info?.cpu_cores || 1;
-                                if (currentValue < maxCpu) {
-                                  const newValue = currentValue + 1;
-                                  saveNodeWorkers(node.id, newValue, nodeWorkers[node.id]?.gpus || []);
-                                }
-                              }}
-                              disabled={(nodeWorkers[node.id]?.cpu ?? node.max_workers?.cpu ?? 1) >= (node.system_info?.cpu_cores || 1)}
-                              className="h-6 w-6 rounded-full flex items-center justify-center transition-all disabled:cursor-not-allowed"
-                              style={{
-                                backgroundColor: (nodeWorkers[node.id]?.cpu ?? node.max_workers?.cpu ?? 1) >= (node.system_info?.cpu_cores || 1) ? '#38363a' : getVendorColor('cpu', node.system_info?.cpu),
-                              }}
-                            >
-                              <Plus className="h-2.5 w-2.5" />
-                            </button>
-                          </div>
-                        </div>
-
-                        {/* Divider + GPU Devices */}
-                        {node.system_info?.gpus && node.system_info.gpus.length > 0 && node.system_info.gpus.map((gpu: any, index: number) => {
-                          const isLast = index === node.system_info.gpus.length - 1;
-                          return (
-                            <ReactFragment key={`gpu-${index}`}>
-                              {/* Separator before GPU (not after last) */}
-                              {!isLast && <div className="hidden sm:block w-px bg-[#39363a] mr-8" />}
-                              <div className={`flex items-center gap-3 ${!isLast ? 'pr-8' : ''}`}>
-                                <div className="flex items-center gap-2 w-32 flex-shrink-0">
-                                <Zap className="h-4 w-4" style={{ color: getVendorColor('gpu', undefined, gpu.vendor) }} />
-                                <div>
-                                  <div className="text-sm font-medium text-white">GPU {index + 1}</div>
-                                  <div className="text-xs text-gray-500 truncate max-w-28" title={gpu.name}>{gpu.name}</div>
-                                </div>
-                              </div>
-                              <div className="flex items-center gap-2">
-                                <button
-                                  onClick={() => {
-                                    const currentGpus = nodeWorkers[node.id]?.gpus || [];
-                                    const currentValue = currentGpus[index] || 0;
-                                    if (currentValue > 0) {
-                                      const newGpus = [...currentGpus];
-                                      newGpus[index] = currentValue - 1;
-                                      saveNodeWorkers(node.id, nodeWorkers[node.id]?.cpu ?? 1, newGpus);
-                                    }
-                                  }}
-                                  disabled={(nodeWorkers[node.id]?.gpus?.[index] || 0) <= 0}
-                                  className="h-6 w-6 rounded-full flex items-center justify-center transition-all disabled:cursor-not-allowed"
-                                  style={{
-                                    backgroundColor: (nodeWorkers[node.id]?.gpus?.[index] || 0) <= 0 ? '#38363a' : '#4a454a',
-                                  }}
-                                >
-                                  <Minus className="h-2.5 w-2.5" />
-                                </button>
-                                <div className="w-12 text-center">
-                                  <span className="text-lg font-bold text-white">{nodeWorkers[node.id]?.gpus?.[index] || 0}</span>
-                                </div>
-                                <button
-                                  onClick={() => {
-                                    const currentGpus = nodeWorkers[node.id]?.gpus || [];
-                                    const currentValue = currentGpus[index] || 0;
-                                    const newGpus = [...currentGpus];
-                                    newGpus[index] = currentValue + 1;
-                                    saveNodeWorkers(node.id, nodeWorkers[node.id]?.cpu ?? 1, newGpus);
-                                  }}
-                                  className="h-6 w-6 rounded-full flex items-center justify-center transition-all"
-                                  style={{ backgroundColor: getVendorColor('gpu', undefined, gpu.vendor) }}
-                                >
-                                  <Plus className="h-2.5 w-2.5" />
-                                </button>
-                              </div>
-                            </div>
-                            </ReactFragment>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Node Name Bar */}
-                  <div className="p-4">
-                    <div className="flex items-center justify-between">
-                      <div className="flex-1">
-                        <h2 className="text-xl font-semibold text-white flex items-center gap-2">
-                          <button
-                            onClick={() => {
-                              if (expandedNodeSettings === node.id) {
-                                setExpandedNodeSettings(null);
-                              } else {
-                                setExpandedNodeSettings(node.id);
-                                // Initialize workers if not set
-                                if (!nodeWorkers[node.id]) {
-                                  // Handle both old format (gpu: number) and new format (gpus: number[])
-                                  const savedGpus = node.max_workers?.gpus;
-                                  const gpuCount = node.system_info?.gpus?.length || 0;
-                                  let gpuValues: number[] = [];
-                                  if (savedGpus && Array.isArray(savedGpus)) {
-                                    // New format: use saved gpus array directly
-                                    gpuValues = savedGpus;
-                                  } else if (node.max_workers?.gpu !== undefined) {
-                                    // Old format: single gpu number, apply to all GPUs
-                                    gpuValues = Array(gpuCount).fill(node.max_workers.gpu);
-                                  }
-
-                                  setNodeWorkers(prev => ({
-                                    ...prev,
-                                    [node.id]: {
-                                      cpu: node.max_workers?.cpu !== undefined ? node.max_workers.cpu : 1,
-                                      gpus: gpuValues
-                                    }
-                                  }));
-                                }
-                              }
-                            }}
-                            className={`h-7 w-7 rounded-full flex items-center justify-center transition-all duration-300 ${
-                              expandedNodeSettings === node.id
-                                ? 'bg-[#74c69d] text-white rotate-90'
-                                : 'text-gray-400 hover:text-white hover:bg-white/10'
-                            }`}
-                            title="Toggle Settings"
-                          >
-                            <Settings className="h-4 w-4" />
-                          </button>
-                          {node.name}
-                          <button
-                            onClick={() => {
-                              setPausedNodes(prev => {
-                                const next = new Set(prev);
-                                if (next.has(node.id)) {
-                                  next.delete(node.id);
-                                } else {
-                                  next.add(node.id);
-                                }
-                                return next;
-                              });
-                            }}
-                            className={`ml-2 h-6 w-6 rounded flex items-center justify-center transition-all ${
-                              pausedNodes.has(node.id)
-                                ? 'bg-[#f59e0b] text-white hover:bg-[#d97706]'
-                                : 'bg-[#38363a] text-gray-400 hover:text-white hover:bg-white/10'
-                            }`}
-                            title={pausedNodes.has(node.id) ? 'Resume Node' : 'Pause Node'}
-                          >
-                            {pausedNodes.has(node.id) ? <Play className="h-3 w-3" /> : <Pause className="h-3 w-3" />}
-                          </button>
-                          <StatusBadge status={
-                            node.status === 'online' && node.active_jobs?.length > 0 ? 'busy' : node.status
-                          } />
-                        </h2>
-                        <div className="flex items-center gap-4 mt-2 text-sm text-gray-400">
-                          <span className="flex items-center gap-1">
-                            <Cpu className="h-3 w-3" style={{ color: getVendorColor('cpu', node.system_info?.cpu) }} />
-                            {node.system_info?.cpu || 'Unknown CPU'}
-                          </span>
-                          <span className="flex items-center gap-1">
-                            <HardDrive className="h-3 w-3" />
-                            {formatRAM(node.system_info?.ram_total || 0)}
-                          </span>
-                          {node.system_info?.gpus && node.system_info.gpus.length > 0 &&
-                            node.system_info.gpus.map((gpu: any, i: number) => {
-                              // Only add vendor prefix if name doesn't already start with vendor or common abbreviations
-                              const nameLower = gpu.name?.toLowerCase() || '';
-                              const vendorLower = gpu.vendor?.toLowerCase() || '';
-
-                              // Check if vendor is already in name (including common abbreviations)
-                              const vendorInName =
-                                nameLower.startsWith(vendorLower) ||
-                                (vendorLower.includes('nvidia') && nameLower.startsWith('nvidia')) ||
-                                (vendorLower.includes('amd') || vendorLower.includes('advanced micro')) && nameLower.startsWith('amd') ||
-                                (vendorLower.includes('intel') && nameLower.startsWith('intel')) ||
-                                (vendorLower.includes('apple') && nameLower.startsWith('apple'));
-
-                              const needsPrefix = vendorLower && !vendorInName;
-                              const displayName = `${needsPrefix ? (gpu.vendor || '') + ' ' : ''}${gpu.name || 'Unknown GPU'}`;
-                              return (
-                                <span key={i} className="flex items-center gap-1">
-                                  <Zap className="h-3 w-3" style={{ color: getVendorColor('gpu', undefined, gpu.vendor) }} />
-                                  {displayName} ({formatVRAM(gpu.memory)})
-                                </span>
-                              );
-                            })
-                          }
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* CPU, RAM & GPU Usage */}
-                  <div className="px-4 pb-4">
-                    <div className="flex items-start gap-4">
-                        {/* CPU */}
-                        <div className="text-left">
-                          <div className="flex items-start gap-2 mb-1">
-                            <Cpu className="h-3 w-3 mt-0.5" style={{ color: getVendorColor('cpu', node.system_info?.cpu) }} />
-                            <span className="text-xs text-gray-400">CPU</span>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <div className="w-20 h-2 bg-gray-700 rounded-full overflow-hidden">
-                              <div
-                                className="h-full transition-all"
-                                style={{ width: `${node.cpu_usage || 0}%`, backgroundColor: '#74c69d' }}
-                              />
-                            </div>
-                            <span className="text-xs text-gray-500">{node.cpu_usage || 0}%</span>
-                          </div>
-                        </div>
-
-                        {/* System RAM */}
-                        <div className="text-left">
-                          <div className="flex items-start gap-2 mb-1">
-                            <HardDrive className="h-3 w-3 text-gray-400 mt-0.5" />
-                            <span className="text-xs text-gray-400">System RAM</span>
-                          </div>
-                          <div className="flex flex-col items-start gap-1">
-                            {node.system_info?.ram_total ? (() => {
-                              // ram_usage might be bytes or percentage - detect based on value
-                              const totalBytes = node.system_info.ram_total;
-                              const ramUsage = node.ram_usage || 0;
-                              let usedBytes: number;
-                              let percentage: number;
-
-                              if (ramUsage > 100) {
-                                // ram_usage is in bytes
-                                usedBytes = ramUsage;
-                                percentage = (usedBytes / totalBytes) * 100;
-                              } else {
-                                // ram_usage is a percentage
-                                percentage = ramUsage;
-                                usedBytes = (totalBytes * percentage) / 100;
-                              }
-
-                              const usedGB = (usedBytes / (1024 * 1024 * 1024)).toFixed(2);
-                              const totalGB = (totalBytes / (1024 * 1024 * 1024)).toFixed(2);
-
-                              return (
-                                <>
-                                  <div className="flex items-center gap-2">
-                                    <div className="w-20 h-2 bg-gray-700 rounded-full overflow-hidden">
-                                      <div
-                                        className="h-full transition-all"
-                                        style={{ width: `${Math.min(percentage, 100)}%`, backgroundColor: '#74c69d' }}
-                                      />
-                                    </div>
-                                    <span className="text-xs text-gray-500">{Math.round(percentage)}%</span>
-                                  </div>
-                                  {percentage > 0 && (
-                                    <span className="text-xs text-gray-500">
-                                      {usedGB} GB / {totalGB} GB ({Math.round(percentage)}%)
-                                    </span>
-                                  )}
-                                </>
-                              );
-                            })() : (
-                              <div className="flex items-center gap-2">
-                                <div className="w-20 h-2 bg-gray-700 rounded-full overflow-hidden">
-                                  <div
-                                    className="h-full transition-all"
-                                    style={{ width: `${node.ram_usage || 0}%`, backgroundColor: '#74c69d' }}
-                                  />
-                                </div>
-                                <span className="text-xs text-gray-500">{node.ram_usage || 0}%</span>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                        {node.system_info?.gpus && node.system_info.gpus.length > 0 && node.system_info.gpus.map((gpu: any, index: number) => {
-                          // GPU utilization - use utilizationGpu directly from systeminformation
-                          const gpuUtil = gpu.utilizationGpu !== undefined ? gpu.utilizationGpu : 0;
-
-                          // VRAM info
-                          let vramInfo = null;
-                          if (gpu.memory && gpu.memoryUsed !== undefined) {
-                            const usedGB = (gpu.memoryUsed / (1024 * 1024 * 1024)).toFixed(2);
-                            const totalGB = (gpu.memory / (1024 * 1024 * 1024)).toFixed(2);
-                            const vramPercent = Math.round((gpu.memoryUsed / gpu.memory) * 100);
-                            vramInfo = `${usedGB} GB / ${totalGB} GB (${vramPercent}%)`;
-                          }
-
-                          return (
-                            <div key={index} className="text-left">
-                              <div className="flex items-start gap-2 mb-1">
-                                <Zap className="h-3 w-3" style={{ color: getVendorColor('gpu', undefined, gpu.vendor) }} />
-                                <span className="text-xs text-gray-400">
-                                  GPU {index + 1}
-                                  {gpu.temperatureGpu !== undefined && (
-                                    <span className="ml-1">({gpu.temperatureGpu}°C)</span>
-                                  )}
-                                </span>
-                              </div>
-                              <div className="flex flex-col items-start gap-1">
-                                <div className="flex items-center gap-2">
-                                  <div className="w-20 h-2 bg-gray-700 rounded-full overflow-hidden">
-                                    <div
-                                      className="h-full transition-all"
-                                      style={{
-                                        width: `${gpuUtil}%`,
-                                        backgroundColor: '#74c69d'
-                                      }}
-                                    />
-                                  </div>
-                                  <span className="text-xs text-gray-500">
-                                    {gpuUtil}%
-                                  </span>
-                                </div>
-                                {vramInfo && (
-                                  <span className="text-xs text-gray-500">
-                                    {vramInfo}
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Active Jobs */}
-                  <div className="pt-3" style={{ backgroundColor: '#252326' }}>
-                        <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3 pl-4">Active Jobs</h3>
-                        <div className="w-full overflow-hidden" style={{ backgroundColor: '#2f2c30' }}>
-                          <table className="w-full">
-                            <thead>
-                              <tr className="border-b" style={{ borderColor: '#2a282a', backgroundColor: '#222022' }}>
-                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-400" style={{ width: '60px' }}>Type</th>
-                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-400">Title</th>
-                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-400" style={{ width: '70px' }}>GPU/CPU</th>
-                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-400" style={{ width: '70px' }}>ETA</th>
-                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-400" style={{ width: '120px' }}>Progress</th>
-                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-400" style={{ width: '70px' }}>FPS</th>
-                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-400" style={{ width: '70px' }}>Ratio</th>
-                                <th className="px-4 py-2 text-left text-xs font-medium text-gray-400" style={{ width: '60px' }}>Action</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {(!node.active_jobs || node.active_jobs.length === 0) ? (
-                                <tr>
-                                  <td colSpan={7} className="px-4 py-8 text-center text-gray-500">
-                                    No active jobs
-                                  </td>
-                                </tr>
-                              ) : (
-                                (node.active_jobs || []).map((job: any) => {
-                                  const jobType = getJobTypeInfo(job);
-                                  return (
-                                    <tr key={job.id} className="border-t hover:bg-white/5 transition-colors" style={{ borderColor: '#2a282a' }}>
-                                      <td className="px-4 py-3">
-                                        {jobType.isAnalyze ? (
-                                          <Scan className="h-4 w-4" style={{ color: jobType.color }} />
-                                        ) : (
-                                          <Film className="h-4 w-4" style={{ color: jobType.color }} />
-                                        )}
-                                      </td>
-                                      <td className="px-4 py-3">
-                                        <div className="text-sm text-white truncate" title={job.file_name}>
-                                          {job.file_name}
-                                        </div>
-                                        <div className="text-xs text-gray-500 truncate">
-                                          {job.preset_name}
-                                        </div>
-                                      </td>
-                                      <td className="px-4 py-3">
-                                        <span className={`text-xs font-medium ${job.gpu !== null ? 'text-green-400' : 'text-blue-400'}`}>
-                                          {job.gpu !== null ? `GPU ${job.gpu + 1}` : 'CPU'}
-                                        </span>
-                                      </td>
-                                      <td className="px-4 py-3">
-                                        <span className="text-sm text-gray-400 tabular-nums">
-                                          {job.eta || '—'}
-                                        </span>
-                                      </td>
-                                      <td className="px-4 py-3">
-                                        <div className="flex items-center gap-2">
-                                          <div className="flex-1 h-1.5 bg-gray-700 rounded-full overflow-hidden">
-                                            <div
-                                              className="h-full transition-all"
-                                              style={{ width: `${job.progress || 0}%`, backgroundColor: '#74c69d' }}
-                                            />
-                                          </div>
-                                          <span className="text-xs text-gray-400 w-8 text-right">
-                                            {Math.round(job.progress || 0)}%
-                                          </span>
-                                        </div>
-                                      </td>
-                                      <td className="px-4 py-3">
-                                        <span className="text-sm text-gray-400">
-                                          {job.fps || '—'}
-                                        </span>
-                                      </td>
-                                      <td className="px-4 py-3">
-                                        <span className="text-sm text-gray-400">
-                                          {job.ratio || '—'}
-                                        </span>
-                                      </td>
-                                      {/* Action - Cancel button */}
-                                      <td className="px-4 py-3">
-                                        <button
-                                          onClick={() => deleteJobMutation.mutate(job.id)}
-                                          className="h-7 w-7 rounded flex items-center justify-center transition-all hover:scale-110 active:scale-95"
-                                          style={{ backgroundColor: '#ef4444', color: '#ffffff' }}
-                                          title="Cancel job"
-                                        >
-                                          <X className="h-3 w-3" />
-                                        </button>
-                                      </td>
-                                    </tr>
-                                  );
-                                })
-                              )}
-                            </tbody>
-                          </table>
-                        </div>
-                    </div>
-              </CardContent>
-            </Card>
-          ))
+          <div>
+            {displayedJobs.map((job: any) => (
+              <JobRow
+                key={job.id}
+                job={job}
+                tab={activeTab}
+                onDelete={(id) => deleteMutation.mutate(id)}
+                deleting={deleteMutation.isPending && deleteMutation.variables === job.id}
+              />
+            ))}
+          </div>
         )}
-      </div>
 
-      {/* Clear Queue Dialog */}
-      {showClearDialog && (
-        <Dialog
-          open={showClearDialog}
-          onClose={() => setShowClearDialog(false)}
-          title="Cancel Queue"
-        >
-          <div className="space-y-4">
-            <p className="text-gray-300">
-              Are you sure you want to cancel the entire queue? This will remove all queued and assigned jobs.
+        {filteredJobs.length > perPage && (
+          <footer className="flex items-center justify-between border-t border-[#39363a] px-4 py-3">
+            <p className="text-xs text-gray-500">
+              {countFormatter.format((currentPage - 1) * perPage + 1)}–{countFormatter.format(Math.min(currentPage * perPage, filteredJobs.length))} of {countFormatter.format(filteredJobs.length)}
             </p>
-            <div className="flex items-center gap-3 justify-end">
-              <Button
-                onClick={() => setShowClearDialog(false)}
-                style={{ backgroundColor: '#38363a', color: '#ffffff' }}
-              >
-                Cancel
-              </Button>
-              <Button
-                onClick={confirmClearQueue}
-                style={{ backgroundColor: '#ef4444', color: '#ffffff' }}
-              >
-                Cancel Queue
-              </Button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPage(value => Math.max(1, value - 1))}
+                disabled={currentPage === 1}
+                className="grid h-8 w-8 place-items-center rounded-lg border border-[#39363a] text-gray-400 disabled:opacity-30"
+              ><ChevronLeft className="h-4 w-4" /></button>
+              <span className="min-w-20 text-center text-xs text-gray-400">{currentPage} / {totalPages}</span>
+              <button
+                type="button"
+                onClick={() => setPage(value => Math.min(totalPages, value + 1))}
+                disabled={currentPage === totalPages}
+                className="grid h-8 w-8 place-items-center rounded-lg border border-[#39363a] text-gray-400 disabled:opacity-30"
+              ><ChevronRight className="h-4 w-4" /></button>
+            </div>
+          </footer>
+        )}
+      </section>
+
+      <section>
+        <div className="mb-3 flex items-center justify-between">
+          <div>
+            <h2 className="text-base font-semibold text-white">Worker execution</h2>
+            <p className="mt-1 text-xs text-gray-500">Live utilization and concurrency for connected nodes.</p>
+          </div>
+          <span className="text-xs text-gray-500">{onlineNodes.length} online</span>
+        </div>
+
+        {onlineNodes.length === 0 ? (
+          <div className={`${surfaceClass} grid min-h-48 place-items-center p-8 text-center`}>
+            <div>
+              <Server className="mx-auto h-6 w-6 text-gray-600" />
+              <p className="mt-3 text-sm font-medium text-gray-300">No nodes online</p>
+              <p className="mt-1 text-xs text-gray-600">Start an Encorr node to process queued work.</p>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {onlineNodes.map((node: any) => (
+              <WorkerCard
+                key={node.id}
+                node={node}
+                updating={updateNodeMutation.isPending && updateNodeMutation.variables?.nodeId === node.id}
+                onLimitsChange={(targetNode, limits) => updateNodeMutation.mutate({ nodeId: targetNode.id, limits })}
+                onCancelJob={(id) => deleteMutation.mutate(id)}
+                jobDetails={jobDetails}
+                authoritativeJobs={activeJobs.filter((job: any) => job.node_id === node.id)}
+              />
+            ))}
+          </div>
+        )}
+      </section>
+
+      {clearTarget && (
+        <Dialog
+          open
+          onClose={() => setClearTarget(null)}
+          title={clearTarget === 'queue' ? 'Cancel queued jobs' : `Clear ${clearTarget === 'success' ? 'completed' : 'failed'} history`}
+        >
+          <div className="space-y-5">
+            <p className="text-sm text-gray-300">
+              {clearTarget === 'queue'
+                ? `Remove all ${categorized.queue.length} jobs that are still queued? Active work will continue.`
+                : `Remove all ${categorized[clearTarget].length} ${clearTarget === 'success' ? 'completed' : 'failed'} jobs from history?`}
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setClearTarget(null)}
+                className="h-9 rounded-lg border border-[#39363a] px-4 text-xs font-medium text-gray-300"
+              >Keep jobs</button>
+              <button
+                type="button"
+                onClick={confirmClear}
+                className="h-9 rounded-lg bg-red-600 px-4 text-xs font-medium text-white hover:bg-red-500"
+              >{clearTarget === 'queue' ? 'Cancel jobs' : 'Clear history'}</button>
             </div>
           </div>
         </Dialog>
       )}
     </div>
   );
-}
-
-// Helper function to format RAM
-function formatRAM(bytes: number): string {
-  const gb = bytes / (1024 * 1024 * 1024);
-  return `${gb.toFixed(1)} GB`;
-}
-
-// Helper function to format VRAM
-function formatVRAM(bytes: number): string {
-  const gb = bytes / (1024 * 1024 * 1024);
-  return `${gb.toFixed(2)} GB`;
 }

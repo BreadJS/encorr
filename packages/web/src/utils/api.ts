@@ -50,7 +50,7 @@ interface ApiResponse<T = unknown> {
 // ============================================================================
 
 // Load config on module initialization
-let configPromise = loadConfig();
+const configPromise = loadConfig();
 
 async function request<T>(
   endpoint: string,
@@ -141,6 +141,11 @@ export const api = {
       body: JSON.stringify({ progress }),
     }),
   deleteLibraryFile: (id: string) => request<any>(`/library-files/${id}`, { method: 'DELETE' }),
+  analyzeLibraryFiles: (libraryId?: string) =>
+    request<{ queued: number; skipped: number; total: number; message: string }>('/library-files/analyze', {
+      method: 'POST',
+      body: JSON.stringify(libraryId ? { library_id: libraryId } : {}),
+    }),
   getAllLibraryFiles: (params?: { page?: number; per_page?: number; status?: string; library_id?: string }) => {
     // Filter out undefined values
     const filteredParams = Object.fromEntries(
@@ -153,6 +158,14 @@ export const api = {
       page: number;
       per_page: number;
       total_pages: number;
+      status_counts: {
+        all: number;
+        ready: number;
+        processing: number;
+        completed: number;
+        failed: number;
+        cancelled: number;
+      };
     }>(`/library-files${queryString ? '?' + queryString : ''}`);
   },
 
@@ -217,6 +230,10 @@ export const api = {
       body: JSON.stringify(data),
     }),
   deleteJob: (id: string) => request<any>(`/jobs/${id}`, { method: 'DELETE' }),
+  deleteJobs: (jobIds: string[]) => request<{ cancelled: number; deleted: number; skipped: number }>('/jobs/bulk-delete', {
+    method: 'POST',
+    body: JSON.stringify({ job_ids: jobIds }),
+  }),
 
   // Presets
   getPresets: () => request<any[]>('/presets'),
@@ -272,6 +289,33 @@ export const api = {
 
   // Stats
   getStats: () => request<any>('/stats'),
+  getStorageReclaims: (limit = 250) => request<{
+    summary: {
+      original_size: number;
+      replacement_size: number;
+      saved_space: number;
+      storage_increased: number;
+      net_change: number;
+      replaced_files: number;
+      backup_retained: number;
+    };
+    records: Array<{
+      id: string;
+      library_file_id: string;
+      library_name?: string | null;
+      filename: string;
+      operation: 'replace' | 'backup_replace';
+      status: 'pending' | 'backup_retained' | 'reclaimed' | 'failed';
+      original_size: number;
+      replacement_size: number;
+      bytes_reclaimed: number;
+      node_name?: string | null;
+      original_path?: string | null;
+      error_message?: string | null;
+      created_at: number;
+      reclaimed_at?: number | null;
+    }>;
+  }>(`/storage-reclaims?limit=${limit}`),
 
   // Worker availability
   getWorkerAvailability: () => request<{

@@ -15,6 +15,7 @@ import type {
   GPUInfoPayload,
   UsageUpdatePayload,
   FileReplacePayload,
+  FileReplaceProgressPayload,
   AckPayload,
   WebLibraryScanUpdatePayload,
 } from '@encorr/shared';
@@ -100,8 +101,11 @@ export class EncorrWebSocketServer {
   private logger: Logger;
   private eventHandlers: Partial<WebSocketServerEvents> = {};
   private heartbeatInterval: NodeJS.Timeout | null = null;
+  private jobAssignmentTimer: NodeJS.Timeout | null = null;
+  private webUpdateTimer: NodeJS.Timeout | null = null;
   // Track pending job assignments per node (node_id -> count of pending assignments)
   private pendingAssignments: Map<string, number> = new Map();
+  private cpuJobReservations: Map<string, Set<string>> = new Map();
   // Track every job reserved on each GPU. A GPU can have more than one slot, so
   // tracking only the device ID would collapse multiple reservations into one.
   private gpuJobAssignments: Map<string, Map<number, Set<string>>> = new Map();
@@ -254,6 +258,7 @@ export class EncorrWebSocketServer {
           this.logger.info(`[DISCONNECT] Clearing ${pendingCount} pending assignments for disconnected node ${connection.nodeId}`);
           this.pendingAssignments.delete(connection.nodeId);
         }
+        this.cpuJobReservations.delete(connection.nodeId);
 
         // Broadcast node update to web clients
         this.broadcastNodesUpdate();
@@ -333,6 +338,9 @@ export class EncorrWebSocketServer {
           break;
         case 'FILE_REPLACE_RESULT':
           this.handleFileReplaceResult(ws, message as any);
+          break;
+        case 'FILE_REPLACE_PROGRESS':
+          this.handleFileReplaceProgress(ws, message as any);
           break;
         case 'GPU_INFO':
           this.handleGpuInfo(ws, message as any);
@@ -428,6 +436,10 @@ export class EncorrWebSocketServer {
       // Broadcast update to web clients
       this.broadcastNodesUpdate();
 
+      // A server restart or temporary disconnect may leave valid jobs queued.
+      // Resume dispatch as soon as a worker has registered again.
+      setImmediate(() => this.assignJobsNow());
+
       // Log activity
       this.db.logActivity({
         level: 'info',
@@ -457,38 +469,43 @@ export class EncorrWebSocketServer {
     this.db.updateNodeHeartbeat(connection.nodeId);
 
     // Update usage data
-    const cpuUsage = payload.system_load?.cpu_percent || 0;
-    const ramUsage = payload.system_load?.memory_percent || 0;
+    const cpuUsage = payload.system_load?.cpu_percent;
+    const ramUsage = payload.system_load?.memory_percent;
 
     // Get current node info for static GPU info and to preserve existing active_jobs data
     const node = this.db.getAllNodes().find(n => n.id === connection.nodeId);
     const existingActiveJobs = node?.active_jobs || [];
 
     // Build active jobs info - preserve existing rich data (fps, eta, etc.) from DB
-    const activeJobsInfo = payload.active_jobs?.map(job => {
+    const uniqueHeartbeatJobs = Array.from(new Map(
+      (payload.active_jobs || []).map(job => [job.job_id, job]),
+    ).values());
+    const activeJobsInfo = uniqueHeartbeatJobs.flatMap(job => {
       const dbJob = this.db.getJobById(job.job_id);
+      if (!dbJob || (dbJob.status !== 'assigned' && dbJob.status !== 'processing')) {
+        return [];
+      }
       const file = dbJob ? this.db.getFileById(dbJob.file_id) : null;
 
       // Find existing job data to preserve fps, eta, and other fields set by JOB_PROGRESS
       const existingJob = existingActiveJobs.find((j: any) => j.id === job.job_id);
 
-      return {
+      return [{
         id: job.job_id,
         file_name: file?.relative_path,
         progress: job.progress,
         // Always include GPU from the payload (node sets this correctly)
         gpu: job.gpu,
-        // Preserve rich data from existing job if available
-        ...(existingJob && {
-          fps: existingJob.fps,
-          eta: existingJob.eta,
-          ratio: existingJob.ratio,
-          current_action: existingJob.current_action,
-          preset_name: existingJob.preset_name,
-          status: existingJob.status,
-        }),
-      } as any; // Use 'as any' since active_jobs is dynamically typed
-    }) || [];
+        // Prefer the node's current telemetry. Existing values are only a
+        // fallback when a particular heartbeat field is unavailable.
+        fps: job.fps ?? existingJob?.fps,
+        eta: job.eta !== undefined ? this.formatDuration(job.eta) : existingJob?.eta,
+        ratio: job.ratio ?? existingJob?.ratio,
+        current_action: job.current_action || existingJob?.current_action,
+        preset_name: existingJob?.preset_name,
+        status: dbJob.status,
+      } as any]; // Use 'as any' since active_jobs is dynamically typed
+    });
 
     // Process GPU data - rebuild GPU list from incoming live data
     // The node has already filtered out integrated GPUs, so we trust the incoming data
@@ -568,8 +585,11 @@ export class EncorrWebSocketServer {
     }
 
     this.db.updateNodeUsage(connection.nodeId, {
-      cpu_usage: cpuUsage,
-      ram_usage: ramUsage,
+      // Immediate lifecycle heartbeats intentionally omit system telemetry.
+      // Leaving these undefined preserves the latest measured values instead
+      // of flashing the dashboard to 0% between one-second samples.
+      ...(cpuUsage !== undefined && { cpu_usage: cpuUsage }),
+      ...(ramUsage !== undefined && { ram_usage: ramUsage }),
       gpu_usage: gpuUsage,
       active_jobs: activeJobsInfo,
     });
@@ -588,6 +608,11 @@ export class EncorrWebSocketServer {
     }
 
     const payload = message.payload as JobAcceptPayload;
+
+    // JOB_ACCEPT is the authoritative delivery acknowledgement. Once it
+    // arrives, the database status accounts for the slot and the temporary
+    // CPU reservation must not continue occupying it.
+    this.releaseCpuAssignment(connection.nodeId, payload.job_id);
 
     if (payload.accepted) {
       this.db.setJobProcessing(payload.job_id);
@@ -608,13 +633,12 @@ export class EncorrWebSocketServer {
           current_action: 'Starting...',
           gpu: this.getReservedGpuDevice(connection.nodeId, job.id),
         };
-        const currentActiveJobs = node.active_jobs || [];
+        const currentActiveJobs = (node.active_jobs || []).filter(item => item.id !== job.id);
         this.db.updateNodeUsage(connection.nodeId!, { active_jobs: [...currentActiveJobs, activeJob] });
       }
 
       this.logger.info(`Job ${payload.job_id} accepted by node ${connection.nodeId}`);
       // Broadcast updates
-      this.broadcastJobsUpdate();
       this.broadcastNodesUpdate();
     } else {
       this.logger.warn(`Job ${payload.job_id} rejected by node ${connection.nodeId}: ${payload.reason}`);
@@ -698,7 +722,6 @@ export class EncorrWebSocketServer {
     );
 
     // Broadcast updates to web clients
-    this.broadcastJobsUpdate();
     this.broadcastNodesUpdate();
 
     this.sendMessage(ws, createAckMessage(message.id!));
@@ -718,13 +741,14 @@ export class EncorrWebSocketServer {
 
     let libFile = this.db.getLibraryFileByFilepath(fullPath);
 
-    // If not found by full path,  try to match by filename
-    // This handles cases where node_path (Docker path) differs from library filepath (host path)
+    // Node and server roots can differ. Resolve through indexed library/path
+    // columns instead of loading the entire library for a filename scan.
     if (!libFile) {
-      const filename = file.relative_path.split('/').pop() || file.relative_path;
       const libraryId = mapping.server_path.replace('library:', '');
-      const libFiles = this.db.getLibraryFiles(libraryId);
-      libFile = libFiles.find(lf => lf.filename === filename || lf.filepath.endsWith(filename));
+      const library = this.db.getLibraryById(libraryId);
+      if (library) {
+        libFile = this.db.getLibraryFileByRelativePath(libraryId, library.path, file.relative_path);
+      }
     }
 
     return libFile?.id ?? null;
@@ -786,6 +810,7 @@ export class EncorrWebSocketServer {
     // Update node status
     this.db.updateNodeStatus(connection.nodeId, 'online');
     this.releaseGpuAssignment(connection.nodeId, payload.job_id);
+    this.releaseCpuAssignment(connection.nodeId, payload.job_id);
 
     // Remove job from active_jobs
     const node = this.db.getAllNodes().find(n => n.id === connection.nodeId);
@@ -793,6 +818,12 @@ export class EncorrWebSocketServer {
       const updatedActiveJobs = node.active_jobs.filter(job => job.id !== payload.job_id);
       this.db.updateNodeUsage(connection.nodeId!, { active_jobs: updatedActiveJobs });
     }
+
+    // Several workers commonly finish in the same burst. Give the server a
+    // short window to consume all completion messages, then refill every freed
+    // slot in one pass. Refilling inside each completion handler creates a
+    // one-job-at-a-time feedback loop.
+    this.scheduleJobAssignment();
 
     // Log activity
     const metadata = payload.metadata || payload.stats;
@@ -837,12 +868,8 @@ export class EncorrWebSocketServer {
       this.logger.error(`[REPORT] Failed to create report: ${reportErr instanceof Error ? reportErr.message : String(reportErr)}`);
     }
 
-    this.eventHandlers.jobCompleted?.(payload.job_id, metadata);    // Broadcast updates to web clients
-    this.broadcastJobsUpdate();
-    this.broadcastNodesUpdate();
-
-    // Assign next queued job to available workers
-    this.assignJobsNow();
+    this.eventHandlers.jobCompleted?.(payload.job_id, metadata);
+    this.scheduleWebUpdates();
 
     this.sendMessage(ws, createAckMessage(message.id!));
   }
@@ -875,6 +902,7 @@ export class EncorrWebSocketServer {
       }
 
       this.releaseGpuAssignment(connection.nodeId, payload.job_id);
+      this.releaseCpuAssignment(connection.nodeId, payload.job_id);
 
       this.sendMessage(ws, createAckMessage(message.id!));
       return;
@@ -884,6 +912,7 @@ export class EncorrWebSocketServer {
 
     this.db.failJob(payload.job_id, payload.error);
     this.releaseGpuAssignment(connection.nodeId, payload.job_id);
+    this.releaseCpuAssignment(connection.nodeId, payload.job_id);
 
     // Update node status
     this.db.updateNodeStatus(connection.nodeId, 'online');
@@ -935,12 +964,10 @@ export class EncorrWebSocketServer {
 
     this.eventHandlers.jobFailed?.(payload.job_id, payload.error);
 
-    // Broadcast updates to web clients
-    this.broadcastJobsUpdate();
-    this.broadcastNodesUpdate();
+    this.scheduleWebUpdates();
 
-    // Assign next queued job since a worker is now free
-    this.assignJobsNow();
+    // Coalesce near-simultaneous worker failures/completions into one refill.
+    this.scheduleJobAssignment();
 
     this.sendMessage(ws, createAckMessage(message.id!));
   }
@@ -998,17 +1025,23 @@ export class EncorrWebSocketServer {
       if (payload.operation === 'backup_replace') {
         // Set status to backup_replaced so user can cleanup later
         this.db.updateLibraryFileStatus(payload.file_id, 'backup_replaced');
+        this.db.confirmStorageReplacement(payload.file_id, 'backup_replace');
       } else if (payload.operation === 'replace') {
         // Keep status as completed (already was completed)
         this.db.updateLibraryFileStatus(payload.file_id, 'completed');
+        this.db.confirmStorageReplacement(payload.file_id, 'replace');
       } else if (payload.operation === 'cleanup_backup') {
         // After cleanup, keep as completed
         this.db.updateLibraryFileStatus(payload.file_id, 'completed');
+        this.db.confirmStorageBackupCleanup(payload.file_id);
       }
 
       this.logger.info(`[FILE_REPLACE_RESULT] File ${payload.file_id} status updated after ${payload.operation}`);
     } else {
       this.logger.error(`[FILE_REPLACE_RESULT] File ${payload.file_id} ${payload.operation} failed: ${payload.error}`);
+      if (payload.operation === 'replace' || payload.operation === 'backup_replace') {
+        this.db.failStorageReplacement(payload.file_id, payload.operation, payload.error || 'Replacement failed');
+      }
     }
 
     // Broadcast updates to web clients
@@ -1016,6 +1049,14 @@ export class EncorrWebSocketServer {
 
     this.sendMessage(ws, createAckMessage(message.id!));
     this.logger.debug(`[FILE_REPLACE_RESULT] Sent ACK for message ${message.id}`);
+  }
+
+  private handleFileReplaceProgress(ws: WebSocket, message: NodeToServerMessage): void {
+    const connection = this.connections.get(ws);
+    if (!connection?.nodeId) return;
+    const payload = message.payload as FileReplaceProgressPayload;
+    this.db.updateStorageReclaimProgress(payload.operation_id, payload);
+    this.scheduleWebUpdates(100);
   }
 
   private handleGpuInfo(ws: WebSocket, message: NodeToServerMessage): void {
@@ -1162,15 +1203,34 @@ export class EncorrWebSocketServer {
   // Helper to enrich jobs with file, preset, and node info
   private getEnrichedJobs(): any[] {
     const jobs = this.db.getAllJobs();
+    const files = new Map<string, any>();
+    const presets = new Map<string, any>();
+    const nodes = new Map<string, any>();
+    const metadataByFile = new Map<string, any>();
 
-    return jobs.map(job => {
-      const file = this.db.getFileById(job.file_id);
-      const preset = this.db.getPresetById(job.preset_id);
-      const node = job.node_id ? this.db.getNodeById(job.node_id) : null;
+    const enrichedJobs = jobs.map(job => {
+      let file = files.get(job.file_id);
+      if (!files.has(job.file_id)) {
+        file = this.db.getFileById(job.file_id);
+        files.set(job.file_id, file);
+      }
+      let preset = presets.get(job.preset_id);
+      if (!presets.has(job.preset_id)) {
+        preset = this.db.getPresetById(job.preset_id);
+        presets.set(job.preset_id, preset);
+      }
+      let node = null;
+      if (job.node_id) {
+        node = nodes.get(job.node_id);
+        if (!nodes.has(job.node_id)) {
+          node = this.db.getNodeById(job.node_id);
+          nodes.set(job.node_id, node);
+        }
+      }
 
       // Check if this is a library file and get metadata
-      let metadata = null;
-      if (file?.folder_mapping_id) {
+      let metadata = metadataByFile.get(job.file_id) ?? null;
+      if (!metadataByFile.has(job.file_id) && file?.folder_mapping_id) {
         const mapping = this.db.getFolderMappingById(file.folder_mapping_id);
         if (mapping?.server_path?.startsWith('library:')) {
           const fullPath = mapping.node_path && !mapping.node_path.includes('.mkv') && !mapping.node_path.includes('.mp4')
@@ -1183,6 +1243,7 @@ export class EncorrWebSocketServer {
           }
         }
       }
+      metadataByFile.set(job.file_id, metadata);
 
       // Get codec info from metadata or file
       const codec = metadata?.video_codec || file?.original_codec || '';
@@ -1195,6 +1256,7 @@ export class EncorrWebSocketServer {
         file_name: file?.relative_path,
         file_size: file?.original_size,
         preset_name: preset?.name,
+        job_type: preset?.config?.action === 'analyze' ? 'analyze' : 'transcode',
         node_name: node?.name,
         original_codec: codec,
         resolution: resolution,
@@ -1204,6 +1266,40 @@ export class EncorrWebSocketServer {
         metadata: metadata,
       };
     });
+
+    const fileOperations = this.db.getStorageReclaims(250).map((operation: any) => {
+      const cleanupInProgress = operation.status === 'backup_retained' && Number(operation.progress) < 100;
+      const status = operation.status === 'pending' || cleanupInProgress
+        ? 'processing'
+        : operation.status === 'failed' ? 'failed' : 'completed';
+      const isCleanup = String(operation.current_action || '').toLowerCase().includes('backup')
+        && String(operation.current_action || '').toLowerCase().includes('delet');
+      return {
+        id: `file-operation:${operation.id}`,
+        operation_id: operation.id,
+        file_id: operation.library_file_id,
+        file_operation: true,
+        operation: isCleanup ? 'cleanup_backup' : operation.operation,
+        job_type: 'file_operation',
+        status,
+        progress: Number(operation.progress || 0),
+        current_action: operation.current_action || 'Waiting for node',
+        bytes_processed: Number(operation.bytes_processed || 0),
+        total_bytes: Number(operation.total_bytes || operation.replacement_size || 0),
+        speed_mbps: Number(operation.speed_mbps || 0),
+        file_name: operation.filename,
+        file_size: Number(operation.original_size || 0),
+        preset_name: operation.operation === 'backup_replace' ? 'Backup & Replace' : 'Replace Original',
+        node_id: operation.node_id,
+        node_name: operation.node_name,
+        error_message: operation.error_message,
+        created_at: operation.created_at,
+        started_at: operation.started_at,
+        completed_at: operation.completed_at || operation.reclaimed_at,
+      };
+    });
+
+    return [...enrichedJobs, ...fileOperations];
   }
 
   public broadcastNodesUpdate(): void {
@@ -1211,10 +1307,21 @@ export class EncorrWebSocketServer {
     const connectedNodeIds = this.getConnectedNodeIds();
 
     // Add connected status to each node (same as API endpoint)
-    const nodesWithStatus = nodes.map(node => ({
-      ...node,
-      connected: connectedNodeIds.includes(node.id),
-    }));
+    const nodesWithStatus = nodes.map(node => {
+      const activeJobs = Array.from(new Map(
+        (node.active_jobs || [])
+          .filter(job => {
+            const dbJob = this.db.getJobById(job.id);
+            return dbJob?.status === 'assigned' || dbJob?.status === 'processing';
+          })
+          .map(job => [job.id, job]),
+      ).values());
+      return {
+        ...node,
+        active_jobs: activeJobs,
+        connected: connectedNodeIds.includes(node.id),
+      };
+    });
 
     // Log what we're about to broadcast (first node with active jobs as sample)
     const sampleNode = nodesWithStatus.find(n => n.active_jobs && n.active_jobs.length > 0);
@@ -1412,7 +1519,6 @@ export class EncorrWebSocketServer {
             this.logger.info(`[JOB_ASSIGN_ACK] ACK received for job ${jobData.job_id}, job status: ${jobAfterUpdate?.status}, pending unchanged`);
           }
 
-          this.broadcastJobsUpdate();
           resolve(true);
         },
         reject: (error: Error) => {
@@ -1452,6 +1558,7 @@ export class EncorrWebSocketServer {
     }
 
     this.releaseGpuAssignment(nodeId, jobId);
+    this.releaseCpuAssignment(nodeId, jobId);
 
     // Create job report for cancelled job
     try {
@@ -1496,6 +1603,7 @@ export class EncorrWebSocketServer {
   sendFileReplaceCommand(
     nodeId: string,
     data: {
+      operation_id: string;
       file_id: string;
       operation: 'replace' | 'backup_replace' | 'cleanup_backup';
       source_path: string;
@@ -1555,7 +1663,10 @@ export class EncorrWebSocketServer {
 
       totalCpuWorkers += cpuWorkers;
       totalGpuWorkers += gpuWorkers;
-      usedCpuWorkers += activeJobs.length; // Simplified - each job uses one worker
+      usedCpuWorkers += activeJobs.filter((job: any) => {
+        const preset = this.db.getPresetById(job.preset_id);
+        return preset?.config?.encoding_type !== 'gpu';
+      }).length;
 
       details.push({
         nodeId: node.id,
@@ -1585,9 +1696,57 @@ export class EncorrWebSocketServer {
     this.assignQueuedJobs();
   }
 
+  private scheduleJobAssignment(delayMs = 50): void {
+    if (this.jobAssignmentTimer) {
+      clearTimeout(this.jobAssignmentTimer);
+    }
+
+    this.jobAssignmentTimer = setTimeout(() => {
+      this.jobAssignmentTimer = null;
+      this.assignJobsNow();
+    }, delayMs);
+  }
+
+  public scheduleWebUpdates(delayMs = 50): void {
+    if (this.webUpdateTimer) {
+      clearTimeout(this.webUpdateTimer);
+    }
+
+    this.webUpdateTimer = setTimeout(() => {
+      this.webUpdateTimer = null;
+      this.broadcastJobsUpdate();
+      this.broadcastNodesUpdate();
+    }, delayMs);
+  }
+
   // Check if a job is an analyze job (CPU-only)
   private isAnalyzeJob(preset: any): boolean {
     return preset?.config?.action === 'analyze';
+  }
+
+  private reserveCpuAssignment(nodeId: string, jobId: string): void {
+    const reservations = this.cpuJobReservations.get(nodeId) || new Set<string>();
+    reservations.add(jobId);
+    this.cpuJobReservations.set(nodeId, reservations);
+  }
+
+  private releaseCpuAssignment(nodeId: string, jobId: string): void {
+    const reservations = this.cpuJobReservations.get(nodeId);
+    if (!reservations) return;
+    reservations.delete(jobId);
+    if (reservations.size === 0) this.cpuJobReservations.delete(nodeId);
+  }
+
+  private isJobReserved(jobId: string): boolean {
+    for (const reservations of this.cpuJobReservations.values()) {
+      if (reservations.has(jobId)) return true;
+    }
+    for (const nodeAssignments of this.gpuJobAssignments.values()) {
+      for (const jobIds of nodeAssignments.values()) {
+        if (jobIds.has(jobId)) return true;
+      }
+    }
+    return false;
   }
 
   private reserveGpuAssignment(nodeId: string, gpuDeviceId: number, jobId: string): void {
@@ -1640,18 +1799,34 @@ export class EncorrWebSocketServer {
       (j: any) => j.status === 'assigned' || j.status === 'processing'
     );
 
-    // Get pending assignments for this node (jobs sent but not yet confirmed)
-    const pendingCount = this.pendingAssignments.get(node.id) || 0;
+    // Pending CPU work is tracked by job ID so repeated assignment passes
+    // cannot send the same queued job more than once.
+    const cpuReservations = this.cpuJobReservations.get(node.id) || new Set<string>();
+    // Self-heal reservations whose jobs have already reached a terminal
+    // state. This also clears reservations left by an interrupted ACK flow.
+    for (const jobId of Array.from(cpuReservations)) {
+      const reservedJob = this.db.getJobById(jobId);
+      if (!reservedJob || !['queued', 'assigned', 'processing'].includes(reservedJob.status)) {
+        cpuReservations.delete(jobId);
+      }
+    }
+    if (cpuReservations.size === 0) this.cpuJobReservations.delete(node.id);
 
     const reservedGpuJobs = this.gpuJobAssignments.get(node.id) || new Map<number, Set<string>>();
 
-    this.logger.info(`[WORKERS] Node ${node.name} (${node.id}):`);
-    this.logger.info(`[WORKERS]   max_workers: ${JSON.stringify(maxWorkers)}`);
-    this.logger.info(`[WORKERS]   activeJobs: ${activeJobs.length}, pendingAssignments: ${pendingCount}`);
-    this.logger.info(`[WORKERS]   gpuAssignments: ${this.formatGpuAssignments(node.id)}`);
+    this.logger.debug(`[WORKERS] Node ${node.name} (${node.id}):`);
+    this.logger.debug(`[WORKERS]   max_workers: ${JSON.stringify(maxWorkers)}`);
+    this.logger.debug(`[WORKERS]   activeJobs: ${activeJobs.length}, cpuReservations: ${cpuReservations.size}`);
+    this.logger.debug(`[WORKERS]   gpuAssignments: ${this.formatGpuAssignments(node.id)}`);
 
     // Calculate available CPU workers
-    const availableCpu = Math.max(0, (maxWorkers.cpu || 0) - activeJobs.length - pendingCount);
+    const cpuJobs = new Set<string>();
+    activeJobs.forEach((job: any) => {
+      const preset = this.db.getPresetById(job.preset_id);
+      if (preset?.config?.encoding_type !== 'gpu') cpuJobs.add(job.id);
+    });
+    cpuReservations.forEach(jobId => cpuJobs.add(jobId));
+    const availableCpu = Math.max(0, (maxWorkers.cpu || 0) - cpuJobs.size);
 
     // Calculate available GPU slots per GPU device
     const availableGpus = (maxWorkers.gpus || []).map((maxSlots: number, gpuIndex: number) => {
@@ -1672,20 +1847,20 @@ export class EncorrWebSocketServer {
       // Available slots for this GPU
       const available = Math.max(0, maxSlots - jobsOnThisGpu.size);
 
-      this.logger.info(`[WORKERS]   GPU ${gpuIndex}: max=${maxSlots}, jobs=${jobsOnThisGpu.size}, available=${available}`);
+      this.logger.debug(`[WORKERS]   GPU ${gpuIndex}: max=${maxSlots}, jobs=${jobsOnThisGpu.size}, available=${available}`);
 
       return available;
     });
 
     // Detailed logging for active jobs
     if (activeJobs.length > 0) {
-      this.logger.info(`[WORKERS] Active jobs for node ${node.name}:`);
+      this.logger.debug(`[WORKERS] Active jobs for node ${node.name}:`);
       activeJobs.forEach(j => {
         const preset = this.db.getPresetById(j.preset_id);
         const gpuInfo = preset?.config?.encoding_type === 'gpu'
           ? `, GPU ${preset.config.gpu_device_id ?? 'default'}`
           : ', CPU';
-        this.logger.info(`[WORKERS]   Job ${j.id}: status=${j.status}${gpuInfo}`);
+        this.logger.debug(`[WORKERS]   Job ${j.id}: status=${j.status}${gpuInfo}`);
       });
     }
 
@@ -1808,8 +1983,8 @@ export class EncorrWebSocketServer {
       // Find node with available CPU workers
       const nodeWithCpu = this.findNodeWithAvailableCpu(onlineNodes);
       if (!nodeWithCpu) {
-        this.logger.warn(`No CPU workers available for analyze job ${job.id}`);
-        continue;
+        this.logger.debug(`CPU capacity is full; leaving ${analyzeJobs.length - assignedCount} analyze job(s) queued`);
+        break;
       }
 
       if (this.assignJobToNodeWithRetry(nodeWithCpu, job, preset)) {
@@ -1818,6 +1993,8 @@ export class EncorrWebSocketServer {
     }
 
     // Process transcode jobs (can use GPU or CPU)
+    let gpuCapacityExhausted = false;
+    let cpuCapacityExhausted = false;
     for (const { job, preset } of transcodeJobs) {
       // Check if preset uses GPU encoding
       const usesGpu = preset?.config?.encoding_type === 'gpu';
@@ -1829,6 +2006,7 @@ export class EncorrWebSocketServer {
       }
 
       if (usesGpu) {
+        if (gpuCapacityExhausted) continue;
         // Find node with available GPU workers
         const nodeWithGpu = this.findNodeWithAvailableGpu(onlineNodes);
         if (nodeWithGpu) {
@@ -1859,20 +2037,23 @@ export class EncorrWebSocketServer {
             this.logger.warn(`[GPU_SELECT] findAvailableGpuDevice returned null for node ${nodeWithGpu.name}`);
           }
         } else {
-          this.logger.warn(`[GPU_SELECT] No node with available GPU found for job ${job.id}, keeping in queue`);
+          gpuCapacityExhausted = true;
+          this.logger.debug(`[GPU_SELECT] GPU capacity is full; remaining GPU jobs stay queued`);
         }
         // Don't fall back to CPU for GPU jobs - keep them queued until GPU is available
         continue;
       }
 
       // CPU jobs - assign to CPU workers
+      if (cpuCapacityExhausted) continue;
       const nodeWithCpu = this.findNodeWithAvailableCpu(onlineNodes);
       if (nodeWithCpu) {
         if (this.assignJobToNodeWithRetry(nodeWithCpu, job, preset)) {
           assignedCount++;
         }
       } else {
-        this.logger.warn(`No workers available for transcode job ${job.id}`);
+        cpuCapacityExhausted = true;
+        this.logger.debug(`CPU capacity is full; remaining CPU jobs stay queued`);
       }
     }
 
@@ -1969,6 +2150,12 @@ export class EncorrWebSocketServer {
   }
 
   private assignJobToNodeWithRetry(node: any, job: any, preset: any, gpuDeviceId?: number): boolean {
+    const latestJob = this.db.getJobById(job.id);
+    if (latestJob?.status !== 'queued' || this.isJobReserved(job.id)) {
+      this.logger.debug(`[JOB_ASSIGN] Skipping ${job.id}; status=${latestJob?.status}, reserved=${this.isJobReserved(job.id)}`);
+      return false;
+    }
+
     // Get job details
     const file = this.db.getFileById(job.file_id);
     if (!file) {
@@ -2093,7 +2280,15 @@ export class EncorrWebSocketServer {
     if (enhancedConfig.encoding_type === 'gpu' && enhancedConfig.gpu_device_id !== undefined) {
       this.reserveGpuAssignment(node.id, enhancedConfig.gpu_device_id, job.id);
       this.logger.debug(`[GPU_TRACK] Reserved GPU ${enhancedConfig.gpu_device_id} for job ${job.id} on node ${node.id}`);
+    } else {
+      this.reserveCpuAssignment(node.id, job.id);
+      this.logger.debug(`[CPU_TRACK] Reserved CPU slot for job ${job.id} on node ${node.id}`);
     }
+
+    // Persist dispatch immediately. "assigned" is an active state, so the
+    // API/UI and subsequent scheduler passes see the same four occupied slots
+    // without waiting for a network acknowledgement.
+    this.db.assignJob(job.id, node.id);
 
     this.assignJobToNode(node.id, {
       job_id: job.id,
@@ -2108,7 +2303,14 @@ export class EncorrWebSocketServer {
         this.releaseGpuAssignment(node.id, job.id);
         this.logger.warn(`[GPU_TRACK] Released GPU ${enhancedConfig.gpu_device_id} reservation for job ${job.id} after assignment failure`);
       }
+      if (this.db.requeueAssignedJob(job.id)) {
+        this.logger.warn(`[JOB_ASSIGN] Returned ${job.id} to the queue after delivery failure`);
+        this.broadcastJobsUpdate();
+        setImmediate(() => this.assignJobsNow());
+      }
       this.logger.error(`Failed to assign job ${job.id}:`, error);
+    }).finally(() => {
+      this.releaseCpuAssignment(node.id, job.id);
     });
 
     return true;
@@ -2121,6 +2323,14 @@ export class EncorrWebSocketServer {
   close(): void {
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
+    }
+    if (this.jobAssignmentTimer) {
+      clearTimeout(this.jobAssignmentTimer);
+      this.jobAssignmentTimer = null;
+    }
+    if (this.webUpdateTimer) {
+      clearTimeout(this.webUpdateTimer);
+      this.webUpdateTimer = null;
     }
 
     for (const [ws, connection] of this.connections) {

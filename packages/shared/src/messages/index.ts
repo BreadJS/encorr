@@ -33,6 +33,7 @@ export const MessageType = {
   FILE_INFO: 'FILE_INFO',
   GPU_INFO: 'GPU_INFO',
   USAGE_UPDATE: 'USAGE_UPDATE',
+  FILE_REPLACE_PROGRESS: 'FILE_REPLACE_PROGRESS',
   FILE_REPLACE_RESULT: 'FILE_REPLACE_RESULT',
 
   // Server -> Web Client
@@ -344,6 +345,7 @@ export type ScanFolderPayload = z.infer<typeof ScanFolderPayloadSchema>;
 
 // FILE_REPLACE: Server requests node to replace/backup a file with transcoded version
 export const FileReplacePayloadSchema = z.object({
+  operation_id: z.string(),
   file_id: z.string(),
   operation: z.enum(['replace', 'backup_replace', 'cleanup_backup']),
   source_path: z.string(), // Path to transcoded file (in cache)
@@ -355,6 +357,7 @@ export type FileReplacePayload = z.infer<typeof FileReplacePayloadSchema>;
 
 // FILE_REPLACE_RESULT: Node reports result of file replace operation
 export const FileReplaceResultPayloadSchema = z.object({
+  operation_id: z.string(),
   file_id: z.string(),
   operation: z.enum(['replace', 'backup_replace', 'cleanup_backup']),
   success: z.boolean(),
@@ -363,6 +366,19 @@ export const FileReplaceResultPayloadSchema = z.object({
 });
 
 export type FileReplaceResultPayload = z.infer<typeof FileReplaceResultPayloadSchema>;
+
+export const FileReplaceProgressPayloadSchema = z.object({
+  operation_id: z.string(),
+  file_id: z.string(),
+  operation: z.enum(['replace', 'backup_replace', 'cleanup_backup']),
+  progress: z.number().min(0).max(100),
+  current_action: z.string(),
+  bytes_processed: z.number().min(0),
+  total_bytes: z.number().min(0),
+  speed_mbps: z.number().min(0),
+});
+
+export type FileReplaceProgressPayload = z.infer<typeof FileReplaceProgressPayloadSchema>;
 
 // WEB_SUBSCRIBE: Web client subscribes to updates
 export const WebSubscribePayloadSchema = z.object({
@@ -428,6 +444,7 @@ export type NodeToServerMessage =
   | Message<FileInfoPayload>
   | Message<GPUInfoPayload>
   | Message<UsageUpdatePayload>
+  | Message<FileReplaceProgressPayload>
   | Message<FileReplaceResultPayload>
   | Message<AckPayload>
   | Message<ErrorPayload>;
@@ -497,6 +514,7 @@ export const MessagePayloadValidators = {
   [MessageType.JOB_CANCEL]: JobCancelPayloadSchema,
   [MessageType.SCAN_FOLDER]: ScanFolderPayloadSchema,
   [MessageType.FILE_REPLACE]: FileReplacePayloadSchema,
+  [MessageType.FILE_REPLACE_PROGRESS]: FileReplaceProgressPayloadSchema,
   [MessageType.FILE_REPLACE_RESULT]: FileReplaceResultPayloadSchema,
   [MessageType.WEB_SUBSCRIBE]: WebSubscribePayloadSchema,
   [MessageType.WEB_NODES_UPDATE]: WebNodesUpdatePayloadSchema,
@@ -570,6 +588,10 @@ export function isFileReplaceResultMessage(msg: Message): msg is Message<FileRep
   return msg.type === MessageType.FILE_REPLACE_RESULT;
 }
 
+export function isFileReplaceProgressMessage(msg: Message): msg is Message<FileReplaceProgressPayload> {
+  return msg.type === MessageType.FILE_REPLACE_PROGRESS;
+}
+
 export function isJobProgressMessage(msg: Message): msg is Message<JobProgressPayload> {
   return msg.type === MessageType.JOB_PROGRESS;
 }
@@ -621,6 +643,7 @@ export function isNodeToServerMessage(msg: Message): msg is NodeToServerMessage 
     MessageType.JOB_ERROR,
     MessageType.FILE_INFO,
     MessageType.GPU_INFO,
+    MessageType.FILE_REPLACE_PROGRESS,
     MessageType.FILE_REPLACE_RESULT,
     MessageType.ACK,
     MessageType.ERROR,

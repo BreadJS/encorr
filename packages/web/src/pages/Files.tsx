@@ -53,14 +53,15 @@ export function Files() {
     queryFn: () => api.getLibraries(),
   });
 
-  // Fetch files from API
-  // Note: status filter is applied on frontend, not sent to API
+  // Fetch the current page while the backend calculates counts and filtering
+  // against the complete selected library.
   const { data: filesData, isLoading, refetch } = useQuery({
-    queryKey: ['files', selectedFolder, currentPage, perPage],
+    queryKey: ['files', selectedFolder, selectedStatus, currentPage, perPage],
     queryFn: () => api.getAllLibraryFiles({
       page: currentPage,
       per_page: perPage,
       library_id: selectedFolder !== 'all' ? selectedFolder : undefined,
+      status: selectedStatus !== 'all' ? selectedStatus : undefined,
     }),
     refetchInterval: 10000, // Refetch every 10s as fallback to WebSocket
   });
@@ -138,12 +139,13 @@ export function Files() {
       const latestReport = reportsByFileId[file.id];
 
       // Determine display status
-      let displayStatus = file.status;
+      let displayStatus = file.display_status || file.status;
       let displayProgress = file.progress || 0;
 
       // Priority 1: Active job (processing/assigned)
       if (activeJob) {
-        displayStatus = 'processing';
+        const isAnalyzeJob = activeJob.job_type === 'analyze' || activeJob.preset_id === 'builtin-analyze';
+        displayStatus = isAnalyzeJob ? 'processing' : 'pending';
         displayProgress = activeJob.progress || 0;
       }
       // Priority 2: Latest transcode report overrides file status
@@ -175,7 +177,7 @@ export function Files() {
   }, [files, jobs, reportsByFileId]);
 
   // Count files by status for filter tabs
-  const statusCounts = useMemo(() => {
+  const currentPageStatusCounts = useMemo(() => {
     const counts = {
       all: filesWithJobStatus.length,
       ready: 0,
@@ -193,15 +195,14 @@ export function Files() {
     });
     return counts;
   }, [filesWithJobStatus]);
+  const statusCounts = filesData?.status_counts || currentPageStatusCounts;
 
-  // Analyze mutation - only scans files, does not queue for transcoding
+  // Analyze all files missing metadata in the selected library (or all libraries).
   const analyzeMutation = useMutation({
-    mutationFn: async () => {
-      await api.scanFiles();
-      return { scanned: true };
-    },
+    mutationFn: () => api.analyzeLibraryFiles(selectedFolder !== 'all' ? selectedFolder : undefined),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['files'] });
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
       queryClient.invalidateQueries({ queryKey: ['libraries'] });
     },
   });
@@ -391,6 +392,15 @@ export function Files() {
       );
     }
 
+    if (status === 'pending') {
+      return (
+        <div className="flex items-center gap-2">
+          <Clock className="h-3.5 w-3.5 flex-shrink-0 text-amber-400" />
+          <span className="text-xs text-amber-300">Pending</span>
+        </div>
+      );
+    }
+
     if (status === 'completed') {
       return (
         <div className="flex items-center gap-2">
@@ -521,13 +531,13 @@ export function Files() {
             disabled={analyzeMutation.isPending || analyzeSelectedMutation.isPending}
             style={{ borderColor: '#39363a', color: '#ffffff' }}
             className="border flex items-center gap-2 text-sm"
-            title={selectedFiles.size > 0 ? 'Analyze selected files' : 'Scan for new video files'}
+            title={selectedFiles.size > 0 ? 'Analyze selected files' : 'Analyze every file missing codec metadata'}
           >
             <Scan className={`h-4 w-4 ${analyzeMutation.isPending || analyzeSelectedMutation.isPending ? 'animate-spin' : ''}`} />
             <span className="hidden sm:inline">
-              {analyzeMutation.isPending || analyzeSelectedMutation.isPending ? 'Scanning...' : selectedFiles.size > 0 ? `Analyze Selected (${selectedFiles.size})` : 'Analyze All'}
+              {analyzeMutation.isPending || analyzeSelectedMutation.isPending ? 'Queueing...' : selectedFiles.size > 0 ? `Analyze Selected (${selectedFiles.size})` : 'Analyze All'}
             </span>
-            <span className="sm:hidden">{analyzeMutation.isPending || analyzeSelectedMutation.isPending ? 'Scanning...' : selectedFiles.size > 0 ? `Analyze` : 'Scan'}</span>
+            <span className="sm:hidden">{analyzeMutation.isPending || analyzeSelectedMutation.isPending ? 'Queueing...' : 'Analyze'}</span>
           </Button>
 
           {/* Smart Transcode / Transcode All Button */}
@@ -567,6 +577,17 @@ export function Files() {
           </Button>
         </div>
       </div>
+
+      {(analyzeMutation.error || analyzeSelectedMutation.error) && (
+        <div className="flex items-center gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+          <span>
+            {(analyzeMutation.error || analyzeSelectedMutation.error) instanceof Error
+              ? (analyzeMutation.error || analyzeSelectedMutation.error)?.message
+              : 'Unable to queue file analysis'}
+          </span>
+        </div>
+      )}
 
       {/* Status Filter Tabs */}
       <div className="flex items-center gap-2 border-b border-[#39363a] pb-2 overflow-x-auto">

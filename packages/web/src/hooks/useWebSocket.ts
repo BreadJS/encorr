@@ -20,6 +20,52 @@ let connectionCount = 0;
 let reconnectTimeout: NodeJS.Timeout | null = null;
 const subscribers = new Set<(message: WebSocketMessage) => void>();
 
+function logJobOrchestration(message: WebSocketMessage) {
+  const receivedAt = new Date().toISOString();
+  const debugLog = ((window as any).__encorrOrchestrationLog ||= []);
+  if (message.type === 'WEB_JOBS_UPDATE') {
+    const jobs = message.payload.jobs || [];
+    const counts = jobs.reduce((result: Record<string, number>, job: any) => {
+      result[job.status] = (result[job.status] || 0) + 1;
+      return result;
+    }, {});
+    const active = jobs
+      .filter((job: any) => job.status === 'assigned' || job.status === 'processing')
+      .map((job: any) => ({
+        id: job.id,
+        status: job.status,
+        file: job.file_name,
+        action: job.current_action,
+        progress: job.progress,
+        node: job.node_name || job.node_id,
+      }));
+    const entry = { type: 'jobs', receivedAt, counts, activeCount: active.length, active };
+    debugLog.push(entry);
+    console.log(`[Encorr Jobs] ${receivedAt} active=${active.length}`, JSON.stringify(entry));
+  }
+
+  if (message.type === 'WEB_NODES_UPDATE') {
+    const nodes = (message.payload.nodes || []).map((node: any) => ({
+      node: node.name,
+      status: node.status,
+      cpuWorkers: node.max_workers?.cpu || 0,
+      cpuUsage: node.cpu_usage,
+      activeCount: node.active_jobs?.length || 0,
+      active: (node.active_jobs || []).map((job: any) => ({
+        id: job.id,
+        file: job.file_name,
+        action: job.current_action,
+        progress: job.progress,
+      })),
+    }));
+    const nodeActiveCount = nodes.reduce((sum: number, node: any) => sum + node.activeCount, 0);
+    const entry = { type: 'nodes', receivedAt, nodeActiveCount, nodes };
+    debugLog.push(entry);
+    console.log(`[Encorr Nodes] ${receivedAt} nodeActive=${nodeActiveCount}`, JSON.stringify(entry));
+  }
+  if (debugLog.length > 1000) debugLog.splice(0, debugLog.length - 1000);
+}
+
 function getWebSocketUrl(): string {
   // Use the same host as the page, but with the backend port
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -36,25 +82,26 @@ function connectWebSocket(url: string, queryClient: ReturnType<typeof useQueryCl
   }
 
   try {
-    sharedWebSocket = new WebSocket(url);
+    const socket = new WebSocket(url);
+    sharedWebSocket = socket;
 
-    sharedWebSocket.onopen = () => {
+    socket.onopen = () => {
       console.log('[WebSocket] Connected');
       // Subscribe to all channels
       const subscribeMessage: WebSocketMessage = {
         type: 'WEB_SUBSCRIBE',
         payload: { channels: ['nodes', 'jobs', 'library'] },
       };
-      sharedWebSocket?.send(JSON.stringify(subscribeMessage));
+      socket.send(JSON.stringify(subscribeMessage));
     };
 
-    sharedWebSocket.onmessage = (event) => {
+    socket.onmessage = (event) => {
       try {
         const message: WebSocketMessage = JSON.parse(event.data);
+        logJobOrchestration(message);
 
         switch (message.type) {
           case 'WEB_NODES_UPDATE':
-            console.log('[WebSocket] NODES_UPDATE received:', message.payload.nodes?.[0]?.system_info?.gpus);
             // Only update the data, don't invalidate to prevent API refetches
             queryClient.setQueryData(['nodes'], message.payload.nodes);
             break;
@@ -103,8 +150,11 @@ function connectWebSocket(url: string, queryClient: ReturnType<typeof useQueryCl
       }
     };
 
-    sharedWebSocket.onclose = () => {
+    socket.onclose = () => {
       console.log('[WebSocket] Disconnected');
+      // An older socket may close after a replacement has already connected.
+      // Never clear or reconnect over the newer singleton.
+      if (sharedWebSocket !== socket) return;
       sharedWebSocket = null;
 
       // Attempt to reconnect after 3 seconds if there are still subscribers
@@ -117,11 +167,11 @@ function connectWebSocket(url: string, queryClient: ReturnType<typeof useQueryCl
       }
     };
 
-    sharedWebSocket.onerror = (error) => {
+    socket.onerror = (error) => {
       console.error('[WebSocket] Error:', error);
     };
 
-    return sharedWebSocket;
+    return socket;
   } catch (error) {
     console.error('[WebSocket] Failed to connect:', error);
     return null;
@@ -134,8 +184,9 @@ function disconnectWebSocket() {
     reconnectTimeout = null;
   }
   if (sharedWebSocket) {
-    sharedWebSocket.close();
+    const socket = sharedWebSocket;
     sharedWebSocket = null;
+    socket.close();
   }
 }
 

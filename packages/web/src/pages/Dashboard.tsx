@@ -160,6 +160,8 @@ export function Dashboard() {
   const originalSize = safeNumber(stats?.storage?.original_size);
   const transcodedSize = safeNumber(stats?.storage?.transcoded_size);
   const savedSpace = safeNumber(stats?.storage?.saved_space);
+  const replacedFiles = safeNumber(stats?.storage?.replaced_files);
+  const retainedBackups = safeNumber(stats?.storage?.backup_retained);
   const storageReduction = percentage(savedSpace, originalSize);
 
   const totalWorkerSlots = nodes.reduce((sum: number, node: any) => {
@@ -291,7 +293,9 @@ export function Dashboard() {
         <MetricCard
           label="Storage reclaimed"
           value={formatBytes(savedSpace)}
-          detail={`${storageReduction}% reduction across completed jobs`}
+          detail={replacedFiles > 0
+            ? `${storageReduction}% across ${replacedFiles} confirmed ${replacedFiles === 1 ? 'replacement' : 'replacements'}`
+            : 'No confirmed file replacements yet'}
           icon={HardDrive}
           accent="#fbbf24"
         />
@@ -493,8 +497,10 @@ export function Dashboard() {
         <div className={`${PANEL} p-5`}>
           <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <div className="flex items-center gap-2"><HardDrive className="h-4 w-4 text-amber-300" /><h2 className="font-semibold text-white">Storage impact</h2></div>
-              <p className="mt-1.5 text-xs text-gray-500">Completed transcodes have reduced managed media by {storageReduction}%.</p>
+              <div className="flex items-center gap-2"><HardDrive className="h-4 w-4 text-amber-300" /><h2 className="font-semibold text-white">Confirmed storage impact</h2></div>
+              <p className="mt-1.5 text-xs text-gray-500">
+                Based only on replaced originals{retainedBackups > 0 ? ` · ${retainedBackups} retained ${retainedBackups === 1 ? 'backup is' : 'backups are'} not counted yet` : ''}.
+              </p>
             </div>
             <div className="grid grid-cols-3 gap-6 sm:text-right">
               <div><p className="text-[10px] uppercase tracking-wider text-gray-600">Original</p><p className="mt-1 text-sm font-medium text-gray-300">{formatBytes(originalSize)}</p></div>
@@ -503,6 +509,11 @@ export function Dashboard() {
             </div>
           </div>
           <div className="mt-5"><UsageBar value={storageReduction} color="#fbbf24" /></div>
+          <div className="mt-4 flex justify-end">
+            <Link to="/storage" className="flex items-center gap-1.5 text-xs font-medium text-[#95d5b2] hover:text-[#b7e4c7]">
+              View reclaim details <ArrowRight className="h-3.5 w-3.5" />
+            </Link>
+          </div>
         </div>
 
         <div className={`${PANEL} flex flex-col justify-between p-5`}>

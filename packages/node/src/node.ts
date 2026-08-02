@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import * as os from 'os';
 import { existsSync } from 'fs';
+import { access } from 'fs/promises';
 import { join } from 'path';
 import type { NodeConfig, SystemInfo, GPUInfo } from '@encorr/shared';
 import { createMessage, MessageType } from '@encorr/shared';
@@ -243,11 +244,22 @@ export class EncorrNode {
     this.logger.info(`[JOB_ASSIGN]   source: ${config.source_path}`);
     this.logger.info(`[JOB_ASSIGN]   dest: ${config.dest_path}`);
 
+    // Assignment delivery is at-least-once. A repeated message must be
+    // acknowledged without starting a second ffprobe/ffmpeg process.
+    if (this.activeJobs.has(jobId)) {
+      this.logger.warn(`[JOB_ASSIGN] Ignoring duplicate assignment for active job ${jobId}`);
+      this.wsClient.sendJobAccept(jobId, true);
+      return;
+    }
+
     // Server controls concurrency, so we accept all assigned jobs
 
-    // Validate source file exists
-    const { existsSync } = require('fs');
-    if (!existsSync(config.source_path)) {
+    // Do not synchronously stat media from the WebSocket message handler.
+    // Network-mounted libraries can block here long enough to prevent the
+    // remaining assignments in a worker burst from being received.
+    try {
+      await access(config.source_path);
+    } catch {
       const errorMsg = `Source file not found: ${config.source_path}`;
       this.logger.error(`Job ${jobId} rejected: ${errorMsg}`);
       this.wsClient.sendJobAccept(jobId, false, errorMsg);

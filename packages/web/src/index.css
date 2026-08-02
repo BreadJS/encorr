@@ -69,3 +69,13 @@
 .nodes-page .node-filter-active {
   background: #302e31;
 }
+
+.jobs-worker-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+@media (min-width: 1280px) {
+  .jobs-worker-grid {
+    grid-template-columns: minmax(0, 1.7fr) minmax(250px, 0.55fr);
+  }
+}

@@ -132,6 +132,23 @@ export class EncorrDatabase {
         CREATE INDEX IF NOT EXISTS idx_job_reports_created ON job_reports(created_at);
       `);
     }
+
+    const reclaimColumns = this.db.pragma('table_info(storage_reclaims)') as { name: string }[];
+    const reclaimMigrations: Array<[string, string]> = [
+      ['progress', 'REAL NOT NULL DEFAULT 0'],
+      ['current_action', "TEXT DEFAULT 'Waiting for node'"],
+      ['bytes_processed', 'INTEGER NOT NULL DEFAULT 0'],
+      ['total_bytes', 'INTEGER NOT NULL DEFAULT 0'],
+      ['speed_mbps', 'REAL NOT NULL DEFAULT 0'],
+      ['started_at', 'INTEGER'],
+      ['completed_at', 'INTEGER'],
+    ];
+    for (const [name, definition] of reclaimMigrations) {
+      if (!reclaimColumns.some(column => column.name === name)) {
+        this.logger.info(`[MIGRATION] Adding ${name} column to storage_reclaims table`);
+        this.db.exec(`ALTER TABLE storage_reclaims ADD COLUMN ${name} ${definition}`);
+      }
+    }
   }
 
   /**
@@ -483,7 +500,15 @@ export class EncorrDatabase {
     }
     if (usage.active_jobs !== undefined) {
       updates.push('active_jobs = ?');
-      values.push(JSON.stringify(usage.active_jobs));
+      // Heartbeats, accepts, and progress updates can cross on the wire. Keep
+      // only one telemetry record per job so duplicate accepts cannot corrupt
+      // React's keyed worker list or inflate slot usage.
+      const uniqueActiveJobs = Array.from(new Map(
+        usage.active_jobs
+          .filter(job => job?.id || job?.job_id)
+          .map(job => [job.id || job.job_id, job]),
+      ).values());
+      values.push(JSON.stringify(uniqueActiveJobs));
     }
 
     if (updates.length === 0) return;
@@ -700,6 +725,26 @@ export class EncorrDatabase {
     const stmt = this.db.prepare('SELECT * FROM library_files WHERE filepath = ?');
     const row = stmt.get(normalizedPath) as any;
     return row ? this.parseLibraryFile(row) : undefined;
+  }
+
+  getLibraryFileByRelativePath(libraryId: string, libraryPath: string, relativePath: string): LibraryFile | undefined {
+    const normalizedRelativePath = normalizePath(relativePath);
+    const normalizedLibraryPath = normalizePath(libraryPath).replace(/\/$/, '');
+    const absolutePath = normalizePath(`${normalizedLibraryPath}/${normalizedRelativePath}`);
+    const exactRow = this.db.prepare(`
+      SELECT * FROM library_files
+      WHERE library_id = ? AND filepath IN (?, ?)
+      LIMIT 1
+    `).get(libraryId, absolutePath, normalizedRelativePath) as any;
+    if (exactRow) return this.parseLibraryFile(exactRow);
+
+    const filename = normalizedRelativePath.split('/').pop() || normalizedRelativePath;
+    const filenameRows = this.db.prepare(`
+      SELECT * FROM library_files
+      WHERE library_id = ? AND filename = ?
+      LIMIT 2
+    `).all(libraryId, filename) as any[];
+    return filenameRows.length === 1 ? this.parseLibraryFile(filenameRows[0]) : undefined;
   }
 
   createLibraryFile(data: {
@@ -1098,6 +1143,16 @@ export class EncorrDatabase {
       );
     }
 
+    // Do not create duplicate work when bulk analysis is triggered repeatedly.
+    const existingActiveJob = this.getJobsByFile(fileId).find(job =>
+      job.preset_id === presetId
+      && (job.status === 'queued' || job.status === 'assigned' || job.status === 'processing')
+    );
+    if (existingActiveJob) {
+      this.logger.debug(`Reusing active ${presetId} job ${existingActiveJob.id} for file ${fileId}`);
+      return existingActiveJob;
+    }
+
     // Now create the job
     return this.createJob({ file_id: fileId, preset_id: presetId, node_id: nodeId });
   }
@@ -1161,6 +1216,15 @@ export class EncorrDatabase {
     stmt.run(nodeId, now, jobId);
   }
 
+  requeueAssignedJob(jobId: string): boolean {
+    const stmt = this.db.prepare(`
+      UPDATE jobs
+      SET node_id = NULL, status = 'queued', started_at = NULL
+      WHERE id = ? AND status = 'assigned'
+    `);
+    return stmt.run(jobId).changes > 0;
+  }
+
   // Update only node_id and started_at without changing status
   // Used when job is already 'processing' but we need to set the node_id
   updateJobNode(jobId: string, nodeId: string, startedAt: number): void {
@@ -1185,7 +1249,7 @@ export class EncorrDatabase {
     const stmt = this.db.prepare(`
       UPDATE jobs
       SET status = 'processing'
-      WHERE id = ?
+      WHERE id = ? AND status IN ('queued', 'assigned', 'processing')
     `);
     stmt.run(jobId);
   }
@@ -1268,51 +1332,14 @@ export class EncorrDatabase {
         // Extract library_id from server_path (format: "library:{id}")
         const libraryId = mapping.server_path.replace('library:', '');
 
-        // The library file's filepath is stored relative to the library root
-        // We need to match it using the file's relative_path
-        // Note: file.relative_path might be like "Movies/101 dalmatiers 2..." or just the filename
-        // The library_file.filepath could be the full path from library root
-
-        // Try to find the library file by library_id first
-        // Then match by checking if the filepath contains our relative path or vice versa
-        const libFiles = this.getLibraryFiles(libraryId);
-        let matchedLibFile: any = null;
-
-        // Get the library to calculate relative paths correctly
+        let matchedLibFile: LibraryFile | undefined;
         const library = this.getLibraryById(libraryId);
         if (library) {
-          // For each library file, calculate its relative path from the library root
-          // and match it against the file's relative_path
-          const normalizedLibPath = library.path.replace(/\\/g, '/').replace(/\/$/, '');
-
-          for (const lf of libFiles) {
-            // Calculate relative path for this library file (same logic as createJobForLibraryFile)
-            const normalizedLfPath = lf.filepath.replace(/\\/g, '/');
-            let lfRelativePath: string;
-
-            if (normalizedLfPath.startsWith(normalizedLibPath + '/')) {
-              lfRelativePath = normalizedLfPath.substring(normalizedLibPath.length + 1);
-            } else {
-              // Fallback: use the filepath as-is if it doesn't start with library path
-              lfRelativePath = normalizedLfPath;
-            }
-
-            // Exact match on relative path
-            if (lfRelativePath === file.relative_path) {
-              matchedLibFile = lf;
-              break;
-            }
-          }
-        }
-
-        // If still no match, try matching by filename only
-        if (!matchedLibFile) {
-          const filename = file.relative_path.split('/').pop() || file.relative_path;
-          // Only match if there's exactly one file with this name to avoid wrong matches
-          const filesWithSameName = libFiles.filter(lf => lf.filename === filename);
-          if (filesWithSameName.length === 1) {
-            matchedLibFile = filesWithSameName[0];
-          }
+          matchedLibFile = this.getLibraryFileByRelativePath(
+            libraryId,
+            library.path,
+            file.relative_path,
+          );
         }
 
         if (matchedLibFile) {
@@ -1438,6 +1465,22 @@ export class EncorrDatabase {
   deleteJob(jobId: string): void {
     const stmt = this.db.prepare('DELETE FROM jobs WHERE id = ?');
     stmt.run(jobId);
+  }
+
+  deleteJobs(jobIds: string[]): number {
+    const uniqueIds = Array.from(new Set(jobIds));
+    if (uniqueIds.length === 0) return 0;
+
+    const stmt = this.db.prepare('DELETE FROM jobs WHERE id = ?');
+    const deleteMany = this.db.transaction((ids: string[]) => {
+      let deleted = 0;
+      for (const id of ids) {
+        deleted += stmt.run(id).changes;
+      }
+      return deleted;
+    });
+
+    return deleteMany(uniqueIds);
   }
 
   // ========================================================================
@@ -1885,6 +1928,181 @@ export class EncorrDatabase {
   // Statistics
   // ========================================================================
 
+  createStorageReclaim(data: {
+    library_file_id: string;
+    library_id?: string | null;
+    library_name?: string | null;
+    filename: string;
+    operation: 'replace' | 'backup_replace';
+    original_size: number;
+    replacement_size: number;
+    job_id?: string | null;
+    node_id?: string | null;
+    node_name?: string | null;
+    original_path?: string | null;
+    replacement_path?: string | null;
+  }): string {
+    const id = uuidv4();
+    this.db.prepare(`
+      INSERT INTO storage_reclaims (
+        id, library_file_id, library_id, library_name, filename, operation,
+        status, original_size, replacement_size, job_id, node_id, node_name,
+        original_path, replacement_path, total_bytes, current_action
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, 'Waiting for node')
+    `).run(
+      id,
+      data.library_file_id,
+      data.library_id ?? null,
+      data.library_name ?? null,
+      data.filename,
+      data.operation,
+      Math.max(0, data.original_size || 0),
+      Math.max(0, data.replacement_size || 0),
+      data.job_id ?? null,
+      data.node_id ?? null,
+      data.node_name ?? null,
+      data.original_path ?? null,
+      data.replacement_path ?? null,
+      Math.max(0, data.replacement_size || 0),
+    );
+    return id;
+  }
+
+  confirmStorageReplacement(libraryFileId: string, operation: 'replace' | 'backup_replace'): void {
+    const record = this.db.prepare(`
+      SELECT * FROM storage_reclaims
+      WHERE library_file_id = ? AND operation = ? AND status = 'pending'
+      ORDER BY created_at DESC LIMIT 1
+    `).get(libraryFileId, operation) as any;
+    if (!record) return;
+
+    if (operation === 'backup_replace') {
+      this.db.prepare(`
+        UPDATE storage_reclaims SET status = 'backup_retained', progress = 100,
+          current_action = 'Backup retained', speed_mbps = 0, completed_at = ?, error_message = NULL
+        WHERE id = ?
+      `).run(Math.floor(Date.now() / 1000), record.id);
+      if (Number(record.replacement_size) > 0) {
+        this.db.prepare('UPDATE library_files SET filesize = ? WHERE id = ?')
+          .run(record.replacement_size, libraryFileId);
+      }
+      return;
+    }
+
+    const reclaimed = Number(record.original_size || 0) - Number(record.replacement_size || 0);
+    this.db.prepare(`
+      UPDATE storage_reclaims
+      SET status = 'reclaimed', bytes_reclaimed = ?, reclaimed_at = ?, progress = 100,
+        current_action = 'Replacement complete', speed_mbps = 0, completed_at = ?, error_message = NULL
+      WHERE id = ?
+    `).run(reclaimed, Math.floor(Date.now() / 1000), Math.floor(Date.now() / 1000), record.id);
+    if (Number(record.replacement_size) > 0) {
+      this.db.prepare('UPDATE library_files SET filesize = ? WHERE id = ?')
+        .run(record.replacement_size, libraryFileId);
+    }
+  }
+
+  confirmStorageBackupCleanup(libraryFileId: string): void {
+    const record = this.db.prepare(`
+      SELECT * FROM storage_reclaims
+      WHERE library_file_id = ? AND operation = 'backup_replace' AND status = 'backup_retained'
+      ORDER BY created_at DESC LIMIT 1
+    `).get(libraryFileId) as any;
+    if (!record) return;
+
+    const reclaimed = Number(record.original_size || 0) - Number(record.replacement_size || 0);
+    this.db.prepare(`
+      UPDATE storage_reclaims
+      SET status = 'reclaimed', bytes_reclaimed = ?, reclaimed_at = ?, progress = 100,
+        current_action = 'Backup deleted', speed_mbps = 0, completed_at = ?, error_message = NULL
+      WHERE id = ?
+    `).run(reclaimed, Math.floor(Date.now() / 1000), Math.floor(Date.now() / 1000), record.id);
+  }
+
+  getOpenStorageBackup(libraryFileId: string): any | null {
+    return (this.db.prepare(`
+      SELECT * FROM storage_reclaims
+      WHERE library_file_id = ? AND operation = 'backup_replace'
+        AND status IN ('pending', 'backup_retained')
+      ORDER BY created_at DESC LIMIT 1
+    `).get(libraryFileId) as any) || null;
+  }
+
+  updateStorageReclaimProgress(operationId: string, data: {
+    progress: number;
+    current_action: string;
+    bytes_processed: number;
+    total_bytes: number;
+    speed_mbps: number;
+  }): void {
+    this.db.prepare(`
+      UPDATE storage_reclaims SET progress = ?, current_action = ?, bytes_processed = ?,
+        total_bytes = ?, speed_mbps = ?, started_at = COALESCE(started_at, ?)
+      WHERE id = ?
+    `).run(
+      Math.max(0, Math.min(100, data.progress)), data.current_action,
+      Math.max(0, data.bytes_processed), Math.max(0, data.total_bytes),
+      Math.max(0, data.speed_mbps), Math.floor(Date.now() / 1000), operationId,
+    );
+  }
+
+  hasOpenStorageBackup(libraryFileId: string): boolean {
+    const row = this.db.prepare(`
+      SELECT 1 FROM storage_reclaims
+      WHERE library_file_id = ? AND operation = 'backup_replace'
+        AND status IN ('pending', 'backup_retained')
+      LIMIT 1
+    `).get(libraryFileId);
+    return !!row;
+  }
+
+  failStorageReplacement(libraryFileId: string, operation: 'replace' | 'backup_replace', errorMessage: string): void {
+    this.db.prepare(`
+      UPDATE storage_reclaims
+      SET status = 'failed', current_action = 'Operation failed', speed_mbps = 0,
+        completed_at = ?, error_message = ?
+      WHERE id = (
+        SELECT id FROM storage_reclaims
+        WHERE library_file_id = ? AND operation = ? AND status = 'pending'
+        ORDER BY created_at DESC LIMIT 1
+      )
+    `).run(Math.floor(Date.now() / 1000), errorMessage, libraryFileId, operation);
+  }
+
+  getStorageReclaimStats(): {
+    original_size: number;
+    replacement_size: number;
+    saved_space: number;
+    storage_increased: number;
+    net_change: number;
+    replaced_files: number;
+    backup_retained: number;
+  } {
+    const totals = this.db.prepare(`
+      SELECT
+        COALESCE(SUM(original_size), 0) AS original_size,
+        COALESCE(SUM(replacement_size), 0) AS replacement_size,
+        COALESCE(SUM(CASE WHEN bytes_reclaimed > 0 THEN bytes_reclaimed ELSE 0 END), 0) AS saved_space,
+        COALESCE(SUM(CASE WHEN bytes_reclaimed < 0 THEN -bytes_reclaimed ELSE 0 END), 0) AS storage_increased,
+        COALESCE(SUM(bytes_reclaimed), 0) AS net_change,
+        COUNT(*) AS replaced_files
+      FROM storage_reclaims
+      WHERE status = 'reclaimed'
+    `).get() as any;
+    const pending = this.db.prepare(`
+      SELECT COUNT(*) AS count FROM storage_reclaims WHERE status = 'backup_retained'
+    `).get() as { count: number };
+    return { ...totals, backup_retained: pending.count };
+  }
+
+  getStorageReclaims(limit = 250): any[] {
+    return this.db.prepare(`
+      SELECT * FROM storage_reclaims
+      ORDER BY COALESCE(reclaimed_at, created_at) DESC
+      LIMIT ?
+    `).all(limit);
+  }
+
   getDashboardStats(): DashboardStats {
     // Node stats
     const nodeStats = this.db.prepare(`
@@ -1917,15 +2135,7 @@ export class EncorrDatabase {
       FROM jobs
     `).get() as { queued: number; processing: number; completed: number; failed: number };
 
-    // Storage stats
-    const storageStats = this.db.prepare(`
-      SELECT
-        COALESCE(SUM(f.original_size), 0) as original_size,
-        COALESCE(SUM(CAST(j.stats->>'transcoded_size' AS INTEGER)), 0) as transcoded_size
-      FROM files f
-      LEFT JOIN jobs j ON j.file_id = f.id AND j.status = 'completed'
-      WHERE f.status = 'completed'
-    `).get() as { original_size: number; transcoded_size: number };
+    const storageStats = this.getStorageReclaimStats();
 
     return {
       nodes: {
@@ -1949,8 +2159,12 @@ export class EncorrDatabase {
       },
       storage: {
         original_size: storageStats.original_size,
-        transcoded_size: storageStats.transcoded_size,
-        saved_space: Math.max(0, storageStats.original_size - storageStats.transcoded_size),
+        transcoded_size: storageStats.replacement_size,
+        saved_space: storageStats.saved_space,
+        storage_increased: storageStats.storage_increased,
+        net_change: storageStats.net_change,
+        replaced_files: storageStats.replaced_files,
+        backup_retained: storageStats.backup_retained,
       },
     };
   }
@@ -2017,6 +2231,22 @@ export class EncorrDatabase {
       ORDER BY created_at DESC
       LIMIT ?
     `).all(fileId, fileId, limit);
+  }
+
+  getLatestTranscodeReports(): any[] {
+    return this.db.prepare(`
+      SELECT * FROM (
+        SELECT
+          job_reports.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY COALESCE(library_file_id, file_id)
+            ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC
+          ) AS report_rank
+        FROM job_reports
+        WHERE job_type = 'transcode'
+      )
+      WHERE report_rank = 1
+    `).all();
   }
 
   getJobReportById(id: string): any | undefined {

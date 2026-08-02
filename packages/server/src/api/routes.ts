@@ -468,6 +468,48 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     return sendSuccess(files);
   });
 
+  // Queue metadata analysis for every library file that has not been analyzed yet.
+  fastify.post('/library-files/analyze', async (request, reply) => {
+    const { library_id } = (request.body || {}) as { library_id?: string };
+
+    if (library_id && !db.getLibraryById(library_id)) {
+      reply.status(404);
+      return sendError('Library not found');
+    }
+
+    const libraryFiles = library_id
+      ? db.getLibraryFiles(library_id)
+      : db.getAllLibraries().flatMap(library => db.getLibraryFiles(library.id));
+    const candidates = libraryFiles.filter(file => !file.metadata?.video_codec);
+
+    let queued = 0;
+    let skipped = libraryFiles.length - candidates.length;
+
+    for (let index = 0; index < candidates.length; index++) {
+      const job = db.createJobForLibraryFile(candidates[index].id, 'builtin-analyze');
+      if (job) queued++;
+      else skipped++;
+
+      // Keep HTTP and WebSocket traffic responsive during very large libraries.
+      if ((index + 1) % 100 === 0) {
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
+    }
+
+    wsServer.broadcastJobsUpdate();
+    wsServer.assignJobsNow();
+
+    logger.info(`Bulk analysis queued: ${queued} jobs, ${skipped} skipped${library_id ? ` for library ${library_id}` : ''}`);
+    return sendSuccess({
+      queued,
+      skipped,
+      total: libraryFiles.length,
+      message: queued > 0
+        ? `Queued ${queued} file${queued === 1 ? '' : 's'} for analysis`
+        : 'All files already have metadata or are queued',
+    });
+  });
+
   // Update library file status
   fastify.put('/library-files/:id/status', async (request, reply) => {
     const { id } = request.params as { id: string };
@@ -623,8 +665,23 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
 
     logger.info(`[FILE_REPLACE] Target path for node ${node.id}: ${targetPath}`);
 
-    // Send file replace command to the node
-    wsServer.sendFileReplaceCommand(node.id, {
+    const reclaimId = db.createStorageReclaim({
+      library_file_id: id,
+      library_id: library.id,
+      library_name: library.name,
+      filename: file.filename,
+      operation: 'replace',
+      original_size: Number(latestReport.original_size || file.filesize || 0),
+      replacement_size: Number(latestReport.output_size || 0),
+      job_id: job.id,
+      node_id: node.id,
+      node_name: node.name,
+      original_path: targetPath,
+      replacement_path: job.output_path,
+    });
+
+    const sent = wsServer.sendFileReplaceCommand(node.id, {
+      operation_id: reclaimId,
       file_id: id,
       operation: 'replace',
       source_path: job.output_path,
@@ -632,11 +689,18 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       original_filename: file.filename,
     });
 
+    if (!sent) {
+      db.failStorageReplacement(id, 'replace', 'Node disconnected before replacement command was sent');
+      reply.status(503);
+      return sendError('Could not send replacement command to node');
+    }
+
     logger.info(`File replace command sent for file ${id} to node ${node.id}`);
 
     return sendSuccess({
       message: 'File replacement command sent to node',
       node_id: node.id,
+      reclaim_id: reclaimId,
     });
   });
 
@@ -740,8 +804,23 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
 
     logger.info(`[FILE_REPLACE] Target path for node ${node.id}: ${targetPath}`);
 
-    // Send file replace command to the node
-    wsServer.sendFileReplaceCommand(node.id, {
+    const reclaimId = db.createStorageReclaim({
+      library_file_id: id,
+      library_id: library.id,
+      library_name: library.name,
+      filename: file.filename,
+      operation: 'backup_replace',
+      original_size: Number(latestReport.original_size || file.filesize || 0),
+      replacement_size: Number(latestReport.output_size || 0),
+      job_id: job.id,
+      node_id: node.id,
+      node_name: node.name,
+      original_path: targetPath,
+      replacement_path: job.output_path,
+    });
+
+    const sent = wsServer.sendFileReplaceCommand(node.id, {
+      operation_id: reclaimId,
       file_id: id,
       operation: 'backup_replace',
       source_path: job.output_path,
@@ -749,11 +828,18 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       original_filename: file.filename,
     });
 
+    if (!sent) {
+      db.failStorageReplacement(id, 'backup_replace', 'Node disconnected before replacement command was sent');
+      reply.status(503);
+      return sendError('Could not send backup replacement command to node');
+    }
+
     logger.info(`File backup & replace command sent for file ${id} to node ${node.id}`);
 
     return sendSuccess({
       message: 'File backup & replace command sent to node',
       node_id: node.id,
+      reclaim_id: reclaimId,
     });
   });
 
@@ -863,8 +949,42 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
 
     logger.info(`[FILE_REPLACE] Target path for node ${node.id}: ${targetPath}`);
 
-    // Send file cleanup command to the node
-    wsServer.sendFileReplaceCommand(node.id, {
+    // Older backup replacements may predate storage accounting. The retained
+    // backup status is proof that replacement succeeded, so establish its
+    // baseline before cleanup without claiming any reclaimed bytes yet.
+    if (!db.hasOpenStorageBackup(id)) {
+      db.createStorageReclaim({
+        library_file_id: id,
+        library_id: library.id,
+        library_name: library.name,
+        filename: file.filename,
+        operation: 'backup_replace',
+        original_size: Number(latestReport.original_size || file.filesize || 0),
+        replacement_size: Number(latestReport.output_size || 0),
+        job_id: job.id,
+        node_id: node.id,
+        node_name: node.name,
+        original_path: targetPath.replace(/\.org$/, ''),
+        replacement_path: targetPath.replace(/\.org$/, ''),
+      });
+      db.confirmStorageReplacement(id, 'backup_replace');
+    }
+
+    const reclaim = db.getOpenStorageBackup(id);
+    if (!reclaim) {
+      reply.status(500);
+      return sendError('Could not create a tracked backup cleanup operation');
+    }
+    db.updateStorageReclaimProgress(reclaim.id, {
+      progress: 0,
+      current_action: 'Waiting for node',
+      bytes_processed: 0,
+      total_bytes: Number(reclaim.original_size || 0),
+      speed_mbps: 0,
+    });
+
+    const sent = wsServer.sendFileReplaceCommand(node.id, {
+      operation_id: reclaim.id,
       file_id: id,
       operation: 'cleanup_backup',
       source_path: '', // Not needed for cleanup
@@ -872,11 +992,17 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       original_filename: file.filename,
     });
 
+    if (!sent) {
+      reply.status(503);
+      return sendError('Could not send backup cleanup command to node');
+    }
+
     logger.info(`File cleanup backup command sent for file ${id} to node ${node.id}`);
 
     return sendSuccess({
       message: 'File cleanup backup command sent to node',
       node_id: node.id,
+      reclaim_id: reclaim.id,
     });
   });
 
@@ -908,9 +1034,71 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       allFiles = allFiles.concat(libFiles.map((f: any) => ({ ...f, library_name: lib.name, library_path: lib.path })));
     }
 
-    // Filter by status if specified
-    if (status) {
-      allFiles = allFiles.filter((f: any) => f.status === status);
+    // Resolve the latest transcode outcome and live work once for the complete
+    // result set. Counts must describe the selected library, not only the
+    // current pagination slice.
+    const latestTranscodeReports = new Map<string, any>();
+    for (const report of db.getLatestTranscodeReports()) {
+      const libraryFileId = report.library_file_id || report.file_id;
+      if (libraryFileId) latestTranscodeReports.set(libraryFileId, report);
+    }
+
+    const activeAnalysisFileIds = new Set<string>();
+    const activeTranscodeFileIds = new Set<string>();
+    const activeJobs = [
+      ...db.getAllJobs({ status: 'assigned' }),
+      ...db.getAllJobs({ status: 'processing' }),
+    ];
+    for (const job of activeJobs) {
+      const file = db.getFileById(job.file_id);
+      if (!file?.folder_mapping_id) continue;
+      const mapping = db.getFolderMappingById(file.folder_mapping_id);
+      if (!mapping?.server_path?.startsWith('library:')) continue;
+      const libraryId = mapping.server_path.replace('library:', '');
+      const library = db.getLibraryById(libraryId);
+      if (!library) continue;
+      const libraryFile = db.getLibraryFileByRelativePath(libraryId, library.path, file.relative_path);
+      if (!libraryFile) continue;
+      const preset = db.getPresetById(job.preset_id);
+      if ((preset?.config as any)?.action === 'analyze') activeAnalysisFileIds.add(libraryFile.id);
+      else activeTranscodeFileIds.add(libraryFile.id);
+    }
+
+    const statusCounts = {
+      all: allFiles.length,
+      ready: 0,
+      processing: 0,
+      completed: 0,
+      failed: 0,
+      cancelled: 0,
+    };
+
+    allFiles = allFiles.map((file: any) => {
+      let displayStatus = file.status;
+      if (activeTranscodeFileIds.has(file.id)) {
+        displayStatus = 'pending';
+      } else if (activeAnalysisFileIds.has(file.id)) {
+        displayStatus = 'processing';
+      } else {
+        const latestReport = latestTranscodeReports.get(file.id);
+        if (latestReport) {
+          displayStatus = latestReport.status;
+        } else if (file.status === 'analyzed' || file.status === 'imported') {
+          displayStatus = 'ready';
+        }
+      }
+
+      if (displayStatus === 'ready') statusCounts.ready++;
+      else if (displayStatus === 'processing') statusCounts.processing++;
+      else if (displayStatus === 'completed') statusCounts.completed++;
+      else if (displayStatus === 'failed') statusCounts.failed++;
+      else if (displayStatus === 'cancelled') statusCounts.cancelled++;
+
+      return { ...file, display_status: displayStatus };
+    });
+
+    if (status && status !== 'all') {
+      allFiles = allFiles.filter((file: any) => file.display_status === status);
     }
 
     // Sort by created_at (newest first)
@@ -930,6 +1118,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       page: pageNum,
       per_page: perPageNum,
       total_pages: Math.ceil(total / perPageNum),
+      status_counts: statusCounts,
     });
   });
 
@@ -1198,6 +1387,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
         file_name: file?.relative_path,
         file_size: file?.original_size,
         preset_name: preset?.name,
+        job_type: (preset?.config as any)?.action === 'analyze' ? 'analyze' : 'transcode',
         node_name: node?.name,
         // Include metadata fields for display
         original_codec: codec,
@@ -1211,7 +1401,37 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       };
     });
 
-    return sendSuccess(enrichedJobs);
+    const fileOperations = db.getStorageReclaims(250).map((operation: any) => {
+      const cleanupInProgress = operation.status === 'backup_retained' && Number(operation.progress) < 100;
+      const mappedStatus = operation.status === 'pending' || cleanupInProgress
+        ? 'processing'
+        : operation.status === 'failed' ? 'failed' : 'completed';
+      return {
+        id: `file-operation:${operation.id}`,
+        operation_id: operation.id,
+        file_id: operation.library_file_id,
+        file_operation: true,
+        operation: operation.operation,
+        job_type: 'file_operation',
+        status: mappedStatus,
+        progress: Number(operation.progress || 0),
+        current_action: operation.current_action || 'Waiting for node',
+        bytes_processed: Number(operation.bytes_processed || 0),
+        total_bytes: Number(operation.total_bytes || operation.replacement_size || 0),
+        speed_mbps: Number(operation.speed_mbps || 0),
+        file_name: operation.filename,
+        file_size: Number(operation.original_size || 0),
+        preset_name: operation.operation === 'backup_replace' ? 'Backup & Replace' : 'Replace Original',
+        node_id: operation.node_id,
+        node_name: operation.node_name,
+        error_message: operation.error_message,
+        created_at: operation.created_at,
+        started_at: operation.started_at,
+        completed_at: operation.completed_at || operation.reclaimed_at,
+      };
+    });
+
+    return sendSuccess([...enrichedJobs, ...fileOperations]);
   });
 
   fastify.get('/jobs/:id', async (request, reply) => {
@@ -1261,6 +1481,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
         : (file?.resolution || ''),
       container: metadata?.container || file?.original_format || '',
       target_codec: preset?.config?.video_codec || '',
+      job_type: (preset?.config as any)?.action === 'analyze' ? 'analyze' : 'transcode',
     });
   });
 
@@ -1585,6 +1806,35 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     return sendSuccess(availability);
   });
 
+  fastify.post('/jobs/bulk-delete', async (request, reply) => {
+    const body = request.body as { job_ids?: unknown; cancel_active?: boolean };
+    if (!Array.isArray(body?.job_ids) || body.job_ids.some(id => typeof id !== 'string')) {
+      reply.status(400);
+      return sendError('job_ids must be an array of job IDs');
+    }
+
+    const jobIds = Array.from(new Set(body.job_ids as string[]));
+    const jobs = jobIds.map(id => db.getJobById(id)).filter(Boolean);
+    const activeJobs = jobs.filter(job => job!.status === 'assigned' || job!.status === 'processing');
+    const inactiveJobIds = jobs
+      .filter(job => job!.status !== 'assigned' && job!.status !== 'processing')
+      .map(job => job!.id);
+
+    if (body.cancel_active) {
+      for (const job of activeJobs) {
+        wsServer.cancelJob(job!.id, 'Cancelled by user');
+      }
+    }
+    const deleted = db.deleteJobs(inactiveJobIds);
+    const cancelled = body.cancel_active ? activeJobs.length : 0;
+    const skipped = body.cancel_active ? 0 : activeJobs.length;
+
+    logger.info(`Bulk job cleanup: cancelled ${cancelled}, deleted ${deleted}, left active ${skipped}`);
+    wsServer.scheduleWebUpdates();
+
+    return sendSuccess({ cancelled, deleted, skipped });
+  });
+
   fastify.delete('/jobs/:id', async (request, reply) => {
     const { id } = request.params as { id: string };
     const job = db.getJobById(id);
@@ -1906,6 +2156,15 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
   fastify.get('/stats', async (request, reply) => {
     const stats = db.getDashboardStats();
     return sendSuccess(stats);
+  });
+
+  fastify.get('/storage-reclaims', async (request, reply) => {
+    const { limit } = request.query as { limit?: string };
+    const parsedLimit = Math.min(1000, Math.max(1, Number.parseInt(limit || '250', 10) || 250));
+    return sendSuccess({
+      summary: db.getStorageReclaimStats(),
+      records: db.getStorageReclaims(parsedLimit),
+    });
   });
 
   fastify.get('/logs', async (request, reply) => {

@@ -394,6 +394,10 @@ export interface DashboardStats {
     original_size: number;
     transcoded_size: number;
     saved_space: number;
+    storage_increased: number;
+    net_change: number;
+    replaced_files: number;
+    backup_retained: number;
   };
 }
 
