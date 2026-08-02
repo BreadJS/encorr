@@ -56,6 +56,7 @@ export function Files() {
   const watchedReplacements = useRef<Map<string, number>>(new Map());
   const seenReplacementFailures = useRef<Set<string>>(new Set());
   const failedReplacementFiles = useRef<Set<string>>(new Set());
+  const selectionAnchorFileId = useRef<string | null>(null);
   const [openActionsFileId, setOpenActionsFileId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -172,7 +173,8 @@ export function Files() {
     return files.map((file: any) => {
       // Find active job for real-time progress
       const activeJob = jobs.find((j: any) =>
-        j.file_id === file.id && (j.status === 'assigned' || j.status === 'processing')
+        (j.library_file_id === file.id || j.file_id === file.id)
+        && (j.status === 'queued' || j.status === 'assigned' || j.status === 'processing')
       );
 
       // Get latest transcode report for this file
@@ -184,8 +186,7 @@ export function Files() {
 
       // Priority 1: Active job (processing/assigned)
       if (activeJob) {
-        const isAnalyzeJob = activeJob.job_type === 'analyze' || activeJob.preset_id === 'builtin-analyze';
-        displayStatus = isAnalyzeJob ? 'processing' : 'pending';
+        displayStatus = 'processing';
         displayProgress = activeJob.progress || 0;
       }
       // Priority 2: A replacement is the terminal library-file state.
@@ -194,7 +195,7 @@ export function Files() {
         displayProgress = 100;
       }
       // Priority 3: Completed transcode output exists but is not installed yet.
-      else if (latestReport) {
+      else if (!file.display_status && latestReport) {
         const outputAvailable = file.transcode_output_available !== false && latestReport.output_available !== 0;
         displayStatus = latestReport.status === 'completed'
           ? (outputAvailable ? 'transcoded' : 'failed')
@@ -462,14 +463,27 @@ export function Files() {
     return result;
   }, [filesWithJobStatus, selectedStatus, searchQuery]);
 
-  const handleToggleFile = (fileId: string) => {
+  const handleToggleFile = (fileId: string, shiftKey = false) => {
     setSelectedFiles(prev => {
       const next = new Set(prev);
+      const anchorId = selectionAnchorFileId.current;
+      if (shiftKey && anchorId && prev.has(anchorId)) {
+        const anchorIndex = filteredFiles.findIndex((file: any) => file.id === anchorId);
+        const targetIndex = filteredFiles.findIndex((file: any) => file.id === fileId);
+        if (anchorIndex >= 0 && targetIndex >= 0) {
+          const start = Math.min(anchorIndex, targetIndex);
+          const end = Math.max(anchorIndex, targetIndex);
+          filteredFiles.slice(start, end + 1).forEach((file: any) => next.add(file.id));
+          return next;
+        }
+      }
+
       if (next.has(fileId)) {
         next.delete(fileId);
       } else {
         next.add(fileId);
       }
+      selectionAnchorFileId.current = fileId;
       return next;
     });
   };
@@ -477,8 +491,10 @@ export function Files() {
   const handleToggleAll = () => {
     if (selectedFiles.size === filteredFiles.length) {
       setSelectedFiles(new Set());
+      selectionAnchorFileId.current = null;
     } else {
       setSelectedFiles(new Set(filteredFiles.map(f => f.id)));
+      selectionAnchorFileId.current = filteredFiles[0]?.id || null;
     }
   };
 
@@ -983,9 +999,9 @@ export function Files() {
                               (e.target as HTMLElement).closest('button')) {
                             return;
                           }
-                          handleToggleFile(file.id);
+                          handleToggleFile(file.id, e.shiftKey);
                         }}
-                        className={`px-4 py-3 flex items-center gap-2 transition-all cursor-pointer ${
+                        className={`px-4 py-3 flex items-center gap-2 transition-all cursor-pointer select-none ${
                           selectedFiles.has(file.id) ? 'bg-white/5' : 'hover:bg-white/5'
                         }`}
                       >
@@ -994,7 +1010,7 @@ export function Files() {
                           <input
                             type="checkbox"
                             checked={selectedFiles.has(file.id)}
-                            onChange={() => handleToggleFile(file.id)}
+                            onChange={(event) => handleToggleFile(file.id, (event.nativeEvent as MouseEvent).shiftKey)}
                             className="w-4 h-4 rounded"
                             style={{ accentColor: '#74c69d' }}
                           />

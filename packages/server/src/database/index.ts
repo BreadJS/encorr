@@ -120,6 +120,7 @@ export class EncorrDatabase {
     // An assigned/processing job without a worker can never make progress.
     // Older cancellation handling could leave these rows behind indefinitely.
     this.reconcileOrphanedActiveJobs();
+    this.reconcileInterruptedStorageOperations();
 
     // Seed built-in presets
     this.seedBuiltinPresets();
@@ -140,6 +141,19 @@ export class EncorrDatabase {
     });
     cancelOrphans(orphanedJobs);
     this.logger.warn(`[RECOVERY] Cancelled ${orphanedJobs.length} active job(s) without an assigned node`);
+  }
+
+  private reconcileInterruptedStorageOperations(): void {
+    const result = this.db.prepare(`
+      UPDATE storage_reclaims
+      SET progress = 100, current_action = 'Backup removal interrupted',
+        error_message = 'The server stopped before the node confirmed deletion. Retry the removal.',
+        completed_at = ?
+      WHERE status = 'backup_retained' AND progress < 100 AND error_message IS NULL
+    `).run(Math.floor(Date.now() / 1000));
+    if (result.changes > 0) {
+      this.logger.warn(`[RECOVERY] Marked ${result.changes} interrupted backup removal(s) as retryable`);
+    }
   }
 
   /**

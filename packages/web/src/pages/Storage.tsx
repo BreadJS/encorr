@@ -84,7 +84,8 @@ export function Storage() {
   const [selectedBackups, setSelectedBackups] = useState<Set<string>>(new Set());
   const [showCleanupDialog, setShowCleanupDialog] = useState(false);
   const [cleanupConfirmed, setCleanupConfirmed] = useState(false);
-  const [cleanupNotice, setCleanupNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [cleanupNotice, setCleanupNotice] = useState<{ type: 'success' | 'progress' | 'error'; message: string } | null>(null);
+  const [cleanupBatch, setCleanupBatch] = useState<{ ids: string[]; queueFailures: string[] } | null>(null);
   const query = useQuery({
     queryKey: ['storage-reclaims'],
     queryFn: () => api.getStorageReclaims(500),
@@ -102,6 +103,43 @@ export function Storage() {
     const retainedIds = new Set(removableRecords.map(record => record.id));
     setSelectedBackups(previous => new Set(Array.from(previous).filter(id => retainedIds.has(id))));
   }, [removableRecords]);
+
+  useEffect(() => {
+    if (!cleanupBatch || cleanupBatch.ids.length === 0) return;
+    const batchRecords = cleanupBatch.ids
+      .map(id => records.find(record => record.id === id))
+      .filter((record): record is NonNullable<typeof record> => Boolean(record));
+    const completed = batchRecords.filter(record => record.status === 'reclaimed').length;
+    const operationFailures = batchRecords.filter(record => record.status === 'failed' || Boolean(record.error_message));
+    const terminal = completed + operationFailures.length;
+    const total = cleanupBatch.ids.length;
+
+    if (terminal < total) {
+      setCleanupNotice({
+        type: 'progress',
+        message: `${completed.toLocaleString()} of ${total.toLocaleString()} backup removals complete · ${(total - terminal).toLocaleString()} still working.`,
+      });
+      return;
+    }
+
+    const failureMessages = [
+      ...cleanupBatch.queueFailures,
+      ...operationFailures.map(record => `${record.filename}: ${record.error_message || 'Removal failed'}`),
+    ];
+    setCleanupNotice(failureMessages.length > 0
+      ? { type: 'error', message: `${completed.toLocaleString()} completed, ${failureMessages.length.toLocaleString()} failed. ${failureMessages[0]}` }
+      : { type: 'success', message: `${completed.toLocaleString()} backup removal${completed === 1 ? '' : 's'} completed. Storage totals are up to date.` });
+    setCleanupBatch(null);
+    void queryClient.invalidateQueries({ queryKey: ['storage-reclaims'] });
+    void queryClient.invalidateQueries({ queryKey: ['stats'] });
+    void queryClient.invalidateQueries({ queryKey: ['files'] });
+  }, [cleanupBatch, queryClient, records]);
+
+  useEffect(() => {
+    if (cleanupNotice?.type !== 'success' || cleanupBatch) return;
+    const timeout = window.setTimeout(() => setCleanupNotice(null), 6000);
+    return () => window.clearTimeout(timeout);
+  }, [cleanupBatch, cleanupNotice]);
 
   const cleanupMutation = useMutation({
     mutationFn: async (items: typeof retainedRecords) => {
@@ -133,9 +171,10 @@ export function Storage() {
       });
       setShowCleanupDialog(false);
       setCleanupConfirmed(false);
-      setCleanupNotice(failures.length > 0
-        ? { type: 'error', message: `${succeeded.length.toLocaleString()} queued, ${failures.length.toLocaleString()} failed. ${failures[0]}` }
-        : { type: 'success', message: `${succeeded.length.toLocaleString()} backup removal${succeeded.length === 1 ? '' : 's'} queued. Storage totals will update as soon as the node confirms deletion.` });
+      setCleanupBatch(succeeded.length > 0 ? { ids: succeeded, queueFailures: failures } : null);
+      setCleanupNotice(succeeded.length > 0
+        ? { type: 'progress', message: `0 of ${succeeded.length.toLocaleString()} backup removals complete · ${succeeded.length.toLocaleString()} still working.` }
+        : { type: 'error', message: `${failures.length.toLocaleString()} backup removals failed to queue. ${failures[0] || ''}` });
       void queryClient.invalidateQueries({ queryKey: ['storage-reclaims'] });
       void queryClient.invalidateQueries({ queryKey: ['jobs'] });
     },
@@ -230,8 +269,8 @@ export function Storage() {
           )}
         </div>
         {cleanupNotice && (
-          <div className={`mx-5 mt-4 flex items-start gap-2 rounded-lg border px-3 py-2 text-sm ${cleanupNotice.type === 'success' ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200' : 'border-red-500/30 bg-red-500/10 text-red-200'}`}>
-            {cleanupNotice.type === 'success' ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" /> : <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />}
+          <div className={`mx-5 mt-4 flex items-start gap-2 rounded-lg border px-3 py-2 text-sm ${cleanupNotice.type === 'success' ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200' : cleanupNotice.type === 'progress' ? 'border-blue-500/30 bg-blue-500/10 text-blue-200' : 'border-red-500/30 bg-red-500/10 text-red-200'}`}>
+            {cleanupNotice.type === 'success' ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" /> : cleanupNotice.type === 'progress' ? <RefreshCw className="mt-0.5 h-4 w-4 shrink-0 animate-spin" /> : <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />}
             <span>{cleanupNotice.message}</span>
           </div>
         )}

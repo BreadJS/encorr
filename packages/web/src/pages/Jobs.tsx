@@ -566,9 +566,15 @@ export function Jobs() {
     queryFn: () => api.getQuickSelectPresets(),
   });
 
+  const defaultQuickSelectId = useMemo(() => (
+    quickSelectPresets.find((preset: any) => preset.id === 'quick-select-h265')
+      || quickSelectPresets.find((preset: any) => preset.name === 'H.265 Quick Select')
+      || quickSelectPresets[0]
+  )?.id || '', [quickSelectPresets]);
+
   useEffect(() => {
-    if (!newJobQuickSelectId && quickSelectPresets.length > 0) setNewJobQuickSelectId(quickSelectPresets[0].id);
-  }, [newJobQuickSelectId, quickSelectPresets]);
+    if (!newJobQuickSelectId && defaultQuickSelectId) setNewJobQuickSelectId(defaultQuickSelectId);
+  }, [defaultQuickSelectId, newJobQuickSelectId]);
 
   const { data: allJobs = [], isLoading, isFetching: jobsFetching, refetch: refetchJobs } = useQuery({
     queryKey: ['jobs'],
@@ -727,7 +733,7 @@ export function Jobs() {
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => { setStartResult(null); setAutoReplaceConfirmed(false); setAllowGpuRouting(true); setAllowCpuRouting(false); setShowStartJob(true); }}
+            onClick={() => { setStartResult(null); setAutoReplaceConfirmed(false); setAllowGpuRouting(true); setAllowCpuRouting(false); setNewJobQuickSelectId(defaultQuickSelectId); setShowStartJob(true); }}
             className="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-[#74c69d] px-4 text-xs font-semibold text-[#102019] hover:bg-[#8bd5ad]"
           >
             <Play className="h-3.5 w-3.5 fill-current" /> Start job

@@ -329,6 +329,17 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     cancelComparisonPreviews();
   });
 
+  const scheduleBackupCleanupConfirmationTimeout = (libraryFileId: string, operationId: string) => {
+    const timeout = setTimeout(() => {
+      const operation = db.getOpenStorageBackup(libraryFileId);
+      if (!operation || operation.id !== operationId || operation.status !== 'backup_retained') return;
+      db.failStorageBackupCleanup(operationId, 'The node did not confirm backup deletion within 30 seconds. Retry the removal.');
+      logger.warn(`[FILE_REPLACE] Backup cleanup ${operationId} timed out waiting for node confirmation`);
+      wsServer.scheduleWebUpdates();
+    }, 30_000);
+    timeout.unref();
+  };
+
   // ========================================================================
   // Config (for frontend)
   // ========================================================================
@@ -1336,6 +1347,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
         return sendError('Could not send backup cleanup command to node');
       }
 
+      scheduleBackupCleanupConfirmationTimeout(id, trackedBackup.id);
       wsServer.scheduleWebUpdates();
       return sendSuccess({
         message: 'Backup removal added to Jobs',
@@ -1483,6 +1495,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       return sendError('Could not send backup cleanup command to node');
     }
 
+    scheduleBackupCleanupConfirmationTimeout(id, reclaim.id);
     logger.info(`File cleanup backup command sent for file ${id} to node ${node.id}`);
 
     return sendSuccess({
@@ -1536,6 +1549,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     const activeAnalysisFileIds = new Set<string>();
     const activeTranscodeFileIds = new Set<string>();
     const activeJobs = [
+      ...db.getAllJobs({ status: 'queued' }),
       ...db.getAllJobs({ status: 'assigned' }),
       ...db.getAllJobs({ status: 'processing' }),
     ];
@@ -1565,10 +1579,14 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     };
 
     allFiles = allFiles.map((file: any) => {
+      const latestReclaim = latestStorageReclaims.get(file.id);
       let displayStatus = file.status;
       if (activeTranscodeFileIds.has(file.id)) {
-        displayStatus = 'pending';
+        displayStatus = 'processing';
       } else if (activeAnalysisFileIds.has(file.id)) {
+        displayStatus = 'processing';
+      } else if (latestReclaim?.status === 'pending'
+        || (latestReclaim?.status === 'backup_retained' && Number(latestReclaim.progress) < 100 && !latestReclaim.error_message)) {
         displayStatus = 'processing';
       } else if (file.status === 'completed' || file.status === 'backup_replaced') {
         displayStatus = 'completed';
@@ -1594,7 +1612,6 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       else if (displayStatus === 'cancelled') statusCounts.cancelled++;
 
       const latestReport = latestTranscodeReports.get(file.id);
-      const latestReclaim = latestStorageReclaims.get(file.id);
       const outputIsAvailable = latestReport?.output_available !== 0
         && typeof latestReport?.output_path === 'string'
         && latestReport.output_path.trim().length > 0;
@@ -1960,15 +1977,16 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
 
       // Check if this is a library file and get metadata
       let metadata = null;
+      let libraryFileId: string | null = null;
       if (file?.folder_mapping_id) {
         const mapping = db.getFolderMappingById(file.folder_mapping_id);
         if (mapping?.server_path?.startsWith('library:')) {
-          // Construct the full filepath
-          const fullPath = mapping.node_path && !mapping.node_path.includes('.mkv') && !mapping.node_path.includes('.mp4')
-            ? `${mapping.node_path}/${file.relative_path}`
-            : mapping.node_path || file.relative_path;
-
-          const libFile = db.getLibraryFileByFilepath(fullPath);
+          const libraryId = mapping.server_path.replace('library:', '');
+          const library = db.getLibraryById(libraryId);
+          const libFile = library
+            ? db.getLibraryFileByRelativePath(libraryId, library.path, file.relative_path)
+            : undefined;
+          libraryFileId = libFile?.id || null;
           if (libFile?.metadata) {
             metadata = libFile.metadata;
           }
@@ -1983,6 +2001,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
 
       return {
         ...job,
+        library_file_id: libraryFileId,
         file_name: file?.relative_path,
         file_size: file?.original_size,
         preset_name: quickSelect ? `Quick Select · ${quickSelect.name}` : preset?.name,

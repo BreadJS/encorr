@@ -200,9 +200,12 @@ export function SmartTranscodeDialog({
 
   // Initialize vendor-specific preset defaults
   const initializeVendorPresets = () => {
-    // Try to use the first Quick Select Preset if available
+    // Prefer the built-in H.265 route; fall back to the first available route.
     if (quickSelectPresets.length > 0) {
-      applyQuickSelectPreset(quickSelectPresets[0]);
+      const defaultQuickSelect = quickSelectPresets.find((preset: any) => preset.id === 'quick-select-h265')
+        || quickSelectPresets.find((preset: any) => preset.name === 'H.265 Quick Select')
+        || quickSelectPresets[0];
+      applyQuickSelectPreset(defaultQuickSelect);
       return;
     }
 
@@ -239,13 +242,13 @@ export function SmartTranscodeDialog({
     setSelectedQuickSelectPresetId(qsPreset.id);
   };
 
-  // Auto-apply first Quick Select Preset when loaded
+  // Apply the H.265 default whenever a new transcode dialog is opened.
   useEffect(() => {
-    if (quickSelectPresets.length > 0 && !selectedQuickSelectPresetId) {
+    if (open && quickSelectPresets.length > 0) {
       initializeVendorPresets();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [quickSelectPresets]);
+  }, [open, quickSelectPresets]);
 
   // Update selected preset when mode changes
   const handleModeChange = (newMode: TranscodeMode) => {

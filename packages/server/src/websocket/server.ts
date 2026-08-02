@@ -1272,6 +1272,7 @@ export class EncorrWebSocketServer {
 
       return {
         ...job,
+        library_file_id: this.resolveLibraryFileId(job.file_id),
         file_name: file?.relative_path,
         file_size: file?.original_size,
         preset_name: quickSelect ? `Quick Select · ${quickSelect.name}` : preset?.name,
