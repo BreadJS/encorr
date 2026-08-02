@@ -9,6 +9,7 @@ import { Presets } from './pages/Presets';
 import { Settings } from './pages/Settings';
 import { Library } from './pages/Library';
 import { Storage } from './pages/Storage';
+import { FileCompare } from './pages/FileCompare';
 
 function App() {
   return (
@@ -19,6 +20,7 @@ function App() {
         <Route path="/nodes" element={<Nodes />} />
         <Route path="/mappings" element={<Mappings />} />
         <Route path="/files" element={<Files />} />
+        <Route path="/files/:id/compare" element={<FileCompare />} />
         <Route path="/storage" element={<Storage />} />
         <Route path="/library" element={<Library />} />
         <Route path="/jobs" element={<Jobs />} />

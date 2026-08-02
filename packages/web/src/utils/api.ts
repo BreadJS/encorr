@@ -300,6 +300,16 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(data),
     }),
+  fullReset: (confirmation: string) =>
+    request<{
+      reset: boolean;
+      cancelled_jobs: number;
+      disconnected_workers: number;
+      data_directory: string;
+    }>('/settings/full-reset', {
+      method: 'POST',
+      body: JSON.stringify({ confirmation }),
+    }),
 
   // Stats
   getStats: () => request<any>('/stats'),
@@ -375,6 +385,15 @@ export const api = {
     request<any>(`/library-files/${fileId}/cleanup-backup`, {
       method: 'POST',
     }),
+  getComparisonInfo: (fileId: string) => request<{
+    id: string;
+    filename: string;
+    source_kind: 'pending_output' | 'retained_backup';
+    original: { size: number; codec: string | null; width: number | null; height: number | null; duration: number | null; container: string; stream_url: string };
+    transcoded: { size: number; codec: string | null; width: number | null; height: number | null; duration: number | null; container: string; stream_url: string };
+  }>(`/library-files/${fileId}/compare`),
+  getComparisonStreamUrl: (fileId: string, variant: 'original' | 'transcoded') =>
+    `${getBackendUrl()}/library-files/${encodeURIComponent(fileId)}/compare/${variant}`,
 
   // Logs
   getLogs: (params?: { level?: string; category?: string; limit?: number }) =>

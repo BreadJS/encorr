@@ -105,7 +105,8 @@ export function Layout({ children }: LayoutProps) {
         <nav className="space-y-1 p-2">
           {navItems.map((item) => {
             const Icon = item.icon;
-            const isActive = location.pathname === item.path;
+            const isActive = location.pathname === item.path
+              || (item.path === '/files' && location.pathname.startsWith('/files/'));
             const showScanSpinner = item.path === '/library' && isLibraryScanning;
 
             return (

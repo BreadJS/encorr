@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify';
+import { createReadStream } from 'fs';
 import { readdir, stat } from 'fs/promises';
-import { join } from 'path';
+import { extname, join } from 'path';
 import type { EncorrDatabase } from '../database';
 import type { EncorrWebSocketServer } from '../websocket/server';
 import type { Logger } from 'winston';
@@ -47,12 +48,60 @@ function formatBytes(bytes: number): string {
   return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
 }
 
+function videoContentType(path: string): string {
+  const mediaPath = path.toLowerCase().endsWith('.org') ? path.slice(0, -4) : path;
+  const extension = extname(mediaPath).toLowerCase();
+  if (extension === '.mp4' || extension === '.m4v') return 'video/mp4';
+  if (extension === '.webm') return 'video/webm';
+  if (extension === '.mov') return 'video/quicktime';
+  if (extension === '.avi') return 'video/x-msvideo';
+  if (extension === '.mkv') return 'video/x-matroska';
+  return 'application/octet-stream';
+}
+
 // ============================================================================
 // API Routes
 // ============================================================================
 
 export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions) {
   const { db, wsServer, logger } = options;
+
+  const resolveComparisonSources = (libraryFileId: string) => {
+    const file = db.getLibraryFileById(libraryFileId);
+    if (!file) return { ok: false, error: 'File not found' } as const;
+    const report = db.getJobReportsByFileId(libraryFileId, 100)
+      .filter((item: any) => item.job_type === 'transcode' && item.status === 'completed')
+      .sort((a: any, b: any) => (b.completed_at || b.created_at || 0) - (a.completed_at || a.created_at || 0))[0];
+    const retainedBackup = db.getOpenStorageBackup(libraryFileId);
+    if (retainedBackup?.status === 'backup_retained' && retainedBackup.original_path) {
+      const recordedOriginalPath = String(retainedBackup.original_path);
+      const backupPath = recordedOriginalPath.endsWith('.org')
+        ? recordedOriginalPath
+        : `${recordedOriginalPath}.org`;
+      const installedPath = recordedOriginalPath.endsWith('.org')
+        ? recordedOriginalPath.slice(0, -4)
+        : recordedOriginalPath;
+      return {
+        ok: true,
+        sourceKind: 'retained_backup',
+        file,
+        report: report || null,
+        originalPath: backupPath,
+        transcodedPath: installedPath,
+      } as const;
+    }
+    if (!report || report.output_available === 0 || !report.output_path) {
+      return { ok: false, error: 'No available transcoded output exists for comparison' } as const;
+    }
+    return {
+      ok: true,
+      sourceKind: 'pending_output',
+      file,
+      report,
+      originalPath: file.filepath,
+      transcodedPath: report.output_path as string,
+    } as const;
+  };
 
   // ========================================================================
   // Config (for frontend)
@@ -576,6 +625,140 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     return sendSuccess({ deleted: true });
   });
 
+  // Quality comparison metadata and seekable media streams. Paths are never
+  // accepted from the client; both sources must resolve from trusted DB rows.
+  fastify.get('/library-files/:id/compare', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const sources = resolveComparisonSources(id);
+    if (!sources.ok) {
+      reply.status(404);
+      return sendError(sources.error);
+    }
+
+    try {
+      const [originalStat, transcodedStat] = await Promise.all([
+        stat(sources.originalPath),
+        stat(sources.transcodedPath),
+      ]);
+      if (!originalStat.isFile() || !transcodedStat.isFile()) throw new Error('A comparison source is not a file');
+
+      let config: any = {};
+      try { config = sources.report?.config ? JSON.parse(sources.report.config) : {}; } catch { /* optional report metadata */ }
+      const originalMediaPath = sources.originalPath.endsWith('.org') ? sources.originalPath.slice(0, -4) : sources.originalPath;
+      const originalResolution = sources.report?.original_resolution?.split('x').map(Number) || [];
+      const outputResolution = sources.report?.output_resolution?.split('x').map(Number) || [];
+      const usesRetainedBackup = sources.sourceKind === 'retained_backup';
+      return sendSuccess({
+        id,
+        filename: sources.file.filename,
+        source_kind: sources.sourceKind,
+        original: {
+          size: originalStat.size,
+          codec: usesRetainedBackup
+            ? (sources.report?.original_codec || null)
+            : (sources.file.metadata?.video_codec || null),
+          width: usesRetainedBackup
+            ? (originalResolution[0] || null)
+            : (sources.file.metadata?.width || null),
+          height: usesRetainedBackup
+            ? (originalResolution[1] || null)
+            : (sources.file.metadata?.height || null),
+          duration: sources.file.metadata?.duration || sources.file.duration || null,
+          container: extname(originalMediaPath).slice(1).toLowerCase(),
+          stream_url: `/library-files/${id}/compare/original`,
+        },
+        transcoded: {
+          size: transcodedStat.size,
+          codec: usesRetainedBackup
+            ? (sources.file.metadata?.video_codec || config.video_codec || sources.report?.output_codec || null)
+            : (config.video_codec || sources.report?.output_codec || null),
+          width: usesRetainedBackup
+            ? (sources.file.metadata?.width || outputResolution[0] || config.max_width || null)
+            : (outputResolution[0] || config.max_width || null),
+          height: usesRetainedBackup
+            ? (sources.file.metadata?.height || outputResolution[1] || config.max_height || null)
+            : (outputResolution[1] || config.max_height || null),
+          duration: sources.file.metadata?.duration || sources.file.duration || null,
+          container: extname(sources.transcodedPath).slice(1).toLowerCase(),
+          stream_url: `/library-files/${id}/compare/transcoded`,
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Comparison media is unavailable';
+      logger.warn(`[COMPARE] Could not open sources for ${id}: ${message}`);
+      reply.status(404);
+      return sendError(`Comparison media is unavailable: ${message}`);
+    }
+  });
+
+  fastify.get('/library-files/:id/compare/:variant', async (request, reply) => {
+    const { id, variant } = request.params as { id: string; variant: 'original' | 'transcoded' };
+    if (variant !== 'original' && variant !== 'transcoded') {
+      reply.status(400);
+      return sendError('Invalid comparison stream');
+    }
+    const sources = resolveComparisonSources(id);
+    if (!sources.ok) {
+      reply.status(404);
+      return sendError(sources.error);
+    }
+
+    const path = variant === 'original' ? sources.originalPath : sources.transcodedPath;
+    try {
+      const fileStat = await stat(path);
+      if (!fileStat.isFile()) throw new Error('Source is not a file');
+      const total = fileStat.size;
+      const range = request.headers.range;
+      const commonHeaders = {
+        'Accept-Ranges': 'bytes',
+        'Content-Type': videoContentType(path),
+        'Cache-Control': 'private, no-store',
+        'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(sources.file.filename)}`,
+      };
+
+      if (!range) {
+        reply.headers({ ...commonHeaders, 'Content-Length': String(total) });
+        return reply.send(createReadStream(path));
+      }
+
+      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+      if (!match) {
+        reply.status(416).header('Content-Range', `bytes */${total}`);
+        return reply.send();
+      }
+      let requestedStart: number;
+      let requestedEnd: number;
+      if (!match[1] && match[2]) {
+        const suffixLength = Number(match[2]);
+        requestedStart = Math.max(0, total - suffixLength);
+        requestedEnd = total - 1;
+      } else {
+        requestedStart = Number(match[1]);
+        requestedEnd = match[2]
+          ? Number(match[2])
+          : total - 1;
+      }
+      const start = Math.max(0, requestedStart);
+      const end = Math.min(total - 1, requestedEnd);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= total) {
+        reply.status(416).header('Content-Range', `bytes */${total}`);
+        return reply.send();
+      }
+
+      reply.code(206).headers({
+        ...commonHeaders,
+        'Content-Range': `bytes ${start}-${end}/${total}`,
+        'Content-Length': String(end - start + 1),
+      });
+      return reply.send(createReadStream(path, { start, end }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Stream unavailable';
+      logger.warn(`[COMPARE] ${variant} stream failed for ${id}: ${message}`);
+      reply.status(404);
+      return sendError(`${variant === 'original' ? 'Original' : 'Transcoded'} stream is unavailable`);
+    }
+  });
+
   // Replace original file with transcoded version
   fastify.post('/library-files/:id/replace', async (request, reply) => {
     const { id } = request.params as { id: string };
@@ -673,11 +856,14 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       targetPath = `${mapping?.node_path || library.path}/${fileEntry.relative_path}`;
     }
 
-    // Older reports did not persist output_path. Their destination is still
-    // deterministic: transcodes are written beside the source as *_enc.mkv.
-    const outputPath = job?.output_path
-      || latestReport.output_path
-      || targetPath.replace(/\.[^.]+$/, '_enc.mkv');
+    const outputPath = job?.output_path || latestReport.output_path;
+    if (!outputPath) {
+      const outputError = 'Transcoded output path was not recorded; transcode the file again';
+      db.markLatestTranscodeOutputUnavailable(id, outputError);
+      wsServer.scheduleWebUpdates();
+      reply.status(409);
+      return sendError(outputError);
+    }
 
     logger.info(`[FILE_REPLACE] Target path for node ${node.id}: ${targetPath}`);
 
@@ -817,11 +1003,14 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       targetPath = `${mapping?.node_path || library.path}/${fileEntry.relative_path}`;
     }
 
-    // Older reports did not persist output_path. Their destination is still
-    // deterministic: transcodes are written beside the source as *_enc.mkv.
-    const outputPath = job?.output_path
-      || latestReport.output_path
-      || targetPath.replace(/\.[^.]+$/, '_enc.mkv');
+    const outputPath = job?.output_path || latestReport.output_path;
+    if (!outputPath) {
+      const outputError = 'Transcoded output path was not recorded; transcode the file again';
+      db.markLatestTranscodeOutputUnavailable(id, outputError);
+      wsServer.scheduleWebUpdates();
+      reply.status(409);
+      return sendError(outputError);
+    }
 
     logger.info(`[FILE_REPLACE] Target path for node ${node.id}: ${targetPath}`);
 
@@ -874,9 +1063,53 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       return sendError('File not found');
     }
 
-    if (file.status !== 'backup_replaced') {
+    const trackedBackup = db.getOpenStorageBackup(id);
+    if (file.status !== 'backup_replaced' && trackedBackup?.status !== 'backup_retained') {
       reply.status(400);
       return sendError('File does not have a backup to clean up');
+    }
+
+    // The storage ledger remains after completed jobs are cleared and is the
+    // authoritative source for retained-backup cleanup.
+    if (trackedBackup?.status === 'backup_retained') {
+      const node = trackedBackup.node_id ? db.getNodeById(trackedBackup.node_id) : null;
+      if (!node) {
+        reply.status(400);
+        return sendError('Node that retains this backup is not available');
+      }
+      if (!wsServer.isNodeConnected(node.id)) {
+        reply.status(400);
+        return sendError('Node is not connected. Please ensure the node is online.');
+      }
+      if (!trackedBackup.original_path) {
+        reply.status(400);
+        return sendError('The retained backup path was not recorded');
+      }
+
+      const targetPath = String(trackedBackup.original_path).endsWith('.org')
+        ? trackedBackup.original_path
+        : `${trackedBackup.original_path}.org`;
+      db.beginStorageBackupCleanup(trackedBackup.id);
+      const sent = wsServer.sendFileReplaceCommand(node.id, {
+        operation_id: trackedBackup.id,
+        file_id: id,
+        operation: 'cleanup_backup',
+        source_path: '',
+        target_path: targetPath,
+        original_filename: file.filename,
+      });
+      if (!sent) {
+        db.failStorageBackupCleanup(trackedBackup.id, 'Node disconnected before backup removal was sent');
+        reply.status(503);
+        return sendError('Could not send backup cleanup command to node');
+      }
+
+      wsServer.scheduleWebUpdates();
+      return sendSuccess({
+        message: 'Backup removal added to Jobs',
+        node_id: node.id,
+        reclaim_id: trackedBackup.id,
+      });
     }
 
     // Get the latest completed transcode report for this file
@@ -1106,7 +1339,12 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       } else {
         const latestReport = latestTranscodeReports.get(file.id);
         if (latestReport) {
-          displayStatus = latestReport.status === 'completed' ? 'transcoded' : latestReport.status;
+          const outputIsAvailable = latestReport.output_available !== 0
+            && typeof latestReport.output_path === 'string'
+            && latestReport.output_path.trim().length > 0;
+          displayStatus = latestReport.status === 'completed'
+            ? (outputIsAvailable ? 'transcoded' : 'failed')
+            : latestReport.status;
         } else if (file.status === 'analyzed' || file.status === 'imported') {
           displayStatus = 'ready';
         }
@@ -1119,7 +1357,18 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       else if (displayStatus === 'failed') statusCounts.failed++;
       else if (displayStatus === 'cancelled') statusCounts.cancelled++;
 
-      return { ...file, display_status: displayStatus };
+      const latestReport = latestTranscodeReports.get(file.id);
+      const outputIsAvailable = latestReport?.output_available !== 0
+        && typeof latestReport?.output_path === 'string'
+        && latestReport.output_path.trim().length > 0;
+      return {
+        ...file,
+        display_status: displayStatus,
+        display_error: latestReport && !outputIsAvailable
+          ? (latestReport.error_message || 'Transcoded output is no longer available')
+          : file.error_message,
+        transcode_output_available: latestReport ? outputIsAvailable : undefined,
+      };
     });
 
     if (status && status !== 'all') {
@@ -1518,8 +1767,9 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     });
 
     const fileOperations = db.getStorageReclaims(250).map((operation: any) => {
-      const cleanupInProgress = operation.status === 'backup_retained' && Number(operation.progress) < 100;
-      const mappedStatus = operation.status === 'pending' || cleanupInProgress
+      const cleanupFailed = operation.status === 'backup_retained' && Boolean(operation.error_message);
+      const cleanupInProgress = operation.status === 'backup_retained' && Number(operation.progress) < 100 && !cleanupFailed;
+      const mappedStatus = cleanupFailed ? 'failed' : operation.status === 'pending' || cleanupInProgress
         ? 'processing'
         : operation.status === 'failed' ? 'failed' : 'completed';
       return {
@@ -1527,7 +1777,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
         operation_id: operation.id,
         file_id: operation.library_file_id,
         file_operation: true,
-        operation: cleanupInProgress ? 'cleanup_backup' : operation.operation,
+        operation: cleanupInProgress || cleanupFailed ? 'cleanup_backup' : operation.operation,
         job_type: 'file_operation',
         status: mappedStatus,
         progress: Number(operation.progress || 0),
@@ -2263,6 +2513,31 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     logger.info('Settings updated');
 
     return sendSuccess(null, 'Settings updated');
+  });
+
+  fastify.post('/settings/full-reset', async (request, reply) => {
+    const { confirmation } = (request.body || {}) as { confirmation?: string };
+    if (confirmation !== 'RESET ENCORR') {
+      reply.status(400);
+      return sendError('Type RESET ENCORR exactly to confirm the full reset');
+    }
+
+    logger.warn('[RESET] Full system reset requested');
+    const workers = wsServer.prepareFullReset();
+    const dataRoot = db.fullReset();
+
+    // Keep browser clients connected to the same server process and replace
+    // every cached collection with the newly initialized empty state.
+    wsServer.broadcastNodesUpdate();
+    wsServer.broadcastJobsUpdate();
+    logger.warn('[RESET] Full system reset completed');
+
+    return sendSuccess({
+      reset: true,
+      cancelled_jobs: workers.cancelledJobs,
+      disconnected_workers: workers.disconnectedWorkers,
+      data_directory: dataRoot,
+    }, 'Encorr was reset and reinitialized');
   });
 
   // ========================================================================

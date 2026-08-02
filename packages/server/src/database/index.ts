@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { v4 as uuidv4 } from 'uuid';
-import { readFileSync } from 'fs';
-import { resolve } from 'path';
+import { mkdirSync, readFileSync, rmSync } from 'fs';
+import { basename, dirname, resolve, sep } from 'path';
 import type {
   Logger
 } from 'winston';
@@ -46,6 +46,8 @@ export interface DatabaseOptions {
 export class EncorrDatabase {
   private db: Database.Database;
   private logger: Logger;
+  private readonly databasePath: string;
+  private readonly isMemoryDatabase: boolean;
 
   constructor(options: DatabaseOptions = {}) {
     const dbPath = options.memory
@@ -54,13 +56,47 @@ export class EncorrDatabase {
         ? expandPath(options.path)
         : './.encorr/server/encorr.db';
 
-    this.db = new Database(dbPath);
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('foreign_keys = ON');
-    this.db.pragma('synchronous = NORMAL');
-
+    this.isMemoryDatabase = options.memory === true;
+    this.databasePath = this.isMemoryDatabase ? ':memory:' : resolve(dbPath);
+    this.db = this.openDatabase();
     // Initialize logger
     this.logger = options.logger || createLogger();
+  }
+
+  private openDatabase(): Database.Database {
+    const database = new Database(this.databasePath);
+    database.pragma('journal_mode = WAL');
+    database.pragma('foreign_keys = ON');
+    database.pragma('synchronous = NORMAL');
+    return database;
+  }
+
+  private getDataRoot(): string {
+    if (this.isMemoryDatabase) throw new Error('Cannot reset an in-memory database directory');
+    let current = dirname(this.databasePath);
+    while (current !== dirname(current)) {
+      if (basename(current) === '.encorr') return current;
+      current = dirname(current);
+    }
+    throw new Error(`Refusing full reset: database is not inside a .encorr directory (${this.databasePath})`);
+  }
+
+  fullReset(): string {
+    const dataRoot = this.getDataRoot();
+    const resolvedRoot = resolve(dataRoot);
+    const resolvedDatabase = resolve(this.databasePath);
+    if (basename(resolvedRoot) !== '.encorr'
+      || !resolvedDatabase.startsWith(`${resolvedRoot}${sep}`)) {
+      throw new Error('Refusing full reset because the .encorr deletion target could not be validated');
+    }
+
+    this.db.close();
+    rmSync(resolvedRoot, { recursive: true, force: true });
+    mkdirSync(dirname(resolvedDatabase), { recursive: true });
+    this.db = this.openDatabase();
+    this.initialize();
+    this.logger.warn(`[RESET] Removed and reinitialized ${resolvedRoot}`);
+    return resolvedRoot;
   }
 
   // ========================================================================
@@ -155,6 +191,7 @@ export class EncorrDatabase {
           original_size INTEGER,
           output_size INTEGER,
           output_path TEXT,
+          output_available BOOLEAN NOT NULL DEFAULT 1,
           original_codec TEXT,
           output_codec TEXT,
           original_resolution TEXT,
@@ -187,6 +224,32 @@ export class EncorrDatabase {
         WHERE job_type = 'transcode' AND output_path IS NULL
       `);
     }
+    if (!reportColumns.some(column => column.name === 'output_available')) {
+      this.logger.info('[MIGRATION] Adding output_available column to job_reports table');
+      this.db.exec('ALTER TABLE job_reports ADD COLUMN output_available BOOLEAN NOT NULL DEFAULT 1');
+      // A previous replacement attempt already proved these historical
+      // outputs do not exist. Do not keep advertising them as installable.
+      this.db.exec(`
+        UPDATE job_reports
+        SET output_available = 0,
+            error_message = COALESCE(error_message, 'Transcoded output is no longer available')
+        WHERE job_type = 'transcode' AND job_id IN (
+          SELECT job_id FROM storage_reclaims
+          WHERE status = 'failed'
+            AND LOWER(COALESCE(error_message, '')) LIKE 'source file not found:%'
+        )
+      `);
+    }
+    // Legacy reports created before output_path was persisted cannot prove an
+    // installable output exists. Guessed filenames caused ghost Transcoded
+    // counts and unsafe replacement attempts, so treat them as unavailable.
+    this.db.exec(`
+      UPDATE job_reports
+      SET output_available = 0,
+          error_message = COALESCE(error_message, 'Transcoded output path was not recorded; transcode the file again')
+      WHERE job_type = 'transcode' AND status = 'completed'
+        AND (output_path IS NULL OR TRIM(output_path) = '')
+    `);
 
     const reclaimColumns = this.db.pragma('table_info(storage_reclaims)') as { name: string }[];
     const reclaimMigrations: Array<[string, string]> = [
@@ -2189,6 +2252,24 @@ export class EncorrDatabase {
     );
   }
 
+  beginStorageBackupCleanup(operationId: string): void {
+    this.db.prepare(`
+      UPDATE storage_reclaims
+      SET progress = 0, current_action = 'Waiting for node', error_message = NULL,
+        bytes_processed = 0, speed_mbps = 0, started_at = NULL, completed_at = NULL
+      WHERE id = ? AND status = 'backup_retained'
+    `).run(operationId);
+  }
+
+  failStorageBackupCleanup(operationId: string, errorMessage: string): void {
+    this.db.prepare(`
+      UPDATE storage_reclaims
+      SET progress = 100, current_action = 'Backup removal failed',
+        error_message = ?, completed_at = ?
+      WHERE id = ? AND status = 'backup_retained'
+    `).run(errorMessage, Math.floor(Date.now() / 1000), operationId);
+  }
+
   hasOpenStorageBackup(libraryFileId: string): boolean {
     const row = this.db.prepare(`
       SELECT 1 FROM storage_reclaims
@@ -2210,6 +2291,20 @@ export class EncorrDatabase {
         ORDER BY created_at DESC LIMIT 1
       )
     `).run(Math.floor(Date.now() / 1000), errorMessage, libraryFileId, operation);
+  }
+
+  markLatestTranscodeOutputUnavailable(libraryFileId: string, errorMessage: string): void {
+    this.db.prepare(`
+      UPDATE job_reports
+      SET output_available = 0, error_message = ?
+      WHERE id = (
+        SELECT id FROM job_reports
+        WHERE (library_file_id = ? OR file_id = ?)
+          AND job_type = 'transcode' AND status = 'completed'
+        ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC
+        LIMIT 1
+      )
+    `).run(errorMessage, libraryFileId, libraryFileId);
   }
 
   getStorageReclaimStats(): {
@@ -2355,6 +2450,7 @@ export class EncorrDatabase {
     original_size?: number | null;
     output_size?: number | null;
     output_path?: string | null;
+    output_available?: boolean;
     original_codec?: string | null;
     output_codec?: string | null;
     original_resolution?: string | null;
@@ -2371,10 +2467,10 @@ export class EncorrDatabase {
       INSERT INTO job_reports (
         id, job_id, file_id, library_file_id, node_id, node_name,
         job_type, preset_id, preset_name, status, error_message,
-        ffmpeg_logs, node_logs, original_size, output_size, output_path,
+        ffmpeg_logs, node_logs, original_size, output_size, output_path, output_available,
         original_codec, output_codec, original_resolution, output_resolution,
         duration_seconds, avg_fps, started_at, completed_at, config, metadata
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id, report.job_id, report.file_id,
       report.library_file_id ?? null, report.node_id ?? null, report.node_name ?? null,
@@ -2383,6 +2479,7 @@ export class EncorrDatabase {
       report.ffmpeg_logs ?? null, report.node_logs ?? null,
       report.original_size ?? null, report.output_size ?? null,
       report.output_path ?? null,
+      report.output_available === false ? 0 : 1,
       report.original_codec ?? null, report.output_codec ?? null,
       report.original_resolution ?? null, report.output_resolution ?? null,
       report.duration_seconds ?? null, report.avg_fps ?? null,

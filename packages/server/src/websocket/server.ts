@@ -1052,7 +1052,13 @@ export class EncorrWebSocketServer {
     } else {
       this.logger.error(`[FILE_REPLACE_RESULT] File ${payload.file_id} ${payload.operation} failed: ${payload.error}`);
       if (payload.operation === 'replace' || payload.operation === 'backup_replace') {
-        this.db.failStorageReplacement(payload.file_id, payload.operation, payload.error || 'Replacement failed');
+        const replacementError = payload.error || 'Replacement failed';
+        this.db.failStorageReplacement(payload.file_id, payload.operation, replacementError);
+        if (/source file not found/i.test(replacementError)) {
+          this.db.markLatestTranscodeOutputUnavailable(payload.file_id, replacementError);
+        }
+      } else if (payload.operation === 'cleanup_backup') {
+        this.db.failStorageBackupCleanup(payload.operation_id, payload.error || 'Backup removal failed');
       }
     }
 
@@ -1285,8 +1291,9 @@ export class EncorrWebSocketServer {
     });
 
     const fileOperations = this.db.getStorageReclaims(250).map((operation: any) => {
-      const cleanupInProgress = operation.status === 'backup_retained' && Number(operation.progress) < 100;
-      const status = operation.status === 'pending' || cleanupInProgress
+      const cleanupFailed = operation.status === 'backup_retained' && Boolean(operation.error_message);
+      const cleanupInProgress = operation.status === 'backup_retained' && Number(operation.progress) < 100 && !cleanupFailed;
+      const status = cleanupFailed ? 'failed' : operation.status === 'pending' || cleanupInProgress
         ? 'processing'
         : operation.status === 'failed' ? 'failed' : 'completed';
       const isCleanup = String(operation.current_action || '').toLowerCase().includes('backup')
@@ -1296,7 +1303,7 @@ export class EncorrWebSocketServer {
         operation_id: operation.id,
         file_id: operation.library_file_id,
         file_operation: true,
-        operation: cleanupInProgress || isCleanup ? 'cleanup_backup' : operation.operation,
+        operation: cleanupInProgress || cleanupFailed || isCleanup ? 'cleanup_backup' : operation.operation,
         job_type: 'file_operation',
         status,
         progress: Number(operation.progress || 0),
@@ -1618,6 +1625,29 @@ export class EncorrWebSocketServer {
 
   isNodeConnected(nodeId: string): boolean {
     return this.connectionsByNodeId.has(nodeId);
+  }
+
+  prepareFullReset(): { cancelledJobs: number; disconnectedWorkers: number } {
+    const activeJobs = [
+      ...this.db.getAllJobs({ status: 'assigned' }),
+      ...this.db.getAllJobs({ status: 'processing' }),
+    ];
+    for (const job of activeJobs) {
+      this.cancelJob(job.id, 'Cancelled by full system reset');
+    }
+
+    const workerConnections = Array.from(this.connections.values())
+      .filter(connection => Boolean(connection.nodeId));
+    for (const connection of workerConnections) {
+      connection.ws.close(1012, 'Encorr full reset');
+    }
+
+    this.pendingAssignments.clear();
+    this.cpuJobReservations.clear();
+    this.gpuJobAssignments.clear();
+    this.activeLibraryScans.clear();
+    this.logger.warn(`[RESET] Cancelled ${activeJobs.length} active job(s) and disconnected ${workerConnections.length} worker(s)`);
+    return { cancelledJobs: activeJobs.length, disconnectedWorkers: workerConnections.length };
   }
 
   sendFileReplaceCommand(

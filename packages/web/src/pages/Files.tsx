@@ -4,11 +4,12 @@ import { Card, CardContent } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { SmartTranscodeDialog } from '@/components/ui/SmartTranscodeDialog';
 import { Dialog } from '@/components/ui/Dialog';
-import { RefreshCw, ChevronLeft, ChevronRight, Film, Folder, FolderOpen, Check, Search, Filter, Scan, Sparkles, Clock, Zap, AlertTriangle, FileText, MoreVertical, Replace, Copy, X, Ban } from 'lucide-react';
+import { RefreshCw, ChevronLeft, ChevronRight, Film, Folder, FolderOpen, Check, Search, Filter, Scan, Sparkles, Clock, Zap, AlertTriangle, FileText, MoreVertical, Replace, Copy, X, Ban, Columns2 } from 'lucide-react';
 import { ReportDrawer } from '@/components/ReportDrawer';
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useRef } from 'react';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import type { TranscodeMode } from '@encorr/shared';
+import { useNavigate } from 'react-router-dom';
 
 // Helper function to format duration as HH:MM:SS
 function formatDuration(seconds: number | undefined, isAnalyzed: boolean = false): string {
@@ -29,6 +30,7 @@ type ViewMode = 'all' | 'folder';
 type ReplacementOperation = 'replace' | 'backup_replace' | 'cleanup_backup';
 
 export function Files() {
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [viewMode, setViewMode] = useState<ViewMode>('all');
   const [selectedFolder, setSelectedFolder] = useState('all');
@@ -51,6 +53,9 @@ export function Files() {
   } | null>(null);
   const [replacementConfirmed, setReplacementConfirmed] = useState(false);
   const [replacementNotice, setReplacementNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const watchedReplacements = useRef<Map<string, number>>(new Map());
+  const seenReplacementFailures = useRef<Set<string>>(new Set());
+  const failedReplacementFiles = useRef<Set<string>>(new Set());
   const [openActionsFileId, setOpenActionsFileId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -88,6 +93,25 @@ export function Files() {
     queryFn: () => api.getJobs(),
     refetchInterval: 5000, // Refetch jobs every 5s for active jobs
   });
+
+  // The POST request only confirms dispatch. The node reports the real result
+  // asynchronously, so surface that result when it arrives over Jobs updates.
+  useEffect(() => {
+    const failedOperation = jobs.find((job: any) => {
+      if (!job.file_operation || job.status !== 'failed' || seenReplacementFailures.current.has(job.id)) return false;
+      const watchedAt = watchedReplacements.current.get(job.file_id);
+      return watchedAt !== undefined && Number(job.created_at || 0) >= watchedAt - 1;
+    });
+    if (!failedOperation) return;
+
+    seenReplacementFailures.current.add(failedOperation.id);
+    failedReplacementFiles.current.add(failedOperation.file_id);
+    watchedReplacements.current.delete(failedOperation.file_id);
+    setReplacementNotice({
+      type: 'error',
+      message: `${failedOperation.file_name || 'File replacement'} failed: ${failedOperation.error_message || 'The node could not complete the operation.'}`,
+    });
+  }, [jobs]);
 
   // Fetch reports for each file to get correct transcode status
   // This runs after filesData is available to avoid circular dependency
@@ -171,8 +195,11 @@ export function Files() {
       }
       // Priority 3: Completed transcode output exists but is not installed yet.
       else if (latestReport) {
-        displayStatus = latestReport.status === 'completed' ? 'transcoded' : latestReport.status;
-        displayProgress = latestReport.status === 'completed' ? 100 : 0;
+        const outputAvailable = file.transcode_output_available !== false && latestReport.output_available !== 0;
+        displayStatus = latestReport.status === 'completed'
+          ? (outputAvailable ? 'transcoded' : 'failed')
+          : latestReport.status;
+        displayProgress = latestReport.status === 'completed' && outputAvailable ? 100 : 0;
       }
       // Priority 4: File status from backend
       else {
@@ -193,6 +220,7 @@ export function Files() {
         displayProgress,
         job: activeJob || latestReport,
         outputSize: latestReport?.output_size || latestReport?.transcoded_size || null,
+        displayError: file.display_error || latestReport?.error_message || file.error_message,
       };
     });
   }, [files, jobs, reportsByFileId]);
@@ -359,21 +387,29 @@ export function Files() {
         return next;
       });
     }
-    setReplacementNotice(failures.length > 0
-      ? {
+    const asyncFailureCount = fileIds.filter(id => failedReplacementFiles.current.has(id)).length;
+    if (failures.length > 0) {
+      setReplacementNotice({
           type: 'error',
           message: `${successfulIds.length.toLocaleString()} queued, ${failures.length.toLocaleString()} failed. ${failures[0]}`,
-        }
-      : {
+        });
+    } else if (asyncFailureCount === 0) {
+      setReplacementNotice({
           type: 'success',
           message: `${successfulIds.length.toLocaleString()} file replacement${successfulIds.length === 1 ? '' : 's'} added to Jobs.`,
         });
+    }
   };
 
   const requestReplacement = (operation: ReplacementOperation, fileIds: string[]) => {
     if (fileIds.length === 0) return;
     setOpenActionsFileId(null);
     setReplacementNotice(null);
+    const requestedAt = Math.floor(Date.now() / 1000);
+    fileIds.forEach(id => {
+      watchedReplacements.current.set(id, requestedAt);
+      failedReplacementFiles.current.delete(id);
+    });
     setReplacementConfirmed(false);
     setReplacementConfirmation({ operation, fileIds });
   };
@@ -516,9 +552,9 @@ export function Files() {
 
     if (status === 'failed') {
       return (
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2" title={file.displayError || 'Operation failed'}>
           <X className="h-3.5 w-3.5 text-red-400 flex-shrink-0" />
-          <span className="text-red-400 text-xs">Failed</span>
+          <span className="text-red-400 text-xs">{file.transcode_output_available === false ? 'Output missing' : 'Failed'}</span>
         </div>
       );
     }
@@ -992,10 +1028,10 @@ export function Files() {
                                   {formatETA(file.job.eta)}
                                 </span>
                               )}
-                              {file.displayStatus === 'failed' && file.job.error && (
-                                <span className="text-red-400 truncate" title={file.job.error}>
+                              {file.displayStatus === 'failed' && file.displayError && (
+                                <span className="text-red-400 truncate" title={file.displayError}>
                                   <AlertTriangle className="h-3 w-3 inline mr-1" />
-                                  {file.job.error}
+                                  {file.displayError}
                                 </span>
                               )}
                             </div>
@@ -1083,7 +1119,19 @@ export function Files() {
                         </div>
 
                         {/* Actions */}
-                        <div className="w-12 flex-shrink-0 flex items-center justify-center gap-1">
+                        <div className="w-16 flex-shrink-0 flex items-center justify-center gap-1">
+                          {(file.displayStatus === 'transcoded' || file.status === 'backup_replaced') && (
+                            <button
+                              type="button"
+                              onClick={() => navigate(`/files/${encodeURIComponent(file.id)}/compare`)}
+                              className="p-1 rounded transition-colors hover:bg-white/10"
+                              style={{ color: '#74c69d' }}
+                              title="Compare original and transcoded quality"
+                              aria-label={`Compare original and transcoded versions of ${file.filename || file.name || 'file'}`}
+                            >
+                              <Columns2 className="h-3.5 w-3.5" />
+                            </button>
+                          )}
                           {/* Replacement actions for pending outputs; cleanup for retained originals. */}
                           {(file.displayStatus === 'transcoded' || file.status === 'backup_replaced') ? (
                             <div className="relative" onClick={event => event.stopPropagation()}>

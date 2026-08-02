@@ -253,6 +253,7 @@ export interface JobReport {
   original_size: number | null;
   output_size: number | null;
   output_path: string | null;
+  output_available: boolean;
   original_codec: string | null;
   output_codec: string | null;
   original_resolution: string | null;

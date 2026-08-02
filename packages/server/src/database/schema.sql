@@ -187,6 +187,7 @@ CREATE TABLE IF NOT EXISTS job_reports (
     original_size INTEGER,
     output_size INTEGER,
     output_path TEXT,
+    output_available BOOLEAN NOT NULL DEFAULT 1,
     original_codec TEXT,
     output_codec TEXT,
     original_resolution TEXT,
