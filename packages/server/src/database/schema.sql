@@ -275,9 +275,9 @@ INSERT OR IGNORE INTO presets (id, name, description, is_builtin, config) VALUES
      '{"video_codec":"h264","encoding_type":"gpu","gpu_type":"intel","quality_mode":"crf","quality":22,"preset":"medium","container":"mkv","audio_encoder":"copy","audio_bitrate":0,"subtitles":"all"}'),
     ('builtin-intel-h265-gpu', 'Intel Quick Sync H.265 (GPU)', 'GPU-accelerated encoding with Intel QSV H.265', 1,
      '{"video_codec":"h265","encoding_type":"gpu","gpu_type":"intel","quality_mode":"crf","quality":24,"preset":"medium","container":"mkv","audio_encoder":"copy","audio_bitrate":0,"subtitles":"all"}'),
-    ('builtin-amd-h264-gpu', 'AMD AMF H.264 (GPU)', 'GPU-accelerated encoding with AMD AMF H.264', 1,
+    ('builtin-amd-h264-gpu', 'AMD H.264 (GPU)', 'AMD GPU encoding with AMF on Windows or VAAPI on Linux', 1,
      '{"video_codec":"h264","encoding_type":"gpu","gpu_type":"amd","quality_mode":"qp","quality":22,"preset":"fast","container":"mkv","audio_encoder":"copy","audio_bitrate":0,"subtitles":"all"}'),
-    ('builtin-amd-h265-gpu', 'AMD AMF H.265 (GPU)', 'GPU-accelerated encoding with AMD AMF H.265', 1,
+    ('builtin-amd-h265-gpu', 'AMD H.265 (GPU)', 'AMD GPU encoding with AMF on Windows or VAAPI on Linux', 1,
      '{"video_codec":"h265","encoding_type":"gpu","gpu_type":"amd","quality_mode":"qp","quality":24,"preset":"fast","container":"mkv","audio_encoder":"copy","audio_bitrate":0,"subtitles":"all"}'),
     ('builtin-mobile-h264-cpu', 'Mobile Optimized H.264 (CPU)', 'Optimized for mobile devices with 720p cap', 1,
      '{"video_codec":"h264","encoding_type":"cpu","quality_mode":"crf","quality":24,"preset":"fast","container":"mkv","max_width":1280,"max_height":720,"audio_encoder":"copy","audio_bitrate":0,"subtitles":"first"}');

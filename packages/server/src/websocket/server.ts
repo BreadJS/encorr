@@ -142,10 +142,7 @@ export class EncorrWebSocketServer {
   // Helper Functions
   // ========================================================================
 
-  /**
-   * Filter out integrated GPUs from system_info
-   * Keeps only discrete GPUs (NVIDIA, AMD discrete, etc.)
-   */
+  /** Apply the server's worker-GPU policy to reported system information. */
   private filterIntegratedGPUs(systemInfo: any): any {
     if (!systemInfo.gpus || !Array.isArray(systemInfo.gpus)) {
       return systemInfo;
@@ -160,33 +157,10 @@ export class EncorrWebSocketServer {
         return false;
       }
 
-      // Filter out AMD integrated GPUs
-      // Check for AMD/ATI/Radeon in vendor OR "advanced" (for "Advanced Micro Devices, Inc.")
+      // AMD APUs expose usable AMF/VAAPI encoders too. Keep them available as
+      // workers instead of guessing capability from their name or shared VRAM.
       if (vendor.includes('amd') || vendor.includes('ati') || vendor.includes('radeon') || vendor.includes('advanced')) {
-        // Remove special characters like (TM), (R), etc. then normalize whitespace
-        const cleanName = name.replace(/[™®©\(tm\)\(r\)\(c\)]/gi, '').replace(/\s+/g, ' ').trim();
-
-        // "AMD Radeon Graphics" without model number = integrated
-        // After removing (TM) and normalizing spaces, "AMD Radeon(TM) Graphics" becomes "AMD Radeon Graphics"
-        if (/^(amd\s+)?radeon\s+graphics$/.test(cleanName)) {
-          return false;
-        }
-
-        // Very low VRAM (< 2GB) = likely integrated
-        // memory is stored in bytes, convert to MB for comparison
-        // Values < 1000 are likely already in MB, >= 1024*1024 are in bytes
-        const vramBytes = gpu.vram || gpu.memory;
-        if (vramBytes) {
-          const vramMB = vramBytes >= 1048576 ? vramBytes / (1024 * 1024) : vramBytes;
-          if (vramMB < 2048) {
-            return false;
-          }
-        }
-
-        // Contains "integrated" in name
-        if (name.includes('integrated')) {
-          return false;
-        }
+        return true;
       }
 
       return true; // Keep this GPU
@@ -544,7 +518,7 @@ export class EncorrWebSocketServer {
             }
 
             // AMD GPUs match AMD
-            if (existingVendor.includes('amd') || existingName.includes('amd') ||
+            if (existingVendor.includes('amd') || existingVendor.includes('advanced') || existingName.includes('amd') ||
                 existingName.includes('radeon') || existingVendor.includes('ati')) {
               return true;
             }
@@ -2018,7 +1992,7 @@ export class EncorrWebSocketServer {
         const identity = `${gpus[gpuDeviceId]?.vendor || ''} ${gpus[gpuDeviceId]?.name || ''}`.toLowerCase();
         const presetId = identity.includes('nvidia')
           ? route.nvidia_preset_id
-          : identity.includes('amd') || identity.includes('radeon')
+          : identity.includes('amd') || identity.includes('advanced micro') || identity.includes('radeon') || identity.includes('ati')
             ? route.amd_preset_id
             : identity.includes('intel') ? route.intel_preset_id : null;
         const preset = presetId ? this.db.getPresetById(presetId) : null;

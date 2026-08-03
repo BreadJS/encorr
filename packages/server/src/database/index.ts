@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { v4 as uuidv4 } from 'uuid';
-import { mkdirSync, readFileSync, rmSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'fs';
 import { basename, dirname, join, resolve, sep } from 'path';
 import type {
   Logger
@@ -64,7 +64,17 @@ export class EncorrDatabase {
   }
 
   private openDatabase(): Database.Database {
-    const database = new Database(this.databasePath);
+    // Native addons cannot live inside pkg's virtual snapshot filesystem.
+    // Binary builds place the platform-specific binding beside the executable.
+    const packagedBinding = (process as NodeJS.Process & { pkg?: unknown }).pkg
+      ? join(dirname(process.execPath), 'better_sqlite3.node')
+      : null;
+    const configuredBinding = process.env.ENCORR_SQLITE_BINDING;
+    const nativeBinding = configuredBinding || (packagedBinding && existsSync(packagedBinding) ? packagedBinding : undefined);
+    const database = new Database(
+      this.databasePath,
+      nativeBinding ? { nativeBinding } : undefined,
+    );
     database.pragma('journal_mode = WAL');
     database.pragma('foreign_keys = ON');
     database.pragma('synchronous = NORMAL');
@@ -415,8 +425,8 @@ export class EncorrDatabase {
       },
       {
         id: 'builtin-amd-h264-gpu',
-        name: 'AMD AMF H.264 (GPU)',
-        description: 'GPU-accelerated encoding with AMD AMF H.264',
+        name: 'AMD H.264 (GPU)',
+        description: 'AMD GPU encoding with AMF on Windows or VAAPI on Linux',
         config: {
           video_codec: 'h264',
           encoding_type: 'gpu',
@@ -432,8 +442,8 @@ export class EncorrDatabase {
       },
       {
         id: 'builtin-amd-h265-gpu',
-        name: 'AMD AMF H.265 (GPU)',
-        description: 'GPU-accelerated encoding with AMD AMF H.265',
+        name: 'AMD H.265 (GPU)',
+        description: 'AMD GPU encoding with AMF on Windows or VAAPI on Linux',
         config: {
           video_codec: 'h265',
           encoding_type: 'gpu',

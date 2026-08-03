@@ -88,6 +88,11 @@ export interface HwaccelInfo {
 export interface GPUInfo {
   name: string;
   vendor: string;
+  /** Linux DRM card name, for example card1. */
+  drm_card?: string;
+  /** Hardware render device used by VAAPI, for example /dev/dri/renderD129. */
+  device_path?: string;
+  pci_bus?: string;
   memory?: number;
   memoryFree?: number;
   memoryUsed?: number;
@@ -298,6 +303,8 @@ export interface FFmpegConfig {
   encoding_type: EncoderType;
   gpu_type?: GPUVendor;
   gpu_device_id?: number;  // Specific GPU device ID to use (for multi-GPU systems)
+  gpu_device_path?: string; // Platform device path resolved locally by the node
+  video_encoder?: string;  // Concrete encoder selected from the node's advertised capabilities
   quality_mode: 'crf' | 'cq' | 'qp';
   quality: number; // CRF/CQ/QP value
   preset: string; // speed preset (slow, medium, fast, etc.)

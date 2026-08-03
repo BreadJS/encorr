@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import * as os from 'os';
-import { existsSync } from 'fs';
+import { existsSync, readdirSync, readFileSync } from 'fs';
 import { access } from 'fs/promises';
 import { join } from 'path';
 import type { NodeConfig, SystemInfo, GPUInfo } from '@encorr/shared';
@@ -276,11 +276,25 @@ export class EncorrNode {
       gpuIndex = presetConfig.gpu_device_id;
       this.logger.info(`[JOB_ASSIGN] Using GPU device ${gpuIndex} (from server assignment)`);
     } else if (presetConfig.encoding_type === 'gpu' && presetConfig.gpu_type) {
-      // Fallback to old logic if gpu_device_id not provided
-      if (presetConfig.gpu_type === 'nvidia') gpuIndex = 0;
-      else if (presetConfig.gpu_type === 'intel') gpuIndex = 1;
-      else if (presetConfig.gpu_type === 'amd') gpuIndex = 2;
-      this.logger.warn(`[JOB_ASSIGN] No gpu_device_id provided, using fallback GPU ${gpuIndex} from gpu_type`);
+      const requestedVendor = presetConfig.gpu_type;
+      gpuIndex = this.systemInfo.gpus?.findIndex(gpu => {
+        const identity = `${gpu.vendor || ''} ${gpu.name || ''}`.toLowerCase();
+        if (requestedVendor === 'nvidia') return /nvidia|geforce|quadro|tesla/.test(identity);
+        if (requestedVendor === 'amd') return /amd|advanced micro|radeon|ati/.test(identity);
+        return /intel/.test(identity);
+      });
+      if (gpuIndex === undefined || gpuIndex < 0) gpuIndex = 0;
+      this.logger.warn(`[JOB_ASSIGN] No gpu_device_id provided, selected ${requestedVendor} GPU ${gpuIndex}`);
+    }
+
+    if (presetConfig.encoding_type === 'gpu' && presetConfig.gpu_type === 'amd' && process.platform === 'linux') {
+      const selectedGpu = this.systemInfo.gpus?.[gpuIndex ?? 0];
+      if (selectedGpu?.device_path) {
+        presetConfig.gpu_device_path = selectedGpu.device_path;
+        this.logger.info(`[JOB_ASSIGN] Using AMD VAAPI device ${selectedGpu.device_path}`);
+      } else {
+        this.logger.warn('[JOB_ASSIGN] AMD GPU has no resolved VAAPI render node; falling back to /dev/dri/renderD128');
+      }
     }
 
     // Check if this is an analyze job
@@ -741,9 +755,9 @@ export class EncorrNode {
     const ffprobeVersion = getFFprobeVersion(ffprobePath) || undefined;
 
     // Detect available FFmpeg encoders, decoders, and hwaccels
-    const ffmpegEncoders = await detectAvailableEncoders(ffmpegPath);
-    const ffmpegDecoders = await detectAvailableDecoders(ffmpegPath);
-    const ffmpegHwaccels = await detectAvailableHwaccels(ffmpegPath);
+    const ffmpegEncoders = await detectAvailableEncoders(ffmpegPath, gpus);
+    const ffmpegDecoders = await detectAvailableDecoders(ffmpegPath, gpus);
+    const ffmpegHwaccels = await detectAvailableHwaccels(ffmpegPath, gpus);
 
     // Log hardware detection results
     this.logger.info(`[HW_DETECTION] Encoders: ${ffmpegEncoders.map(e => `${e.encoder_name} (${e.type}${e.gpu_type ? ':' + e.gpu_type : ''})`).join(', ') || 'none'}`);
@@ -870,11 +884,15 @@ export class EncorrNode {
 
     try {
       const graphics = await si.graphics();
+      const amdDrmDevices = this.detectAmdDrmDevices();
+      let nextAmdDevice = 0;
 
       // Process controllers (GPUs)
       if (graphics.controllers && graphics.controllers.length > 0) {
         for (let i = 0; i < graphics.controllers.length; i++) {
           const controller = graphics.controllers[i];
+          const identity = `${controller.vendor || ''} ${controller.model || ''}`.toLowerCase();
+          const isAmd = /amd|advanced micro|radeon|ati/.test(identity);
 
           // Skip virtual displays
           if (this.isVirtualDisplay(controller.model || '')) {
@@ -901,6 +919,7 @@ export class EncorrNode {
           const powerLimit = (controller as any).powerLimit;
           const clockCore = (controller as any).clockCore;
           const clockMemory = (controller as any).clockMemory;
+          const amdDevice = isAmd ? amdDrmDevices[nextAmdDevice++] : undefined;
 
           gpus.push({
             name: controller.model || 'Unknown GPU',
@@ -916,8 +935,25 @@ export class EncorrNode {
             powerLimit,
             clockCore,
             clockMemory,
+            drm_card: amdDevice?.drmCard,
+            device_path: amdDevice?.renderNode,
+            pci_bus: amdDevice?.pciBus,
           });
         }
+      }
+
+      // systeminformation occasionally omits headless AMD adapters. sysfs is
+      // authoritative on Linux and still exposes their VAAPI render nodes.
+      for (; nextAmdDevice < amdDrmDevices.length; nextAmdDevice++) {
+        const device = amdDrmDevices[nextAmdDevice];
+        gpus.push({
+          name: device.name,
+          vendor: 'AMD',
+          memory: device.memory,
+          drm_card: device.drmCard,
+          device_path: device.renderNode,
+          pci_bus: device.pciBus,
+        });
       }
 
       this.logger.info(`Detected ${gpus.length} GPU(s)`);
@@ -938,6 +974,7 @@ export class EncorrNode {
     );
     const hasAmd = this.systemInfo.gpus.some(gpu =>
       gpu.vendor?.toLowerCase().includes('amd') || gpu.name?.toLowerCase().includes('amd') ||
+      gpu.vendor?.toLowerCase().includes('advanced micro') ||
       gpu.vendor?.toLowerCase().includes('ati') || gpu.name?.toLowerCase().includes('radeon')
     );
 
@@ -988,29 +1025,10 @@ export class EncorrNode {
       return true;
     }
 
-    // AMD integrated graphics detection
-    // Check for AMD/ATI in vendor OR "advanced" (for "Advanced Micro Devices, Inc.")
+    // AMD APUs also expose working AMF/VAAPI encoders. Do not discard them
+    // based on shared-memory size or a generic "Radeon Graphics" name.
     if (vendor.includes('amd') || vendor.includes('ati') || vendor.includes('radeon') || vendor.includes('advanced')) {
-      // Remove special characters like (TM), (R), etc. then normalize whitespace
-      const cleanName = name.replace(/[™®©\(tm\)\(r\)\(c\)]/gi, '').replace(/\s+/g, ' ').trim();
-
-      // Pattern 1: Generic "Radeon Graphics" or "AMD Radeon Graphics" (no model number = integrated)
-      // e.g., "AMD Radeon Graphics" or "AMD Radeon(TM) Graphics" -> "AMD Radeon Graphics"
-      if (/^(amd\s+)?radeon\s+graphics$/.test(cleanName)) {
-        return true;
-      }
-
-      // Pattern 2: Very low VRAM (integrated typically < 2GB, discrete typically >= 4GB)
-      // gpu.vram is already in MB from systeminformation
-      const vramMB = gpu.vram;
-      if (vramMB && vramMB < 2048) {
-        return true;
-      }
-
-      // Pattern 3: Contains "integrated" in name
-      if (name.includes('integrated')) {
-        return true;
-      }
+      return false;
     }
 
     return false;
@@ -1021,7 +1039,7 @@ export class EncorrNode {
     if (lowerName.includes('nvidia') || lowerName.includes('geforce') || lowerName.includes('quadro') || lowerName.includes('tesla')) {
       return 'NVIDIA';
     }
-    if (lowerName.includes('amd') || lowerName.includes('radeon') || lowerName.includes('ati')) {
+    if (lowerName.includes('amd') || lowerName.includes('advanced micro') || lowerName.includes('radeon') || lowerName.includes('ati')) {
       return 'AMD';
     }
     if (lowerName.includes('intel')) {
@@ -1031,6 +1049,59 @@ export class EncorrNode {
       return 'Apple';
     }
     return 'Unknown';
+  }
+
+  private detectAmdDrmDevices(): Array<{
+    drmCard: string;
+    renderNode: string;
+    pciBus?: string;
+    name: string;
+    memory?: number;
+  }> {
+    if (process.platform !== 'linux' || !existsSync('/sys/class/drm')) return [];
+
+    const devices: Array<{
+      drmCard: string;
+      renderNode: string;
+      pciBus?: string;
+      name: string;
+      memory?: number;
+    }> = [];
+
+    try {
+      const cards = readdirSync('/sys/class/drm')
+        .filter(entry => /^card\d+$/.test(entry))
+        .sort((a, b) => Number(a.slice(4)) - Number(b.slice(4)));
+
+      for (const drmCard of cards) {
+        const deviceRoot = `/sys/class/drm/${drmCard}/device`;
+        const vendorPath = `${deviceRoot}/vendor`;
+        if (!existsSync(vendorPath) || readFileSync(vendorPath, 'utf8').trim().toLowerCase() !== '0x1002') continue;
+
+        const drmEntries = existsSync(`${deviceRoot}/drm`) ? readdirSync(`${deviceRoot}/drm`) : [];
+        const renderName = drmEntries.find(entry => /^renderD\d+$/.test(entry));
+        if (!renderName) continue;
+
+        const uevent = existsSync(`${deviceRoot}/uevent`) ? readFileSync(`${deviceRoot}/uevent`, 'utf8') : '';
+        const pciBus = uevent.match(/^PCI_SLOT_NAME=(.+)$/m)?.[1];
+        const pciId = uevent.match(/^PCI_ID=(.+)$/m)?.[1];
+        const memoryValue = existsSync(`${deviceRoot}/mem_info_vram_total`)
+          ? Number(readFileSync(`${deviceRoot}/mem_info_vram_total`, 'utf8').trim())
+          : undefined;
+
+        devices.push({
+          drmCard,
+          renderNode: `/dev/dri/${renderName}`,
+          pciBus,
+          name: pciId ? `AMD GPU (${pciId})` : `AMD GPU (${drmCard})`,
+          memory: Number.isFinite(memoryValue) && memoryValue! > 0 ? memoryValue : undefined,
+        });
+      }
+    } catch (error: any) {
+      this.logger.warn(`[GPU] Failed to inspect AMD DRM devices: ${error?.message || error}`);
+    }
+
+    return devices;
   }
 
   // ========================================================================

@@ -38,9 +38,9 @@ const VIDEO_ENCODERS = [
   { value: 'h264_qsv', label: 'H.264 (Intel QSV)', category: 'hardware', gpu: 'intel' },
   { value: 'hevc_qsv', label: 'H.265 (Intel QSV)', category: 'hardware', gpu: 'intel' },
   { value: 'hevc_qsv_10bit', label: 'H.265 10-bit (Intel)', category: 'hardware', gpu: 'intel' },
-  // AMD AMF/VCE
-  { value: 'h264_amf', label: 'H.264 (AMD AMF)', category: 'hardware', gpu: 'amd' },
-  { value: 'hevc_amf', label: 'H.265 (AMD AMF)', category: 'hardware', gpu: 'amd' },
+  // AMD uses AMF where available and VAAPI on Linux.
+  { value: 'h264_amf', label: 'H.264 (AMD automatic)', category: 'hardware', gpu: 'amd' },
+  { value: 'hevc_amf', label: 'H.265 (AMD automatic)', category: 'hardware', gpu: 'amd' },
   { value: 'hevc_amf_10bit', label: 'H.265 10-bit (AMD)', category: 'hardware', gpu: 'amd' },
 ];
 
@@ -963,7 +963,7 @@ export function Presets() {
       },
       {
         id: 'amd' as const,
-        title: 'AMD AMF',
+        title: 'AMD GPU',
         description: 'Hardware-accelerated profiles for AMD Radeon GPUs',
         icon: Zap,
         color: '#ed4c5c',

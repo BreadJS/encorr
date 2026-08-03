@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from 'child_process';
 import { existsSync, unlinkSync, renameSync, statSync, mkdirSync } from 'fs';
 import { join, dirname, basename } from 'path';
 import { parseFFmpegError, type FFmpegConfig } from '@encorr/shared';
-import { buildFFmpegArgs, parseFFmpegProgressLine } from '../ffmpeg';
+import { buildFFmpegArgs, getFFmpegEncoder, parseFFmpegProgressLine } from '../ffmpeg';
 import type { Logger } from 'winston';
 
 // ============================================================================
@@ -89,7 +89,7 @@ export class Transcoder {
 
     // Validate GPU encoder availability BEFORE starting
     if (options.config.encoding_type === 'gpu') {
-      const requiredEncoder = this.getRequiredEncoderName(options.config);
+      const requiredEncoder = getFFmpegEncoder(options.config, options.availableEncoders);
       const isAvailable = options.availableEncoders?.some((e: any) =>
         e.encoder_name === requiredEncoder && e.available === true
       );
@@ -136,7 +136,10 @@ export class Transcoder {
       const args = buildFFmpegArgs({
         input: options.sourcePath,
         output: tempPath,
-        config: options.config,
+        config: {
+          ...options.config,
+          video_encoder: getFFmpegEncoder(options.config, options.availableEncoders),
+        },
       });
 
       this.logger.info(`[FFMPEG] Starting transcoding...`);
@@ -380,6 +383,9 @@ export class Transcoder {
     if (line.includes('h264_d3d11va') || line.includes('hevc_d3d11va')) {
       return 'Using decoder: GPU (AMD D3D11VA)';
     }
+    if (line.toLowerCase().includes('vaapi')) {
+      return 'Using decoder: GPU (AMD/Linux VAAPI)';
+    }
 
     // Check for hardware acceleration being used
     if (line.includes('HW accel context') || line.includes('Using AVCodecContext')) {
@@ -428,26 +434,6 @@ export class Transcoder {
   // ========================================================================
   // Utilities
   // ========================================================================
-
-  private getRequiredEncoderName(config: FFmpegConfig): string {
-    // Returns the FFmpeg encoder name required for the given config
-    if (config.encoding_type === 'cpu') {
-      return config.video_codec === 'h265' ? 'libx265' : 'libx264';
-    }
-
-    // GPU encoders
-    if (config.gpu_type === 'nvidia') {
-      return config.video_codec === 'h265' ? 'hevc_nvenc' : 'h264_nvenc';
-    }
-    if (config.gpu_type === 'intel') {
-      return config.video_codec === 'h265' ? 'hevc_qsv' : 'h264_qsv';
-    }
-    if (config.gpu_type === 'amd') {
-      return config.video_codec === 'h265' ? 'hevc_amf' : 'h264_amf';
-    }
-
-    return 'unknown';
-  }
 
   private formatBytes(bytes: number): string {
     if (bytes < 1024) return bytes + ' B';

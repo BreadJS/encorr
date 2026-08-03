@@ -51,6 +51,15 @@ export function parseFFmpegError(stderr: string, fallback = 'FFmpeg failed'): Pa
     };
   }
 
+  if (/Failed to (?:initialise|initialize) VAAPI|No VA display found|No VAAPI device|Failed to open .*\/dev\/dri|Device creation failed.*vaapi|vaInitialize failed|AMF_(?:NOT_SUPPORTED|NO_DEVICE)|AMF failed to (?:initialise|initialize)/i.test(output)) {
+    return {
+      code: 'gpu_unavailable',
+      message: 'The AMD hardware encoder could not access the GPU. Check the AMD driver, FFmpeg AMF/VAAPI support, and access to the GPU render device.',
+      retryPossible: true,
+      recognized: true,
+    };
+  }
+
   if (/No space left on device|disk (?:is )?full|not enough space/i.test(output)) {
     return {
       code: 'disk_full',

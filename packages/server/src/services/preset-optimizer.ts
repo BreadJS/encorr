@@ -194,7 +194,7 @@ export class PresetOptimizer {
         encodingType: 'gpu',
         gpuType: 'amd',
         targetCodec: 'h265',
-        reason: `Converting ${analysis.codecFamily.toUpperCase()} to H.265 with AMD AMF for space savings`,
+        reason: `Converting ${analysis.codecFamily.toUpperCase()} to H.265 with AMD GPU encoding for space savings`,
         forceExplicitDecoder: true,
       };
     }
@@ -431,7 +431,7 @@ export class PresetOptimizer {
             caps.nvidia.hasGpu = true;
           } else if (vendor.includes('intel')) {
             caps.intel.hasGpu = true;
-          } else if (vendor.includes('amd') || vendor.includes('ati') || vendor.includes('radeon')) {
+          } else if (vendor.includes('amd') || vendor.includes('advanced micro') || vendor.includes('ati') || vendor.includes('radeon')) {
             caps.amd.hasGpu = true;
           }
         }

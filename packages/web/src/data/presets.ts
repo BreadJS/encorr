@@ -190,8 +190,8 @@ export const BUILTIN_PRESETS: Preset[] = [
   // AMD GPU Presets
   {
     id: 'builtin-amd-h264-gpu',
-    name: 'AMD AMF H.264 (GPU)',
-    description: 'GPU-accelerated encoding with AMD AMF H.264',
+    name: 'AMD H.264 (GPU)',
+    description: 'AMD GPU encoding with AMF on Windows or VAAPI on Linux',
     is_builtin: true,
     config: {
       video_codec: 'h264',
@@ -208,8 +208,8 @@ export const BUILTIN_PRESETS: Preset[] = [
   },
   {
     id: 'builtin-amd-h265-gpu',
-    name: 'AMD AMF H.265 (GPU)',
-    description: 'GPU-accelerated encoding with AMD AMF H.265',
+    name: 'AMD H.265 (GPU)',
+    description: 'AMD GPU encoding with AMF on Windows or VAAPI on Linux',
     is_builtin: true,
     config: {
       video_codec: 'h265',

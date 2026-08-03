@@ -1,7 +1,8 @@
 import { spawn } from 'child_process';
 import { promisify } from 'util';
-import { readFile } from 'fs';
+import { readFile, readdir } from 'fs';
 const readFileAsync = promisify(readFile);
+const readdirAsync = promisify(readdir);
 
 // ============================================================================
 // Types
@@ -26,7 +27,7 @@ export class GPUMonitor {
    * Get GPU usage for all GPUs using vendor-specific methods
    * Much faster than si.graphics()!
    */
-  async getGPUUsage(gpus: Array<{ vendor?: string; name?: string }>): Promise<Map<number, GPUUsageData>> {
+  async getGPUUsage(gpus: Array<{ vendor?: string; name?: string; drm_card?: string }>): Promise<Map<number, GPUUsageData>> {
     const results = new Map<number, GPUUsageData>();
 
     // Separate GPUs by vendor for efficient querying
@@ -39,7 +40,7 @@ export class GPUMonitor {
 
       if (vendor.includes('nvidia')) {
         nvidiaGpus.push({ index: i, gpu });
-      } else if (vendor.includes('amd') || vendor.includes('radeon') || vendor.includes('ati')) {
+      } else if (vendor.includes('amd') || vendor.includes('advanced micro') || vendor.includes('radeon') || vendor.includes('ati')) {
         amdGpus.push({ index: i, gpu });
       }
       // Intel and others - skip for now
@@ -64,7 +65,7 @@ export class GPUMonitor {
     // Query AMD GPUs individually
     for (const { index, gpu } of amdGpus) {
       try {
-        const data = await this.getAmdGpuUsage(index);
+        const data = await this.getAmdGpuUsage(index, gpu);
         if (data) results.set(index, data);
       } catch (error: any) {
         console.error('[GPUMonitor] Failed to get AMD GPU usage:', error?.message || error);
@@ -173,13 +174,18 @@ export class GPUMonitor {
    * Get AMD GPU usage using sysfs (Linux only)
    * Very fast reading from kernel-provided files
    */
-  private async getAmdGpuUsage(gpuIndex: number): Promise<GPUUsageData | null> {
+  private async getAmdGpuUsage(gpuIndex: number, gpu?: { drm_card?: string }): Promise<GPUUsageData | null> {
     if (process.platform !== 'linux') {
       return null;
     }
 
     try {
-      const cardNum = `card${gpuIndex}`;
+      const cardNum = gpu?.drm_card || `card${gpuIndex}`;
+      const hwmonRoot = `/sys/class/drm/${cardNum}/device/hwmon`;
+      const hwmonEntries = await readdirAsync(hwmonRoot).catch(() => [] as string[]);
+      const temperaturePath = hwmonEntries.length > 0
+        ? `${hwmonRoot}/${hwmonEntries[0]}/temp1_input`
+        : null;
 
       const [
         usageStr,
@@ -190,7 +196,7 @@ export class GPUMonitor {
         readFileAsync(`/sys/class/drm/${cardNum}/device/gpu_busy_percent`, 'utf8').catch(() => null),
         readFileAsync(`/sys/class/drm/${cardNum}/device/mem_info_vram_used`, 'utf8').catch(() => null),
         readFileAsync(`/sys/class/drm/${cardNum}/device/mem_info_vram_total`, 'utf8').catch(() => null),
-        readFileAsync(`/sys/class/hwmon/hwmon${gpuIndex}/temp1_input`, 'utf8').catch(() => null),
+        temperaturePath ? readFileAsync(temperaturePath, 'utf8').catch(() => null) : Promise.resolve(null),
       ]);
 
       const data: GPUUsageData = {};
@@ -219,7 +225,7 @@ export class GPUMonitor {
     if (name.includes('nvidia') || name.includes('geforce') || name.includes('quadro') || name.includes('tesla')) {
       return 'nvidia';
     }
-    if (name.includes('amd') || name.includes('radeon') || name.includes('ati')) {
+    if (name.includes('amd') || name.includes('advanced micro') || name.includes('radeon') || name.includes('ati')) {
       return 'amd';
     }
     return 'unknown';
@@ -259,8 +265,16 @@ export class GPUMonitor {
     }
 
     try {
-      await readFileAsync('/sys/class/drm/card0/device/gpu_busy_percent', 'utf8');
-      return true;
+      const cards = (await readdirAsync('/sys/class/drm')).filter(entry => /^card\d+$/.test(entry));
+      for (const card of cards) {
+        try {
+          await readFileAsync(`/sys/class/drm/${card}/device/gpu_busy_percent`, 'utf8');
+          return true;
+        } catch {
+          // Try the next DRM card; AMD is not necessarily card0.
+        }
+      }
+      return false;
     } catch {
       return false;
     }

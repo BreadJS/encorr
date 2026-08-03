@@ -132,8 +132,8 @@ export const BUILTIN_PRESET_DESCRIPTIONS: Record<string, string> = {
   'nvidia-h265-gpu': 'NVIDIA H.265 (GPU) - GPU-accelerated encoding with NVIDIA NVENC H.265',
   'intel-h264-gpu': 'Intel Quick Sync H.264 (GPU) - GPU-accelerated encoding with Intel QSV H.264',
   'intel-h265-gpu': 'Intel Quick Sync H.265 (GPU) - GPU-accelerated encoding with Intel QSV H.265',
-  'amd-h264-gpu': 'AMD AMF H.264 (GPU) - GPU-accelerated encoding with AMD AMF H.264',
-  'amd-h265-gpu': 'AMD AMF H.265 (GPU) - GPU-accelerated encoding with AMD AMF H.265',
+  'amd-h264-gpu': 'AMD H.264 (GPU) - GPU encoding with AMF on Windows or VAAPI on Linux',
+  'amd-h265-gpu': 'AMD H.265 (GPU) - GPU encoding with AMF on Windows or VAAPI on Linux',
 };
 
 // ============================================================================
