@@ -276,9 +276,15 @@ export function Files() {
 
   // Smart transcode mutation
   const smartTranscodeMutation = useMutation({
-    mutationFn: async ({ mode, presetId, postAction }: { mode: TranscodeMode; presetId?: string; postAction: 'keep' | 'replace' | 'backup_replace' }) => {
+    mutationFn: async ({ mode, presetId, quickSelectId, postAction }: { mode: TranscodeMode; presetId?: string; quickSelectId?: string; postAction: 'keep' | 'replace' | 'backup_replace' }) => {
       const fileIds = Array.from(selectedFiles);
-      return api.createSmartJob({ file_ids: fileIds, mode, preset_id: presetId, post_action: postAction });
+      return api.createSmartJob({
+        file_ids: fileIds,
+        mode,
+        preset_id: mode === 'cpu' ? presetId : undefined,
+        quick_select_id: mode === 'gpu' ? quickSelectId : undefined,
+        post_action: postAction,
+      });
     },
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['files'] });
@@ -1365,8 +1371,8 @@ export function Files() {
       open={showSmartTranscodeDialog}
       onOpenChange={setShowSmartTranscodeDialog}
       files={files.filter((f: any) => selectedFiles.has(f.id))}
-      onConfirm={async (mode, presetId, postAction) => {
-        await smartTranscodeMutation.mutateAsync({ mode, presetId, postAction });
+      onConfirm={async (mode, presetId, quickSelectId, postAction) => {
+        await smartTranscodeMutation.mutateAsync({ mode, presetId, quickSelectId, postAction });
       }}
     />
 

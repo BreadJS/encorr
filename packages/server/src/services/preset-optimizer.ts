@@ -421,7 +421,7 @@ export class PresetOptimizer {
     };
 
     for (const node of nodes) {
-      if (node.status !== 'online') continue;
+      if (node.status !== 'online' && node.status !== 'busy') continue;
 
       // Check for GPUs
       if (node.system_info?.gpus) {

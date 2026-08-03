@@ -34,7 +34,7 @@ interface SmartTranscodeDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   files: LibraryFile[];
-  onConfirm: (mode: TranscodeMode, presetId: string, postAction: 'keep' | 'replace' | 'backup_replace') => Promise<void>;
+  onConfirm: (mode: TranscodeMode, presetId: string, quickSelectId: string | undefined, postAction: 'keep' | 'replace' | 'backup_replace') => Promise<void>;
 }
 
 // ============================================================================
@@ -267,18 +267,7 @@ export function SmartTranscodeDialog({
   // Get current preset info based on mode and vendor selection
   const getCurrentPreset = () => {
     if (mode === 'gpu') {
-      // For GPU mode, find which vendor has a selection and return that preset
-      if (nvidiaPresetId && nvidiaPresets.some(p => p.id === nvidiaPresetId)) {
-        return allPresets.find(p => p.id === nvidiaPresetId);
-      }
-      if (amdPresetId && amdPresets.some(p => p.id === amdPresetId)) {
-        return allPresets.find(p => p.id === amdPresetId);
-      }
-      if (intelPresetId && intelPresets.some(p => p.id === intelPresetId)) {
-        return allPresets.find(p => p.id === intelPresetId);
-      }
-      // Fallback to first GPU preset
-      return allPresets.find(p => p.id === nvidiaPresets[0]?.id);
+      return quickSelectPresets.find((preset: any) => preset.id === selectedQuickSelectPresetId);
     } else if (mode === 'cpu') {
       return allPresets.find(p => p.id === cpuPresetId);
     }
@@ -302,7 +291,12 @@ export function SmartTranscodeDialog({
   const handleConfirm = async () => {
     setIsSubmitting(true);
     try {
-      await onConfirm(mode, getActivePresetId(), postAction);
+      await onConfirm(
+        mode,
+        getActivePresetId(),
+        mode === 'gpu' ? selectedQuickSelectPresetId || undefined : undefined,
+        postAction,
+      );
       onOpenChange(false);
     } catch (error) {
       console.error('Failed to start transcoding:', error);
@@ -340,7 +334,10 @@ export function SmartTranscodeDialog({
           </Button>
           <Button
             onClick={handleConfirm}
-            disabled={isSubmitting || files.length === 0 || (!getActivePresetId() && mode !== 'auto') || (postAction === 'replace' && !replaceConfirmed)}
+            disabled={isSubmitting || files.length === 0
+              || (mode === 'gpu' && !selectedQuickSelectPresetId)
+              || (mode === 'cpu' && !getActivePresetId())
+              || (postAction === 'replace' && !replaceConfirmed)}
           >
             {isSubmitting ? (
               <>
@@ -441,7 +438,7 @@ export function SmartTranscodeDialog({
                 {/* Quick Select Presets */}
                 {quickSelectPresets.length > 0 && (
                   <div className="mb-3">
-                    <p className="text-xs text-gray-400 mb-2">Quick Select Presets:</p>
+                    <p className="text-xs text-gray-400 mb-2">Quick Select routing:</p>
                     <div className="flex flex-wrap gap-2">
                       {quickSelectPresets.map((qsPreset: any) => (
                         <button
@@ -465,7 +462,7 @@ export function SmartTranscodeDialog({
                 )}
 
                 {/* GPU Type Dropdowns */}
-                <div className="flex flex-col gap-2">
+                <div className="hidden">
                   {/* NVIDIA */}
                   {nvidiaPresets.length > 0 && (
                     <div className="relative">

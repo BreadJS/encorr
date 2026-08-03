@@ -1965,12 +1965,34 @@ export class EncorrWebSocketServer {
     };
   }
 
-  // Find an available GPU device on a node (returns GPU device ID or null)
-  private findAvailableGpuDevice(node: any): number | null {
+  private gpuDeviceSupportsPreset(node: any, gpuDeviceId: number, preset: any): boolean {
+    const requestedVendor = preset?.config?.gpu_type;
+    const requestedCodec = preset?.config?.video_codec;
+    if (!requestedVendor || !requestedCodec) return false;
+
+    const gpu = node.system_info?.gpus?.[gpuDeviceId];
+    const identity = `${gpu?.vendor || ''} ${gpu?.name || ''}`.toLowerCase();
+    const actualVendor = /nvidia|geforce|quadro|tesla/.test(identity)
+      ? 'nvidia'
+      : /amd|advanced micro|radeon|ati/.test(identity)
+        ? 'amd'
+        : /intel/.test(identity) ? 'intel' : null;
+    if (actualVendor !== requestedVendor) return false;
+
+    const advertisedEncoders = node.system_info?.ffmpeg_encoders;
+    return !Array.isArray(advertisedEncoders) || advertisedEncoders.length === 0
+      || advertisedEncoders.some((encoder: any) => encoder.available !== false
+        && encoder.type === 'gpu'
+        && encoder.gpu_type === requestedVendor
+        && encoder.codec === requestedCodec);
+  }
+
+  // Find an available, vendor-compatible GPU device on a node.
+  private findAvailableGpuDevice(node: any, preset?: any): number | null {
     const available = this.getAvailableWorkers(node);
 
     for (let gpuId = 0; gpuId < available.gpus.length; gpuId++) {
-      if (available.gpus[gpuId] > 0) {
+      if (available.gpus[gpuId] > 0 && (!preset || this.gpuDeviceSupportsPreset(node, gpuId, preset))) {
         this.logger.debug(`[GPU_SELECT] Node ${node.name}: Selected GPU ${gpuId} with ${available.gpus[gpuId]} available slot(s)`);
         return gpuId;
       }
@@ -2133,7 +2155,6 @@ export class EncorrWebSocketServer {
     }
 
     // Process transcode jobs (can use GPU or CPU)
-    let gpuCapacityExhausted = false;
     let cpuCapacityExhausted = false;
     for (const { job, preset } of transcodeJobs) {
       if (job.quick_select_id) {
@@ -2160,9 +2181,8 @@ export class EncorrWebSocketServer {
       }
 
       if (usesGpu) {
-        if (gpuCapacityExhausted) continue;
         // Find node with available GPU workers
-        const nodeWithGpu = this.findNodeWithAvailableGpu(onlineNodes);
+        const nodeWithGpu = this.findNodeWithAvailableGpu(onlineNodes, preset);
         if (nodeWithGpu) {
           // Log available GPUs on this node BEFORE finding one
           const availableBefore = this.getAvailableWorkers(nodeWithGpu);
@@ -2170,7 +2190,7 @@ export class EncorrWebSocketServer {
           this.logger.info(`[GPU_SELECT] Node ${nodeWithGpu.name} max_workers: ${JSON.stringify(nodeWithGpu.max_workers)}`);
 
           // Find specific GPU device on this node
-          const gpuDeviceId = this.findAvailableGpuDevice(nodeWithGpu);
+          const gpuDeviceId = this.findAvailableGpuDevice(nodeWithGpu, preset);
           this.logger.info(`[GPU_SELECT] Selected GPU device ${gpuDeviceId} for job ${job.id}`);
 
           if (gpuDeviceId !== null) {
@@ -2191,8 +2211,7 @@ export class EncorrWebSocketServer {
             this.logger.warn(`[GPU_SELECT] findAvailableGpuDevice returned null for node ${nodeWithGpu.name}`);
           }
         } else {
-          gpuCapacityExhausted = true;
-          this.logger.debug(`[GPU_SELECT] GPU capacity is full; remaining GPU jobs stay queued`);
+          this.logger.debug(`[GPU_SELECT] No compatible ${preset?.config?.gpu_type || 'GPU'} capacity for job ${job.id}; leaving it queued`);
         }
         // Don't fall back to CPU for GPU jobs - keep them queued until GPU is available
         continue;
@@ -2263,7 +2282,7 @@ export class EncorrWebSocketServer {
     return bestNode;
   }
 
-  private findNodeWithAvailableGpu(nodes: any[]): any | null {
+  private findNodeWithAvailableGpu(nodes: any[], preset?: any): any | null {
     // Find the node with the MOST available GPU slots (load balancing)
     // When tied, prefer the node with fewer active jobs (better load distribution)
     let bestNode: any | null = null;
@@ -2278,7 +2297,8 @@ export class EncorrWebSocketServer {
       }
 
       const available = this.getAvailableWorkers(node);
-      const totalGpuSlotsAvailable = available.gpus.reduce((sum: number, slots: number) => sum + slots, 0);
+      const totalGpuSlotsAvailable = available.gpus.reduce((sum: number, slots: number, gpuDeviceId: number) =>
+        sum + ((!preset || this.gpuDeviceSupportsPreset(node, gpuDeviceId, preset)) ? slots : 0), 0);
 
       if (totalGpuSlotsAvailable > 0) {
         const activeJobs = this.db.getJobsByNode(node.id).filter(

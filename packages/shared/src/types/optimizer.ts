@@ -90,6 +90,7 @@ export interface SmartTranscodeRequest {
   file_ids: string[];
   mode: TranscodeMode;
   preset_id?: string; // Optional: user-selected preset (for GPU/CPU modes)
+  quick_select_id?: string; // Vendor-aware routing preset for GPU mode
   post_action?: 'keep' | 'replace' | 'backup_replace';
 }
 

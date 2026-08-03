@@ -2177,7 +2177,13 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
   // Smart transcoding endpoint - automatically selects optimal presets or uses user-selected preset
   fastify.post('/jobs/smart', async (request, reply) => {
     const data = request.body as SmartTranscodeRequest;
-    const { file_ids, mode = 'auto', preset_id: userPresetId, post_action: postAction = 'keep' } = data;
+    const {
+      file_ids,
+      mode = 'auto',
+      preset_id: userPresetId,
+      quick_select_id: quickSelectId,
+      post_action: postAction = 'keep',
+    } = data;
 
     if (!['keep', 'replace', 'backup_replace'].includes(postAction)) {
       reply.status(400);
@@ -2193,6 +2199,15 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       return sendError('No presets available');
     }
 
+    const quickSelect = quickSelectId ? db.getQuickSelectPresetById(quickSelectId) : null;
+    const routingPresetId = quickSelect
+      ? quickSelect.nvidia_preset_id || quickSelect.amd_preset_id || quickSelect.intel_preset_id || quickSelect.cpu_preset_id
+      : null;
+    if (mode === 'gpu' && (!quickSelect || !routingPresetId || !db.getPresetById(routingPresetId))) {
+      reply.status(400);
+      return sendError('Choose a valid Quick Select routing preset');
+    }
+
     // Get all online nodes for hardware capability detection
     // Include both 'online' and 'busy' nodes (busy nodes are still connected and can accept jobs)
     const allNodes = db.getAllNodes();
@@ -2202,6 +2217,26 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       reply.status(400);
       return sendError('No online nodes available for transcoding');
     }
+
+    const availableGpuVendors = new Set<string>();
+    for (const node of onlineNodes) {
+      for (const gpu of node.system_info?.gpus || []) {
+        const identity = `${gpu.vendor || ''} ${gpu.name || ''}`.toLowerCase();
+        if (/nvidia|geforce|quadro|tesla/.test(identity)) availableGpuVendors.add('nvidia');
+        else if (/amd|advanced micro|radeon|ati/.test(identity)) availableGpuVendors.add('amd');
+        else if (/intel/.test(identity)) availableGpuVendors.add('intel');
+      }
+    }
+    const compatibleGpuPreset = presets.find(preset =>
+      preset.config.encoding_type === 'gpu'
+      && preset.config.video_codec === 'h265'
+      && preset.config.gpu_type
+      && availableGpuVendors.has(preset.config.gpu_type)
+    ) || presets.find(preset =>
+      preset.config.encoding_type === 'gpu'
+      && preset.config.gpu_type
+      && availableGpuVendors.has(preset.config.gpu_type)
+    );
 
     // Track processed source files to prevent duplicates
     // (different library files may point to the same physical file)
@@ -2261,7 +2296,12 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
             let reason: string;
             let expectedCompression: string;
 
-            if (userPresetId) {
+            if (quickSelect && routingPresetId) {
+              presetId = routingPresetId;
+              reason = `Quick Select routing: ${quickSelect.name}`;
+              expectedCompression = 'Depends on the matched GPU preset';
+              logger.info(`[SMART_TRANSCODE] File ${file_id}: ${reason}`);
+            } else if (userPresetId) {
               // User explicitly selected a preset
               presetId = userPresetId;
               const preset = db.getPresetById(presetId);
@@ -2284,6 +2324,9 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
               file_id,
               preset_id: presetId,
               post_action: postAction,
+              quick_select_id: quickSelect?.id,
+              allow_gpu: true,
+              allow_cpu: mode !== 'gpu',
             });
 
             // Parse expected compression to estimate size
@@ -2336,7 +2379,22 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
         let reason: string;
         let expectedCompression: string;
 
-        if (userPresetId) {
+        if (quickSelect && routingPresetId) {
+          presetId = routingPresetId;
+          reason = `Quick Select routing: ${quickSelect.name}`;
+          expectedCompression = 'Depends on the matched GPU preset';
+          logger.info(`[SMART_TRANSCODE] Library file ${file_id}: ${reason}`);
+          job = db.createJobForLibraryFile(
+            file_id,
+            presetId,
+            undefined,
+            postAction,
+            undefined,
+            quickSelect.id,
+            true,
+            mode !== 'gpu',
+          );
+        } else if (userPresetId) {
           // User explicitly selected a preset
           presetId = userPresetId;
           const preset = db.getPresetById(presetId);
@@ -2374,12 +2432,11 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
             presetId = cpuPreset?.id || presets[0].id;
             reason = 'No metadata available - using CPU H.265 preset';
           } else {
-            const gpuPreset = presets.find(p =>
-              p.config.encoding_type === 'gpu' &&
-              p.config.gpu_type === 'nvidia'
-            );
+            const gpuPreset = compatibleGpuPreset;
             presetId = gpuPreset?.id || presets.find(p => p.config.encoding_type === 'cpu')?.id || presets[0].id;
-            reason = 'No metadata available - using auto preset';
+            reason = gpuPreset
+              ? `No metadata available - using ${gpuPreset.config.gpu_type?.toUpperCase()} GPU preset`
+              : 'No metadata available - using CPU preset';
           }
           expectedCompression = 'Unknown (no metadata)';
 
