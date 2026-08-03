@@ -87,7 +87,19 @@ export function parseFFmpegError(stderr: string, fallback = 'FFmpeg failed'): Pa
     };
   }
 
-  if (/Invalid data found when processing input|moov atom not found|could not find codec parameters|End of file/i.test(output)) {
+  const unsupportedHardwareSize = output.match(/Hardware does not support encoding at size (\d+x\d+)/i);
+  if (unsupportedHardwareSize) {
+    return {
+      code: 'encoder_configuration',
+      message: `The GPU encoder does not support the selected ${unsupportedHardwareSize[1]} video stream. Check the video-track mapping and the GPU’s supported dimensions.`,
+      retryPossible: true,
+      recognized: true,
+    };
+  }
+
+  // "Could not find codec parameters" is frequently only a warning for PGS
+  // subtitle tracks, so it must not override the later, fatal FFmpeg error.
+  if (/Invalid data found when processing input|moov atom not found|End of file/i.test(output)) {
     return {
       code: 'invalid_input',
       message: 'FFmpeg could not read valid media data from this file. The file may be incomplete, corrupt, or unsupported.',

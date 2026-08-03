@@ -693,13 +693,16 @@ export function buildFFmpegArgs(options: FFmpegOptions): string[] {
   // MKV supports all subtitle types (text and bitmap), so we can preserve them all
   // Use -c:s copy to copy subtitles without re-encoding (important for bitmap subtitles)
   if (config.subtitles === 'all') {
-    args.push('-map', '0:v'); // Video
-    args.push('-map', '0:a'); // Audio
+    // Only transcode the primary video track. `0:v` also selects Matroska
+    // cover artwork exposed as attached MJPEG video streams, which would make
+    // FFmpeg try to encode each tiny cover through the hardware encoder.
+    args.push('-map', '0:v:0');
+    args.push('-map', '0:a?'); // All audio, when present
     args.push('-map', '0:s?'); // All subtitles
     args.push('-c:s', 'copy'); // Copy subtitles without re-encoding
   } else if (config.subtitles === 'first') {
-    args.push('-map', '0:v');
-    args.push('-map', '0:a');
+    args.push('-map', '0:v:0');
+    args.push('-map', '0:a?');
     args.push('-map', '0:s:0?'); // First subtitle
     args.push('-c:s', 'copy'); // Copy subtitle without re-encoding
   } else if (config.subtitles === 'none') {
