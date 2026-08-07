@@ -1736,9 +1736,11 @@ export class EncorrWebSocketServer {
   }
 
   // Get worker availability status for UI
-  getWorkerAvailability(): { hasCpuWorkers: boolean; hasGpuWorkers: boolean; cpuWorkersAvailable: number; details: any[] } {
+  getWorkerAvailability(): { hasCpuWorkers: boolean; hasGpuWorkers: boolean; cpuWorkersAvailable: number; gpuWorkersAvailable: number; details: any[] } {
     const allNodes = this.db.getAllNodes();
-    const onlineNodes = allNodes.filter(n => n.status === 'online' || n.status === 'busy');
+    const onlineNodes = allNodes.filter(n =>
+      (n.status === 'online' || n.status === 'busy') && this.isNodeConnected(n.id)
+    );
 
     let totalCpuWorkers = 0;
     let totalGpuWorkers = 0;
@@ -1751,23 +1753,24 @@ export class EncorrWebSocketServer {
       const cpuWorkers = maxWorkers.cpu || 0;
       const gpuWorkers = (maxWorkers.gpus || []).reduce((sum: number, w: number) => sum + w, 0);
 
-      // Count active jobs
       const activeJobs = this.db.getJobsByNode(node.id).filter(
         (j: any) => j.status === 'assigned' || j.status === 'processing'
       );
+      const available = this.getAvailableWorkers(node);
 
       totalCpuWorkers += cpuWorkers;
       totalGpuWorkers += gpuWorkers;
-      usedCpuWorkers += activeJobs.filter((job: any) => {
-        const preset = this.db.getPresetById(job.preset_id);
-        return preset?.config?.encoding_type !== 'gpu';
-      }).length;
+      usedCpuWorkers += Math.max(0, cpuWorkers - available.cpu);
+      usedGpuWorkers += Math.max(0, gpuWorkers - available.gpus.reduce((sum, slots) => sum + slots, 0));
 
       details.push({
         nodeId: node.id,
         nodeName: node.name,
         maxCpuWorkers: cpuWorkers,
         maxGpuWorkers: gpuWorkers,
+        availableCpuWorkers: available.cpu,
+        availableGpuWorkers: available.gpus.reduce((sum, slots) => sum + slots, 0),
+        availableGpuWorkersByDevice: available.gpus,
         activeJobs: activeJobs.length,
       });
     }
@@ -1775,7 +1778,8 @@ export class EncorrWebSocketServer {
     return {
       hasCpuWorkers: totalCpuWorkers > 0,
       hasGpuWorkers: totalGpuWorkers > 0,
-      cpuWorkersAvailable: totalCpuWorkers - usedCpuWorkers,
+      cpuWorkersAvailable: Math.max(0, totalCpuWorkers - usedCpuWorkers),
+      gpuWorkersAvailable: Math.max(0, totalGpuWorkers - usedGpuWorkers),
       details,
     };
   }
@@ -2050,15 +2054,20 @@ export class EncorrWebSocketServer {
   // Find an available, vendor-compatible GPU device on a node.
   private findAvailableGpuDevice(node: any, preset?: any): number | null {
     const available = this.getAvailableWorkers(node);
-
+    let bestGpuId: number | null = null;
+    let mostFreeSlots = 0;
     for (let gpuId = 0; gpuId < available.gpus.length; gpuId++) {
-      if (available.gpus[gpuId] > 0 && (!preset || this.gpuDeviceSupportsPreset(node, gpuId, preset))) {
-        this.logger.debug(`[GPU_SELECT] Node ${node.name}: Selected GPU ${gpuId} with ${available.gpus[gpuId]} available slot(s)`);
-        return gpuId;
+      const freeSlots = available.gpus[gpuId];
+      if (freeSlots <= 0 || (preset && !this.gpuDeviceSupportsPreset(node, gpuId, preset))) continue;
+      if (freeSlots > mostFreeSlots) {
+        bestGpuId = gpuId;
+        mostFreeSlots = freeSlots;
       }
     }
-
-    return null;
+    if (bestGpuId !== null) {
+      this.logger.debug(`[GPU_SELECT] Node ${node.name}: Selected GPU ${bestGpuId} with ${mostFreeSlots} available slot(s)`);
+    }
+    return bestGpuId;
   }
 
   private resolveQuickSelectRoute(job: any, onlineNodes: any[]): { node: any; preset: any; gpuDeviceId?: number } | null {
@@ -2066,12 +2075,25 @@ export class EncorrWebSocketServer {
     const route = this.db.getQuickSelectPresetById(job.quick_select_id);
     if (!route) return null;
 
+    let bestGpuRoute: { node: any; preset: any; gpuDeviceId: number; freeSlots: number; activeJobs: number } | null = null;
+    let connectedNodes = 0;
+    let mappedNodes = 0;
+
     if (job.allow_gpu !== false) for (const node of onlineNodes) {
+      if (!this.isNodeConnected(node.id)) continue;
+      connectedNodes++;
       if (!this.nodeCanAccessJob(node, job)) continue;
+      mappedNodes++;
+
       const available = this.getAvailableWorkers(node);
       const gpus = node.system_info?.gpus || [];
+      const activeJobs = this.db.getJobsByNode(node.id).filter(
+        (candidate: any) => candidate.status === 'assigned' || candidate.status === 'processing'
+      ).length;
+
       for (let gpuDeviceId = 0; gpuDeviceId < available.gpus.length; gpuDeviceId++) {
-        if (available.gpus[gpuDeviceId] <= 0) continue;
+        const freeSlots = available.gpus[gpuDeviceId];
+        if (freeSlots <= 0) continue;
         const identity = `${gpus[gpuDeviceId]?.vendor || ''} ${gpus[gpuDeviceId]?.name || ''}`.toLowerCase();
         const presetId = identity.includes('nvidia')
           ? route.nvidia_preset_id
@@ -2079,16 +2101,23 @@ export class EncorrWebSocketServer {
             ? route.amd_preset_id
             : identity.includes('intel') ? route.intel_preset_id : null;
         const preset = presetId ? this.db.getPresetById(presetId) : null;
-        if (preset?.config?.encoding_type === 'gpu') {
-          const advertisedEncoders = node.system_info?.ffmpeg_encoders;
-          const supported = !Array.isArray(advertisedEncoders) || advertisedEncoders.length === 0
-            || advertisedEncoders.some((encoder: any) => encoder.available !== false
-              && encoder.type === 'gpu'
-              && encoder.gpu_type === preset.config.gpu_type
-              && encoder.codec === preset.config.video_codec);
-          if (supported) return { node, preset, gpuDeviceId };
+        if (preset?.config?.encoding_type !== 'gpu' || !this.gpuDeviceSupportsPreset(node, gpuDeviceId, preset)) continue;
+
+        if (!bestGpuRoute
+          || freeSlots > bestGpuRoute.freeSlots
+          || (freeSlots === bestGpuRoute.freeSlots && activeJobs < bestGpuRoute.activeJobs)) {
+          bestGpuRoute = { node, preset, gpuDeviceId, freeSlots, activeJobs };
         }
       }
+    }
+
+    if (bestGpuRoute) {
+      this.logger.debug(`[QUICK_SELECT] Evaluated ${connectedNodes} connected node(s), ${mappedNodes} mapped; selected ${bestGpuRoute.node.name} GPU ${bestGpuRoute.gpuDeviceId} with ${bestGpuRoute.freeSlots} free slot(s)`);
+      return {
+        node: bestGpuRoute.node,
+        preset: bestGpuRoute.preset,
+        gpuDeviceId: bestGpuRoute.gpuDeviceId,
+      };
     }
 
     const cpuPreset = route.cpu_preset_id ? this.db.getPresetById(route.cpu_preset_id) : null;

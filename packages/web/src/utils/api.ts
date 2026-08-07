@@ -365,6 +365,7 @@ export const api = {
     hasCpuWorkers: boolean;
     hasGpuWorkers: boolean;
     cpuWorkersAvailable: number;
+    gpuWorkersAvailable: number;
     details: any[];
   }>('/workers/availability'),
 
