@@ -320,8 +320,7 @@ export class GPUMonitor {
         '$samples = (Get-Counter -Counter "\\GPU Engine(*)\\Utilization Percentage" -SampleInterval 1 -MaxSamples 1).CounterSamples;',
         '$samples | ForEach-Object { [pscustomobject]@{ Name = $_.InstanceName; UtilizationPercentage = $_.CookedValue } }',
         '} catch {',
-        'Get-CimInstance -ClassName Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine',
-        '| Select-Object Name, UtilizationPercentage',
+        'Get-CimInstance -ClassName Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine | Select-Object Name, UtilizationPercentage',
         '};',
         '$result | ConvertTo-Json -Compress',
       ].join('\n');
