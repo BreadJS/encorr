@@ -2896,9 +2896,51 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
   fastify.get('/storage-reclaims', async (request, reply) => {
     const { limit, file_id } = request.query as { limit?: string; file_id?: string };
     const parsedLimit = Math.min(1000, Math.max(1, Number.parseInt(limit || '250', 10) || 250));
+    const latestReclaims = new Map<string, any>();
+    for (const reclaim of db.getLatestStorageReclaims()) {
+      if (reclaim.library_file_id) latestReclaims.set(reclaim.library_file_id, reclaim);
+    }
+    const pendingOutputs = db.getLatestTranscodeReports()
+      .filter((report: any) => {
+        const libraryFileId = report.library_file_id || report.file_id;
+        if (!libraryFileId || report.status !== 'completed' || report.output_available === 0 || !report.output_path) return false;
+        const reclaim = latestReclaims.get(libraryFileId);
+        if (!reclaim || reclaim.status === 'failed') return true;
+        const reportTime = Number(report.completed_at || report.created_at || 0);
+        const reclaimTime = Number(reclaim.completed_at || reclaim.reclaimed_at || reclaim.created_at || 0);
+        return reportTime > reclaimTime;
+      })
+      .map((report: any) => {
+        const libraryFileId = report.library_file_id || report.file_id;
+        const file = db.getLibraryFileById(libraryFileId);
+        if (!file) return null;
+        const library = db.getLibraryById(file.library_id);
+        const originalSize = Number(report.original_size || file.filesize || 0);
+        const outputSize = Number(report.output_size || 0);
+        return {
+          id: report.id,
+          library_file_id: libraryFileId,
+          filename: file.filename,
+          library_name: library?.name || null,
+          node_id: report.node_id || null,
+          node_name: report.node_name || null,
+          original_size: originalSize,
+          output_size: outputSize,
+          potential_savings: originalSize - outputSize,
+          original_codec: report.original_codec || null,
+          output_codec: report.output_codec || null,
+          preset_name: report.preset_name || null,
+          completed_at: report.completed_at || report.created_at || null,
+        };
+      })
+      .filter(Boolean)
+      .sort((a: any, b: any) => Number(b.completed_at || 0) - Number(a.completed_at || 0));
     return sendSuccess({
       summary: db.getStorageReclaimStats(),
       records: db.getStorageReclaims(parsedLimit, file_id),
+      pending_outputs: file_id
+        ? pendingOutputs.filter((output: any) => output.library_file_id === file_id)
+        : pendingOutputs.slice(0, parsedLimit),
     });
   });
 

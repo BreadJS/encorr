@@ -4,8 +4,10 @@ import {
   Archive,
   ArrowDownRight,
   CheckCircle2,
+  Copy,
   Database,
   HardDrive,
+  Replace,
   RefreshCw,
   ShieldCheck,
   AlertTriangle,
@@ -82,6 +84,10 @@ function SummaryCard({ label, value, detail, icon: Icon, accent }: {
 export function Storage() {
   const queryClient = useQueryClient();
   const [selectedBackups, setSelectedBackups] = useState<Set<string>>(new Set());
+  const [selectedOutputs, setSelectedOutputs] = useState<Set<string>>(new Set());
+  const [installAction, setInstallAction] = useState<'replace' | 'backup_replace' | null>(null);
+  const [installConfirmed, setInstallConfirmed] = useState(false);
+  const [installNotice, setInstallNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [showCleanupDialog, setShowCleanupDialog] = useState(false);
   const [cleanupConfirmed, setCleanupConfirmed] = useState(false);
   const [cleanupNotice, setCleanupNotice] = useState<{ type: 'success' | 'progress' | 'error'; message: string } | null>(null);
@@ -89,11 +95,14 @@ export function Storage() {
   const query = useQuery({
     queryKey: ['storage-reclaims'],
     queryFn: () => api.getStorageReclaims(500),
-    refetchInterval: result => result.state.data?.records.some(isBackupCleanupActive) ? 750 : 15000,
+    refetchInterval: result => result.state.data?.records.some(record => record.status === 'pending' || isBackupCleanupActive(record)) ? 750 : 15000,
   });
 
   const summary = query.data?.summary;
   const records = useMemo(() => query.data?.records || [], [query.data?.records]);
+  const pendingOutputs = useMemo(() => query.data?.pending_outputs || [], [query.data?.pending_outputs]);
+  const selectedOutputRecords = pendingOutputs.filter(output => selectedOutputs.has(output.id));
+  const allOutputsSelected = pendingOutputs.length > 0 && selectedOutputRecords.length === pendingOutputs.length;
   const retainedRecords = useMemo(() => records.filter(record => record.status === 'backup_retained'), [records]);
   const removableRecords = useMemo(() => retainedRecords.filter(record => !isBackupCleanupActive(record)), [retainedRecords]);
   const selectedRecords = removableRecords.filter(record => selectedBackups.has(record.id));
@@ -103,6 +112,11 @@ export function Storage() {
     const retainedIds = new Set(removableRecords.map(record => record.id));
     setSelectedBackups(previous => new Set(Array.from(previous).filter(id => retainedIds.has(id))));
   }, [removableRecords]);
+
+  useEffect(() => {
+    const outputIds = new Set(pendingOutputs.map(output => output.id));
+    setSelectedOutputs(previous => new Set(Array.from(previous).filter(id => outputIds.has(id))));
+  }, [pendingOutputs]);
 
   useEffect(() => {
     if (!cleanupBatch || cleanupBatch.ids.length === 0) return;
@@ -179,6 +193,37 @@ export function Storage() {
       void queryClient.invalidateQueries({ queryKey: ['jobs'] });
     },
   });
+  const installMutation = useMutation({
+    mutationFn: async ({ items, operation }: { items: typeof pendingOutputs; operation: 'replace' | 'backup_replace' }) => {
+      const succeeded: string[] = [];
+      const failures: string[] = [];
+      for (const item of items) {
+        try {
+          if (operation === 'replace') await api.replaceOriginalFile(item.library_file_id);
+          else await api.backupAndReplaceFile(item.library_file_id);
+          succeeded.push(item.id);
+        } catch (error) {
+          failures.push(`${item.filename}: ${error instanceof Error ? error.message : 'Could not start file operation'}`);
+        }
+      }
+      return { succeeded, failures, operation };
+    },
+    onSuccess: ({ succeeded, failures, operation }) => {
+      setInstallAction(null);
+      setInstallConfirmed(false);
+      setSelectedOutputs(previous => {
+        const next = new Set(previous);
+        succeeded.forEach(id => next.delete(id));
+        return next;
+      });
+      setInstallNotice(failures.length > 0
+        ? { type: 'error', message: `${succeeded.length.toLocaleString()} queued, ${failures.length.toLocaleString()} failed. ${failures[0]}` }
+        : { type: 'success', message: `${succeeded.length.toLocaleString()} ${operation === 'replace' ? 'move and replace' : 'backup and replace'} operation${succeeded.length === 1 ? '' : 's'} added to Jobs.` });
+      void queryClient.invalidateQueries({ queryKey: ['storage-reclaims'] });
+      void queryClient.invalidateQueries({ queryKey: ['jobs'] });
+      void queryClient.invalidateQueries({ queryKey: ['files'] });
+    },
+  });
   const originalSize = safeNumber(summary?.original_size);
   const replacementSize = safeNumber(summary?.replacement_size);
   const reclaimed = safeNumber(summary?.saved_space);
@@ -247,6 +292,99 @@ export function Storage() {
           <div className={`h-full rounded-full ${claimedShare > 100 ? 'bg-amber-400' : 'bg-gradient-to-r from-[#60a5fa] to-[#74c69d]'}`} style={{ width: `${Math.min(100, claimedShare)}%` }} />
         </div>
         <div className="mt-2 flex justify-between text-[10px] uppercase tracking-wider text-gray-600"><span>Current claimed footprint</span><span>{claimedShare.toFixed(1)}% of original baseline</span></div>
+      </section>
+
+      <section className={`${PANEL} overflow-hidden`}>
+        <div className="flex flex-col gap-3 border-b border-[#39363a] px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <h2 className="font-semibold text-white">Transcoded outputs awaiting installation</h2>
+            <p className="mt-1 text-xs text-gray-500">Completed outputs that are still separate from their originals. Select them to move into place.</p>
+          </div>
+          {selectedOutputRecords.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              <Button
+                onClick={() => { setInstallConfirmed(false); setInstallAction('backup_replace'); }}
+                className="border border-amber-500/30 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20"
+              >
+                <Copy className="mr-2 h-4 w-4" />Backup &amp; Replace ({selectedOutputRecords.length.toLocaleString()})
+              </Button>
+              <Button
+                onClick={() => { setInstallConfirmed(false); setInstallAction('replace'); }}
+                className="border border-red-500/35 bg-red-500/10 text-red-200 hover:bg-red-500/20"
+              >
+                <Replace className="mr-2 h-4 w-4" />Move &amp; Replace ({selectedOutputRecords.length.toLocaleString()})
+              </Button>
+            </div>
+          )}
+        </div>
+        {installNotice && (
+          <div className={`mx-5 mt-4 flex items-start gap-2 rounded-lg border px-3 py-2 text-sm ${installNotice.type === 'success' ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200' : 'border-red-500/30 bg-red-500/10 text-red-200'}`}>
+            {installNotice.type === 'success' ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" /> : <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />}
+            <span>{installNotice.message}</span>
+          </div>
+        )}
+        {pendingOutputs.length === 0 ? (
+          <div className="flex min-h-36 flex-col items-center justify-center px-6 text-center">
+            <CheckCircle2 className="h-5 w-5 text-gray-600" />
+            <p className="mt-2 text-sm font-medium text-gray-300">No separate transcoded outputs</p>
+            <p className="mt-1 text-xs text-gray-600">New completed transcodes kept beside their originals will appear here.</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[900px] text-left">
+              <thead className="border-b border-[#39363a] bg-black/10 text-[10px] uppercase tracking-[0.13em] text-gray-600">
+                <tr>
+                  <th className="w-12 px-4 py-3 text-center font-semibold">
+                    <input
+                      type="checkbox"
+                      checked={allOutputsSelected}
+                      onChange={() => setSelectedOutputs(allOutputsSelected ? new Set() : new Set(pendingOutputs.map(output => output.id)))}
+                      className="h-4 w-4 accent-[#74c69d]"
+                      aria-label="Select all transcoded outputs"
+                    />
+                  </th>
+                  <th className="px-5 py-3 font-semibold">File</th>
+                  <th className="px-4 py-3 font-semibold">Codec</th>
+                  <th className="px-4 py-3 text-right font-semibold">Original</th>
+                  <th className="px-4 py-3 text-right font-semibold">Output</th>
+                  <th className="px-4 py-3 text-right font-semibold">Potential savings</th>
+                  <th className="px-5 py-3 font-semibold">Completed</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#39363a]/70">
+                {pendingOutputs.map(output => (
+                  <tr key={output.id}>
+                    <td className="px-4 py-4 text-center">
+                      <input
+                        type="checkbox"
+                        checked={selectedOutputs.has(output.id)}
+                        onChange={() => setSelectedOutputs(previous => {
+                          const next = new Set(previous);
+                          if (next.has(output.id)) next.delete(output.id);
+                          else next.add(output.id);
+                          return next;
+                        })}
+                        className="h-4 w-4 accent-[#74c69d]"
+                        aria-label={`Select ${output.filename}`}
+                      />
+                    </td>
+                    <td className="max-w-[380px] px-5 py-4">
+                      <p className="truncate text-sm font-medium text-gray-200" title={output.filename}>{output.filename}</p>
+                      <p className="mt-1 truncate text-[11px] text-gray-600">{output.library_name || 'Unknown library'}{output.node_name ? ` · ${output.node_name}` : ''}{output.preset_name ? ` · ${output.preset_name}` : ''}</p>
+                    </td>
+                    <td className="px-4 py-4 text-xs text-gray-400">{output.original_codec || 'Unknown'} → <span className="text-[#95d5b2]">{output.output_codec || 'Unknown'}</span></td>
+                    <td className="px-4 py-4 text-right text-sm text-gray-400">{formatBytes(output.original_size)}</td>
+                    <td className="px-4 py-4 text-right text-sm text-gray-400">{formatBytes(output.output_size)}</td>
+                    <td className={`px-4 py-4 text-right text-sm font-medium ${output.potential_savings > 0 ? 'text-[#95d5b2]' : output.potential_savings < 0 ? 'text-amber-300' : 'text-gray-500'}`}>
+                      {output.potential_savings < 0 ? '+' : ''}{formatBytes(Math.abs(output.potential_savings))}
+                    </td>
+                    <td className="px-5 py-4 text-xs text-gray-500">{formatDate(output.completed_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
       <section className={`${PANEL} overflow-hidden`}>
@@ -351,6 +489,52 @@ export function Storage() {
           </div>
         )}
       </section>
+
+      <Dialog
+        open={installAction !== null}
+        onClose={() => {
+          if (installMutation.isPending) return;
+          setInstallAction(null);
+          setInstallConfirmed(false);
+        }}
+        title={installAction === 'replace' ? 'Move and replace originals?' : 'Backup and replace originals?'}
+        size="md"
+        footer={
+          <div className="flex w-full justify-end gap-2">
+            <Button onClick={() => setInstallAction(null)} disabled={installMutation.isPending} className="border border-[#39363a] text-gray-300">Cancel</Button>
+            <Button
+              onClick={() => installAction && installMutation.mutate({ items: selectedOutputRecords, operation: installAction })}
+              disabled={!installConfirmed || !installAction || selectedOutputRecords.length === 0 || installMutation.isPending}
+              className={installAction === 'replace' ? 'bg-red-600 text-white hover:bg-red-500 disabled:opacity-40' : 'bg-[#8a6428] text-white hover:bg-[#9b7331] disabled:opacity-40'}
+            >
+              {installMutation.isPending ? 'Adding to Jobs…' : installAction === 'replace' ? 'Move & Replace' : 'Backup & Replace'}
+            </Button>
+          </div>
+        }
+      >
+        <div className="space-y-4">
+          <div className={`rounded-xl border p-4 ${installAction === 'replace' ? 'border-red-500/35 bg-red-500/10' : 'border-amber-500/35 bg-amber-500/10'}`}>
+            <div className="flex items-start gap-3">
+              <AlertTriangle className={`mt-0.5 h-5 w-5 shrink-0 ${installAction === 'replace' ? 'text-red-400' : 'text-amber-400'}`} />
+              <div>
+                <p className="font-semibold text-white">This affects {selectedOutputRecords.length.toLocaleString()} file{selectedOutputRecords.length === 1 ? '' : 's'}.</p>
+                <p className="mt-1.5 text-sm leading-6 text-gray-300">
+                  {installAction === 'replace'
+                    ? 'Each transcoded output will be moved to the original path. The existing original is permanently removed and no backup is retained.'
+                    : 'Each original will be renamed with a .org backup before the transcoded output is moved into its place. Backups can be reviewed and removed here later.'}
+                </p>
+              </div>
+            </div>
+          </div>
+          <div className="max-h-36 overflow-auto rounded-lg border border-[#39363a] bg-[#1e1d1f] p-3">
+            {selectedOutputRecords.map(output => <p key={output.id} className="truncate py-0.5 text-xs text-gray-400">{output.filename} · {formatBytes(output.output_size)}</p>)}
+          </div>
+          <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-[#39363a] bg-[#252326] p-3">
+            <input type="checkbox" checked={installConfirmed} onChange={event => setInstallConfirmed(event.target.checked)} className="mt-0.5 h-4 w-4 accent-[#74c69d]" />
+            <span className="text-sm text-gray-300">I understand how the original files will be handled.</span>
+          </label>
+        </div>
+      </Dialog>
 
       <Dialog
         open={showCleanupDialog}

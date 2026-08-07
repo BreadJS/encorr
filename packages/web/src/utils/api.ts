@@ -359,6 +359,21 @@ export const api = {
       created_at: number;
       reclaimed_at?: number | null;
     }>;
+    pending_outputs: Array<{
+      id: string;
+      library_file_id: string;
+      filename: string;
+      library_name?: string | null;
+      node_id?: string | null;
+      node_name?: string | null;
+      original_size: number;
+      output_size: number;
+      potential_savings: number;
+      original_codec?: string | null;
+      output_codec?: string | null;
+      preset_name?: string | null;
+      completed_at?: number | null;
+    }>;
   }>(`/storage-reclaims?limit=${limit}${fileId ? `&file_id=${encodeURIComponent(fileId)}` : ''}`),
 
   // Worker availability

@@ -26,6 +26,12 @@ function formatDuration(seconds: number | undefined, isAnalyzed: boolean = false
   return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
 }
 
+function formatOutputSize(outputSize: number, originalSize: number): string {
+  const difference = Number(outputSize) - Number(originalSize);
+  const sign = difference > 0 ? '+' : difference < 0 ? '-' : '±';
+  return `${formatBytes(outputSize)} (${sign}${formatBytes(Math.abs(difference))})`;
+}
+
 type ViewMode = 'all' | 'folder';
 type ReplacementOperation = 'replace' | 'backup_replace' | 'cleanup_backup';
 
@@ -1002,7 +1008,7 @@ export function Files() {
                     <div className="text-xs text-gray-300 uppercase font-medium w-28 flex-shrink-0">Codec</div>
                     <div className="text-xs text-gray-300 uppercase font-medium w-28 flex-shrink-0">New Codec</div>
                     <div className="text-xs text-gray-300 uppercase font-medium w-20 flex-shrink-0">Res</div>
-                    <div className="text-xs text-gray-300 uppercase font-medium w-32 flex-shrink-0">Sizes</div>
+                    <div className="text-xs text-gray-300 uppercase font-medium w-44 flex-shrink-0">Sizes</div>
                     <div className="text-xs text-gray-300 uppercase font-medium w-24 flex-shrink-0">Status</div>
                     <div className="text-xs text-gray-300 uppercase font-medium w-16 flex-shrink-0 text-center">Actions</div>
                   </div>
@@ -1128,13 +1134,18 @@ export function Files() {
                         </div>
 
                         {/* Compact size history */}
-                        <div className="w-32 flex-shrink-0 space-y-0.5 text-[11px]">
+                        <div className="w-44 flex-shrink-0 space-y-0.5 text-[11px]">
                           {file.oldSize && (
-                            <div className="flex items-center justify-between gap-2 text-gray-500"><span>Old</span><span className="truncate text-gray-400">{formatBytes(file.oldSize)}</span></div>
+                            <div className="flex items-center justify-between gap-2 text-gray-500"><span>Original</span><span className="truncate text-gray-400">{formatBytes(file.oldSize)}</span></div>
                           )}
                           <div className="flex items-center justify-between gap-2 text-gray-500"><span>Current</span><span className="truncate text-gray-300">{formatBytes(file.filesize || file.file_size || file.size || 0)}</span></div>
                           {(file.displayStatus === 'transcoded' && file.outputSize) && (
-                            <div className="flex items-center justify-between gap-2 text-gray-500"><span>Output</span><span className="truncate text-green-400">{formatBytes(file.outputSize)}</span></div>
+                            <div className="flex items-center justify-between gap-2 text-gray-500">
+                              <span>Output</span>
+                              <span className={`truncate ${Number(file.outputSize) > Number(file.oldSize || file.filesize || file.file_size || file.size || 0) ? 'text-red-400' : 'text-green-400'}`}>
+                                {formatOutputSize(Number(file.outputSize), Number(file.oldSize || file.filesize || file.file_size || file.size || 0))}
+                              </span>
+                            </div>
                           )}
                         </div>
 
