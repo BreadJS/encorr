@@ -1819,6 +1819,25 @@ export class EncorrWebSocketServer {
     return preset?.config?.action === 'analyze';
   }
 
+  private resolveMappingForNode(nodeId: string, file: any): any | null {
+    if (!file?.folder_mapping_id) return null;
+    const sourceMapping = this.db.getFolderMappingById(file.folder_mapping_id);
+    if (!sourceMapping) return null;
+
+    const nodeMappings = this.db.getFolderMappingsByNode(nodeId);
+    if (sourceMapping.server_path?.startsWith('library:')) {
+      return nodeMappings.find(mapping => mapping.server_path === sourceMapping.server_path) || null;
+    }
+
+    if (sourceMapping.node_id === nodeId) return sourceMapping;
+    return nodeMappings.find(mapping => mapping.server_path === sourceMapping.server_path) || null;
+  }
+
+  private nodeCanAccessJob(node: any, job: any): boolean {
+    const file = this.db.getFileById(job.file_id);
+    return Boolean(this.resolveMappingForNode(node.id, file));
+  }
+
   private reserveCpuAssignment(nodeId: string, jobId: string): void {
     const reservations = this.cpuJobReservations.get(nodeId) || new Set<string>();
     reservations.add(jobId);
@@ -2007,6 +2026,7 @@ export class EncorrWebSocketServer {
     if (!route) return null;
 
     if (job.allow_gpu !== false) for (const node of onlineNodes) {
+      if (!this.nodeCanAccessJob(node, job)) continue;
       const available = this.getAvailableWorkers(node);
       const gpus = node.system_info?.gpus || [];
       for (let gpuDeviceId = 0; gpuDeviceId < available.gpus.length; gpuDeviceId++) {
@@ -2032,7 +2052,7 @@ export class EncorrWebSocketServer {
 
     const cpuPreset = route.cpu_preset_id ? this.db.getPresetById(route.cpu_preset_id) : null;
     if (job.allow_cpu !== false && cpuPreset) {
-      const node = this.findNodeWithAvailableCpu(onlineNodes);
+      const node = this.findNodeWithAvailableCpu(onlineNodes, job);
       if (node) return { node, preset: cpuPreset };
     }
     return null;
@@ -2143,7 +2163,7 @@ export class EncorrWebSocketServer {
     // Process analyze jobs first (they're quick and CPU-only)
     for (const { job, preset } of analyzeJobs) {
       // Find node with available CPU workers
-      const nodeWithCpu = this.findNodeWithAvailableCpu(onlineNodes);
+      const nodeWithCpu = this.findNodeWithAvailableCpu(onlineNodes, job);
       if (!nodeWithCpu) {
         this.logger.debug(`CPU capacity is full; leaving ${analyzeJobs.length - assignedCount} analyze job(s) queued`);
         break;
@@ -2182,7 +2202,7 @@ export class EncorrWebSocketServer {
 
       if (usesGpu) {
         // Find node with available GPU workers
-        const nodeWithGpu = this.findNodeWithAvailableGpu(onlineNodes, preset);
+        const nodeWithGpu = this.findNodeWithAvailableGpu(onlineNodes, preset, job);
         if (nodeWithGpu) {
           // Log available GPUs on this node BEFORE finding one
           const availableBefore = this.getAvailableWorkers(nodeWithGpu);
@@ -2219,7 +2239,7 @@ export class EncorrWebSocketServer {
 
       // CPU jobs - assign to CPU workers
       if (cpuCapacityExhausted) continue;
-      const nodeWithCpu = this.findNodeWithAvailableCpu(onlineNodes);
+      const nodeWithCpu = this.findNodeWithAvailableCpu(onlineNodes, job);
       if (nodeWithCpu) {
         if (this.assignJobToNodeWithRetry(nodeWithCpu, job, preset)) {
           assignedCount++;
@@ -2240,7 +2260,7 @@ export class EncorrWebSocketServer {
     }
   }
 
-  private findNodeWithAvailableCpu(nodes: any[]): any | null {
+  private findNodeWithAvailableCpu(nodes: any[], job?: any): any | null {
     // Find the node with available CPU workers (load balanced)
     let bestNode: any | null = null;
     let maxAvailableCpu = 0;
@@ -2252,6 +2272,10 @@ export class EncorrWebSocketServer {
       // Skip nodes that are not actually connected (WebSocket disconnected)
       if (!this.isNodeConnected(node.id)) {
         this.logger.debug(`[FIND_CPU] Skipping node ${node.name} (${node.id}) - not connected via WebSocket`);
+        continue;
+      }
+      if (job && !this.nodeCanAccessJob(node, job)) {
+        this.logger.debug(`[FIND_CPU] Skipping node ${node.name} for job ${job.id} - no matching folder mapping`);
         continue;
       }
 
@@ -2282,7 +2306,7 @@ export class EncorrWebSocketServer {
     return bestNode;
   }
 
-  private findNodeWithAvailableGpu(nodes: any[], preset?: any): any | null {
+  private findNodeWithAvailableGpu(nodes: any[], preset?: any, job?: any): any | null {
     // Find the node with the MOST available GPU slots (load balancing)
     // When tied, prefer the node with fewer active jobs (better load distribution)
     let bestNode: any | null = null;
@@ -2293,6 +2317,10 @@ export class EncorrWebSocketServer {
       // Skip nodes that are not actually connected (WebSocket disconnected)
       if (!this.isNodeConnected(node.id)) {
         this.logger.debug(`[GPU_AVAIL] Skipping node ${node.name} (${node.id}) - not connected via WebSocket`);
+        continue;
+      }
+      if (job && !this.nodeCanAccessJob(node, job)) {
+        this.logger.debug(`[GPU_AVAIL] Skipping node ${node.name} for job ${job.id} - no matching folder mapping`);
         continue;
       }
 
@@ -2337,38 +2365,18 @@ export class EncorrWebSocketServer {
       return false;
     }
 
-    let mapping = this.db.getFolderMappingById(file.folder_mapping_id);
-    if (!mapping) {
+    const sourceMapping = this.db.getFolderMappingById(file.folder_mapping_id);
+    if (!sourceMapping) {
       this.logger.warn(`Job ${job.id}: folder mapping ${file.folder_mapping_id} not found`);
       return false;
     }
 
-    // Variable to track if we should use the library's server path directly (no mapping needed)
-    let useLibraryServerPath = false;
-    let libraryServerPath: string | undefined;
-
-    // For library mappings, check if there's a node-specific mapping for the target node
-    if (mapping.server_path?.startsWith('library:')) {
-      const libraryId = mapping.server_path.replace('library:', '');
-      const nodeMappings = this.db.getFolderMappingsByNode(node.id);
-      const nodeSpecificMapping = nodeMappings.find(m => m.server_path === `library:${libraryId}`);
-
-      if (nodeSpecificMapping) {
-        this.logger.info(`[NODE_MAPPING] Found node-specific mapping for node ${node.name} and library ${libraryId}`);
-        mapping = nodeSpecificMapping;
-      } else {
-        // No node-specific mapping exists - use the library's server path directly
-        // This allows nodes running on the same machine as the server to access files directly
-        const library = this.db.getLibraryById(libraryId);
-        if (library) {
-          this.logger.info(`[NODE_MAPPING] No node-specific mapping for node ${node.name} and library ${libraryId}, using library server path: ${library.path}`);
-          useLibraryServerPath = true;
-          libraryServerPath = library.path;
-        } else {
-          this.logger.warn(`[NODE_MAPPING] Library ${libraryId} not found, falling back to default mapping`);
-        }
-      }
+    const mapping = this.resolveMappingForNode(node.id, file);
+    if (!mapping) {
+      this.logger.warn(`[NODE_MAPPING] Not assigning job ${job.id} to ${node.name}: no mapping for ${sourceMapping.server_path}`);
+      return false;
     }
+    this.logger.info(`[NODE_MAPPING] Job ${job.id} on ${node.name}: ${sourceMapping.server_path} -> ${mapping.node_path}`);
 
     // Check if this is an analyze-only job
     const isAnalyzeJob = preset.config?.action === 'analyze';
@@ -2378,13 +2386,13 @@ export class EncorrWebSocketServer {
     let metadata: any = undefined;
 
     // For library files, get metadata from library_files table
-    if (mapping.server_path?.startsWith('library:')) {
-      const basePath = useLibraryServerPath ? libraryServerPath : mapping.node_path;
-      const fullPath = basePath && !basePath.includes('.mkv') && !basePath.includes('.mp4') && !basePath.includes('.avi')
-        ? `${basePath}/${file.relative_path}`
-        : basePath || file.relative_path;
-
-      const libFile = this.db.getLibraryFileByFilepath(fullPath);
+    if (sourceMapping.server_path?.startsWith('library:')) {
+      const libraryId = sourceMapping.server_path.replace('library:', '');
+      const library = this.db.getLibraryById(libraryId);
+      const serverFilePath = library
+        ? `${library.path.replace(/[\\/]+$/, '')}/${file.relative_path.replace(/^[\\/]+/, '')}`
+        : '';
+      const libFile = serverFilePath ? this.db.getLibraryFileByFilepath(serverFilePath) : undefined;
       if (libFile?.metadata) {
         metadata = libFile.metadata;
       }
@@ -2421,8 +2429,8 @@ export class EncorrWebSocketServer {
     // Determine source path
     let sourcePath: string;
 
-    if (mapping.server_path?.startsWith('library:')) {
-      const basePath = useLibraryServerPath ? libraryServerPath! : mapping.node_path;
+    if (sourceMapping.server_path?.startsWith('library:')) {
+      const basePath = mapping.node_path;
       if (basePath && (basePath.includes('.mkv') || basePath.includes('.mp4') || basePath.includes('.avi'))) {
         sourcePath = basePath;
       } else {
@@ -2435,8 +2443,8 @@ export class EncorrWebSocketServer {
     // Determine destination path (only for transcode jobs, not analyze)
     let destPath: string | undefined;
     if (!isAnalyzeJob) {
-      if (mapping.server_path?.startsWith('library:')) {
-        const basePath = useLibraryServerPath ? libraryServerPath! : mapping.node_path;
+      if (sourceMapping.server_path?.startsWith('library:')) {
+        const basePath = mapping.node_path;
         if (basePath && (basePath.includes('.mkv') || basePath.includes('.mp4') || basePath.includes('.avi'))) {
           destPath = basePath.replace(/\.[^.]+$/, '_enc.mkv');
         } else {

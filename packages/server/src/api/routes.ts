@@ -484,6 +484,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     });
 
     logger.info(`Folder mapping created: ${mapping.id}`);
+    wsServer.assignJobsNow();
 
     return sendSuccess(mapping);
   });
@@ -518,6 +519,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     db.updateFolderMapping(id, data);
 
     const updated = db.getFolderMappingById(id);
+    wsServer.assignJobsNow();
     return sendSuccess(updated);
   });
 
