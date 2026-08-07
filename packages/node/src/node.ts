@@ -965,6 +965,7 @@ export class EncorrNode {
           const hardwareDevice = isAmd
             ? amdDrmDevices[nextAmdDevice++]
             : isIntel ? intelDrmDevices[nextIntelDevice++] : undefined;
+          const controllerPciBus = (controller as any).pciBus || (controller as any).busAddress;
 
           gpus.push({
             name: controller.model || 'Unknown GPU',
@@ -983,7 +984,7 @@ export class EncorrNode {
             clockMemory,
             drm_card: hardwareDevice?.drmCard,
             device_path: hardwareDevice?.renderNode,
-            pci_bus: hardwareDevice?.pciBus,
+            pci_bus: hardwareDevice?.pciBus || controllerPciBus,
           });
         }
       }
@@ -1018,12 +1019,82 @@ export class EncorrNode {
         });
       }
 
-      this.logger.info(`Detected ${gpus.length} GPU(s)`);
     } catch (error: any) {
       this.logger.error('GPU detection failed:', error?.message || error);
     }
 
-    return gpus;
+    const uniqueGpus = this.deduplicateGPUs(gpus);
+    this.logger.info(`Detected ${uniqueGpus.length} GPU(s)`);
+    return uniqueGpus;
+  }
+
+  /** Linux may report one NVIDIA adapter through both lspci and OpenCL. Some
+   * OpenCL drivers return the PCI bus as decimal (`16`) while lspci returns the
+   * same bus as hexadecimal (`10`). Collapse that alias only when the model is
+   * the same and one entry lacks driver telemetry, preserving real multi-GPU
+   * systems containing two cards of the same model. */
+  private deduplicateGPUs(gpus: GPUInfo[]): GPUInfo[] {
+    const uniqueGpus: GPUInfo[] = [];
+
+    for (const gpu of gpus) {
+      const pciAddress = this.parsePciAddress(gpu.pci_bus);
+      const modelSignature = this.getGpuModelSignature(gpu);
+      const duplicateIndex = uniqueGpus.findIndex(existing => {
+        const existingPciAddress = this.parsePciAddress(existing.pci_bus);
+        if (pciAddress && existingPciAddress && pciAddress.full === existingPciAddress.full) {
+          return true;
+        }
+
+        if (!pciAddress || !existingPciAddress || !modelSignature || modelSignature !== this.getGpuModelSignature(existing)) {
+          return false;
+        }
+
+        const decimalHexAlias = (
+          Number.parseInt(pciAddress.bus, 10).toString(16).padStart(2, '0') === existingPciAddress.bus
+          || Number.parseInt(existingPciAddress.bus, 10).toString(16).padStart(2, '0') === pciAddress.bus
+        ) && pciAddress.deviceFunction === existingPciAddress.deviceFunction;
+        return decimalHexAlias && (!this.hasGpuDriverTelemetry(gpu) || !this.hasGpuDriverTelemetry(existing));
+      });
+
+      if (duplicateIndex < 0) {
+        uniqueGpus.push(gpu);
+        continue;
+      }
+
+      const existing = uniqueGpus[duplicateIndex];
+      const primary = this.hasGpuDriverTelemetry(existing) ? existing : gpu;
+      const secondary = primary === existing ? gpu : existing;
+      const merged: any = { ...secondary, ...primary };
+      for (const [key, value] of Object.entries(secondary)) {
+        if (merged[key] === undefined || merged[key] === null || merged[key] === '') merged[key] = value;
+      }
+      uniqueGpus[duplicateIndex] = merged as GPUInfo;
+      this.logger.info(`Ignoring duplicate GPU discovery for ${gpu.name} (${existing.pci_bus} / ${gpu.pci_bus})`);
+    }
+
+    return uniqueGpus;
+  }
+
+  private parsePciAddress(value?: string): { full: string; bus: string; deviceFunction: string } | null {
+    const match = value?.toLowerCase().match(/([0-9a-f]{2}):([0-9a-f]{2}\.[0-9a-f])$/);
+    return match ? { full: `${match[1]}:${match[2]}`, bus: match[1], deviceFunction: match[2] } : null;
+  }
+
+  private getGpuModelSignature(gpu: GPUInfo): string | null {
+    const identity = `${gpu.vendor || ''} ${gpu.name || ''}`.toLowerCase();
+    const nvidiaModel = identity.match(/\b(?:geforce\s*)?(rtx|gtx)\s*(\d{3,4})(?:\s*(ti|super))?\b/);
+    if (nvidiaModel) return `nvidia:${nvidiaModel[1]}:${nvidiaModel[2]}:${nvidiaModel[3] || ''}`;
+    return null;
+  }
+
+  private hasGpuDriverTelemetry(gpu: GPUInfo): boolean {
+    return Boolean(
+      gpu.driver_version
+      || gpu.utilizationGpu !== undefined
+      || gpu.temperatureGpu !== undefined
+      || gpu.powerDraw !== undefined
+      || gpu.memoryUsed !== undefined
+    );
   }
 
   private async checkGPUMonitoringAvailability(): Promise<void> {
@@ -1038,6 +1109,9 @@ export class EncorrNode {
       gpu.vendor?.toLowerCase().includes('amd') || gpu.name?.toLowerCase().includes('amd') ||
       gpu.vendor?.toLowerCase().includes('advanced micro') ||
       /\bati\b/.test(gpu.vendor?.toLowerCase() || '') || gpu.name?.toLowerCase().includes('radeon')
+    );
+    const hasIntel = this.systemInfo.gpus.some(gpu =>
+      /\bintel\b|\barc(?:\(tm\))?\b/i.test(`${gpu.vendor || ''} ${gpu.name || ''}`)
     );
 
     const methods: string[] = [];
@@ -1056,10 +1130,14 @@ export class EncorrNode {
       }
     }
 
+    if (hasIntel && process.platform === 'win32') {
+      methods.push('Windows GPU Engine counters (Intel GPUs)');
+    }
+
     if (methods.length > 0) {
       this.logger.info(`GPU monitoring enabled using: ${methods.join(', ')}`);
     } else {
-      this.logger.warn('GPU monitoring disabled - no vendor tools available (nvidia-smi or AMD sysfs)');
+      this.logger.warn('GPU monitoring disabled - no compatible vendor telemetry source is available');
     }
   }
 

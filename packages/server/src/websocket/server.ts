@@ -166,15 +166,68 @@ export class EncorrWebSocketServer {
       return true; // Keep this GPU
     });
 
-    const removedCount = systemInfo.gpus.length - filteredGpus.length;
+    const uniqueGpus: any[] = [];
+    for (const gpu of filteredGpus) {
+      const pciAddress = this.parseGpuPciAddress(gpu.pci_bus);
+      const modelSignature = this.getGpuModelSignature(gpu);
+      const duplicateIndex = uniqueGpus.findIndex(existing => {
+        const existingPciAddress = this.parseGpuPciAddress(existing.pci_bus);
+        if (pciAddress && existingPciAddress && pciAddress.full === existingPciAddress.full) return true;
+        if (!pciAddress || !existingPciAddress || !modelSignature || modelSignature !== this.getGpuModelSignature(existing)) return false;
+
+        const decimalHexAlias = (
+          Number.parseInt(pciAddress.bus, 10).toString(16).padStart(2, '0') === existingPciAddress.bus
+          || Number.parseInt(existingPciAddress.bus, 10).toString(16).padStart(2, '0') === pciAddress.bus
+        ) && pciAddress.deviceFunction === existingPciAddress.deviceFunction;
+        return decimalHexAlias && (!this.hasGpuDriverTelemetry(gpu) || !this.hasGpuDriverTelemetry(existing));
+      });
+
+      if (duplicateIndex < 0) {
+        uniqueGpus.push(gpu);
+        continue;
+      }
+
+      const existing = uniqueGpus[duplicateIndex];
+      const primary = this.hasGpuDriverTelemetry(existing) ? existing : gpu;
+      const secondary = primary === existing ? gpu : existing;
+      const merged = { ...secondary, ...primary };
+      for (const [key, value] of Object.entries(secondary)) {
+        if (merged[key] === undefined || merged[key] === null || merged[key] === '') merged[key] = value;
+      }
+      uniqueGpus[duplicateIndex] = merged;
+      this.logger.info(`Collapsed duplicate GPU ${gpu.name || gpu.model} (${existing.pci_bus} / ${gpu.pci_bus})`);
+    }
+
+    const removedCount = systemInfo.gpus.length - uniqueGpus.length;
     if (removedCount > 0) {
-      this.logger.info(`Filtered GPUs: ${systemInfo.gpus.length} -> ${filteredGpus.length} (removed ${removedCount} integrated GPU(s))`);
+      this.logger.info(`Normalized GPUs: ${systemInfo.gpus.length} -> ${uniqueGpus.length} (removed ${removedCount} duplicate or unsupported entry/entries)`);
     }
 
     return {
       ...systemInfo,
-      gpus: filteredGpus,
+      gpus: uniqueGpus,
     };
+  }
+
+  private parseGpuPciAddress(value?: string): { full: string; bus: string; deviceFunction: string } | null {
+    const match = value?.toLowerCase().match(/([0-9a-f]{2}):([0-9a-f]{2}\.[0-9a-f])$/);
+    return match ? { full: `${match[1]}:${match[2]}`, bus: match[1], deviceFunction: match[2] } : null;
+  }
+
+  private getGpuModelSignature(gpu: any): string | null {
+    const identity = `${gpu.vendor || ''} ${gpu.name || gpu.model || ''}`.toLowerCase();
+    const nvidiaModel = identity.match(/\b(?:geforce\s*)?(rtx|gtx)\s*(\d{3,4})(?:\s*(ti|super))?\b/);
+    return nvidiaModel ? `nvidia:${nvidiaModel[1]}:${nvidiaModel[2]}:${nvidiaModel[3] || ''}` : null;
+  }
+
+  private hasGpuDriverTelemetry(gpu: any): boolean {
+    return Boolean(
+      gpu.driver_version
+      || gpu.utilizationGpu !== undefined
+      || gpu.temperatureGpu !== undefined
+      || gpu.powerDraw !== undefined
+      || gpu.memoryUsed !== undefined
+    );
   }
 
   // ========================================================================
@@ -384,6 +437,16 @@ export class EncorrWebSocketServer {
             ],
           });
           this.logger.info(`Added worker slots for ${detectedGpuCount - currentLimits.gpus.length} newly detected GPU(s)`);
+        } else if (currentLimits.gpus.length > detectedGpuCount) {
+          // A previous node version may have registered the same physical GPU
+          // twice. Keep the configured values for real devices but drop the
+          // now-invalid trailing slots as soon as corrected hardware data
+          // arrives, so scheduling cannot target a phantom GPU.
+          this.db.updateNodeMaxWorkers(node.id, {
+            cpu: currentLimits.cpu,
+            gpus: currentLimits.gpus.slice(0, detectedGpuCount),
+          });
+          this.logger.info(`Removed ${currentLimits.gpus.length - detectedGpuCount} stale GPU worker slot(s)`);
         }
       } else {
         // Create new node

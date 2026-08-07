@@ -23,6 +23,10 @@ export interface GPUUsageData {
 // ============================================================================
 
 export class GPUMonitor {
+  private intelUsageCache = new Map<number, GPUUsageData>();
+  private intelUsageCacheAt = 0;
+  private intelUsageQuery: Promise<Map<number, GPUUsageData>> | null = null;
+
   /**
    * Get GPU usage for all GPUs using vendor-specific methods
    * Much faster than si.graphics()!
@@ -84,8 +88,11 @@ export class GPUMonitor {
         const physicalIndexes = [...usageByPhysicalIndex.keys()].sort((a, b) => a - b);
 
         intelGpus.forEach(({ index }, intelIndex) => {
+          const fallbackPhysicalIndex = physicalIndexes[intelIndex];
           const usage = usageByPhysicalIndex.get(index)
-            ?? usageByPhysicalIndex.get(physicalIndexes[intelIndex]);
+            ?? (fallbackPhysicalIndex !== undefined
+              ? usageByPhysicalIndex.get(fallbackPhysicalIndex)
+              : undefined);
           if (usage) results.set(index, usage);
         });
       } catch (error: any) {
@@ -249,6 +256,26 @@ export class GPUMonitor {
    * than summing simultaneous 3D, encode, decode, and copy engines.
    */
   private async getWindowsGpuEngineUsage(): Promise<Map<number, GPUUsageData>> {
+    const now = Date.now();
+    if (now - this.intelUsageCacheAt < 900) {
+      return this.intelUsageCache;
+    }
+    if (this.intelUsageQuery) {
+      return this.intelUsageQuery;
+    }
+
+    this.intelUsageQuery = this.queryWindowsGpuEngineUsage();
+    try {
+      const usage = await this.intelUsageQuery;
+      this.intelUsageCache = usage;
+      this.intelUsageCacheAt = Date.now();
+      return usage;
+    } finally {
+      this.intelUsageQuery = null;
+    }
+  }
+
+  private async queryWindowsGpuEngineUsage(): Promise<Map<number, GPUUsageData>> {
     return new Promise((resolve, reject) => {
       const script = [
         '$ErrorActionPreference = "Stop"',
