@@ -155,11 +155,11 @@ export class EncorrWebSocketServer {
       // Intel Arc and Intel integrated graphics both expose usable Quick Sync
       // encoders. Capability checks later verify that FFmpeg actually reports
       // h264_qsv/hevc_qsv before a job can be routed here.
-      if (vendor.includes('intel') || name.includes('intel') || name.includes('arc')) return true;
+      if (/\bintel\b|\barc(?:\(tm\))?\b/.test(`${vendor} ${name}`)) return true;
 
       // AMD APUs expose usable AMF/VAAPI encoders too. Keep them available as
       // workers instead of guessing capability from their name or shared VRAM.
-      if (vendor.includes('amd') || vendor.includes('ati') || vendor.includes('radeon') || vendor.includes('advanced')) {
+      if (/\bamd\b|advanced micro devices|\bradeon\b|\bati\b/.test(`${vendor} ${name}`)) {
         return true;
       }
 
@@ -538,7 +538,7 @@ export class EncorrWebSocketServer {
 
             // AMD GPUs match AMD
             if (existingVendor.includes('amd') || existingVendor.includes('advanced') || existingName.includes('amd') ||
-                existingName.includes('radeon') || existingVendor.includes('ati')) {
+                existingName.includes('radeon') || /\bati\b/.test(existingVendor)) {
               return true;
             }
 
@@ -2066,9 +2066,9 @@ export class EncorrWebSocketServer {
     const identity = `${gpu?.vendor || ''} ${gpu?.name || ''}`.toLowerCase();
     const actualVendor = /nvidia|geforce|quadro|tesla/.test(identity)
       ? 'nvidia'
-      : /amd|advanced micro|radeon|ati/.test(identity)
+      : /\bamd\b|advanced micro devices|\bradeon\b|\bati\b/.test(identity)
         ? 'amd'
-        : /intel/.test(identity) ? 'intel' : null;
+        : /\bintel\b|\barc(?:\(tm\))?\b/.test(identity) ? 'intel' : null;
     if (actualVendor !== requestedVendor) return false;
 
     const advertisedEncoders = node.system_info?.ffmpeg_encoders;
@@ -2125,9 +2125,9 @@ export class EncorrWebSocketServer {
         const identity = `${gpus[gpuDeviceId]?.vendor || ''} ${gpus[gpuDeviceId]?.name || ''}`.toLowerCase();
         const presetId = identity.includes('nvidia')
           ? route.nvidia_preset_id
-          : identity.includes('amd') || identity.includes('advanced micro') || identity.includes('radeon') || identity.includes('ati')
+          : /\bamd\b|advanced micro devices|\bradeon\b|\bati\b/.test(identity)
             ? route.amd_preset_id
-            : identity.includes('intel') ? route.intel_preset_id : null;
+            : /\bintel\b|\barc(?:\(tm\))?\b/.test(identity) ? route.intel_preset_id : null;
         const preset = presetId ? this.db.getPresetById(presetId) : null;
         if (preset?.config?.encoding_type !== 'gpu' || !this.gpuDeviceSupportsPreset(node, gpuDeviceId, preset)) continue;
 

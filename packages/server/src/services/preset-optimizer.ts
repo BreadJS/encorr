@@ -429,9 +429,9 @@ export class PresetOptimizer {
           const vendor = gpu.vendor?.toLowerCase() || '';
           if (vendor.includes('nvidia')) {
             caps.nvidia.hasGpu = true;
-          } else if (vendor.includes('intel')) {
+          } else if (/\bintel\b|\barc(?:\(tm\))?\b/.test(`${vendor} ${(gpu.name || '').toLowerCase()}`)) {
             caps.intel.hasGpu = true;
-          } else if (vendor.includes('amd') || vendor.includes('advanced micro') || vendor.includes('ati') || vendor.includes('radeon')) {
+          } else if (/\bamd\b|advanced micro devices|\bradeon\b|\bati\b/.test(vendor)) {
             caps.amd.hasGpu = true;
           }
         }

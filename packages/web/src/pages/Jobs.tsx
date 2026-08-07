@@ -57,8 +57,8 @@ function cleanGpuName(name?: string) {
 function vendorColor(vendor?: string, name?: string) {
   const value = `${vendor || ''} ${name || ''}`.toLowerCase();
   if (value.includes('nvidia')) return '#76b900';
-  if (value.includes('amd') || value.includes('advanced micro') || value.includes('radeon') || value.includes('ati')) return '#ef4444';
-  if (value.includes('intel') || value.includes('arc')) return '#3b82f6';
+  if (/\bintel\b|\barc(?:\(tm\))?\b/.test(value)) return '#3b82f6';
+  if (/\bamd\b|advanced micro devices|\bradeon\b|\bati\b/.test(value)) return '#ef4444';
   return '#74c69d';
 }
 
@@ -423,7 +423,9 @@ function WorkerCard({
                   </div>
                   <ProgressBar value={gpu.utilizationGpu} color={color} />
                   <p className="mt-1 text-[10px] text-gray-500">
-                    {gpu.memory ? `${formatBytes(numberValue(gpu.memoryUsed))} / ${formatBytes(numberValue(gpu.memory))} VRAM` : 'VRAM unavailable'}
+                    {gpu.memory_type === 'shared' && gpu.memory
+                      ? `${formatBytes(numberValue(gpu.memory))} shared GPU memory`
+                      : gpu.memory ? `${formatBytes(numberValue(gpu.memoryUsed))} / ${formatBytes(numberValue(gpu.memory))} VRAM` : 'VRAM unavailable'}
                   </p>
                 </div>
               );

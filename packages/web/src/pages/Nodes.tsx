@@ -52,8 +52,8 @@ function cleanGpuName(name?: string) {
 function gpuColor(vendor?: string, name?: string) {
   const normalized = `${vendor || ''} ${name || ''}`.toLowerCase();
   if (normalized.includes('nvidia')) return '#76b900';
-  if (normalized.includes('amd') || normalized.includes('advanced micro') || normalized.includes('radeon') || normalized.includes('ati')) return '#ef4444';
-  if (normalized.includes('intel') || normalized.includes('arc')) return '#3b82f6';
+  if (/\bintel\b|\barc(?:\(tm\))?\b/.test(normalized)) return '#3b82f6';
+  if (/\bamd\b|advanced micro devices|\bradeon\b|\bati\b/.test(normalized)) return '#ef4444';
   if (normalized.includes('apple')) return '#a8a8ad';
   return '#74c69d';
 }
@@ -373,14 +373,16 @@ function NodeCard({
                         </div>
                         <div>
                           <div className="mb-1.5 flex justify-between gap-2 text-[11px]">
-                            <span className="text-gray-500">VRAM</span>
+                            <span className="text-gray-500">{gpu.memory_type === 'shared' ? 'Shared GPU memory' : 'VRAM'}</span>
                             <span className="truncate tabular-nums text-gray-400">
-                              {memoryTotal > 0
+                              {gpu.memory_type === 'shared' && memoryUsed <= 0 && memoryTotal > 0
+                                ? `${formatBytes(memoryTotal)} available`
+                                : memoryTotal > 0
                                 ? `${formatBytes(memoryUsed)} / ${formatBytes(memoryTotal)}`
                                 : 'Unavailable'}
                             </span>
                           </div>
-                          <UsageBar value={memoryUsage} color="#8e7cc3" />
+                          <UsageBar value={memoryUsage} color={gpu.memory_type === 'shared' ? color : '#8e7cc3'} />
                         </div>
                       </div>
 

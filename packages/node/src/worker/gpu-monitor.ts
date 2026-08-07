@@ -40,7 +40,7 @@ export class GPUMonitor {
 
       if (vendor.includes('nvidia')) {
         nvidiaGpus.push({ index: i, gpu });
-      } else if (vendor.includes('amd') || vendor.includes('advanced micro') || vendor.includes('radeon') || vendor.includes('ati')) {
+      } else if (/\bamd\b|advanced micro devices|\bradeon\b|\bati\b/.test(vendor)) {
         amdGpus.push({ index: i, gpu });
       }
       // Intel and others - skip for now
@@ -225,7 +225,7 @@ export class GPUMonitor {
     if (name.includes('nvidia') || name.includes('geforce') || name.includes('quadro') || name.includes('tesla')) {
       return 'nvidia';
     }
-    if (name.includes('amd') || name.includes('advanced micro') || name.includes('radeon') || name.includes('ati')) {
+    if (/\bamd\b|advanced micro devices|\bradeon\b|\bati\b/.test(name)) {
       return 'amd';
     }
     return 'unknown';

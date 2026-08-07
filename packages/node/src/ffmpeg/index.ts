@@ -134,8 +134,8 @@ function hasGpuVendor(gpus: GPUInfo[] | undefined, vendor: GPUVendor): boolean {
   return gpus.some(gpu => {
     const identity = `${gpu.vendor || ''} ${gpu.name || ''}`.toLowerCase();
     if (vendor === 'nvidia') return /nvidia|geforce|quadro|tesla/.test(identity);
-    if (vendor === 'amd') return /amd|advanced micro|radeon|ati/.test(identity);
-    return /intel/.test(identity);
+    if (vendor === 'amd') return /\bamd\b|advanced micro devices|\bradeon\b|\bati\b/.test(identity);
+    return /\bintel\b|\barc(?:\(tm\))?\b/.test(identity);
   });
 }
 

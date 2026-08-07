@@ -2231,8 +2231,8 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       for (const gpu of node.system_info?.gpus || []) {
         const identity = `${gpu.vendor || ''} ${gpu.name || ''}`.toLowerCase();
         if (/nvidia|geforce|quadro|tesla/.test(identity)) availableGpuVendors.add('nvidia');
-        else if (/amd|advanced micro|radeon|ati/.test(identity)) availableGpuVendors.add('amd');
-        else if (/intel/.test(identity)) availableGpuVendors.add('intel');
+        else if (/\bintel\b|\barc(?:\(tm\))?\b/.test(identity)) availableGpuVendors.add('intel');
+        else if (/\bamd\b|advanced micro devices|\bradeon\b|\bati\b/.test(identity)) availableGpuVendors.add('amd');
       }
     }
     const compatibleGpuPreset = presets.find(preset =>

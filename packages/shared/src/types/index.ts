@@ -94,6 +94,7 @@ export interface GPUInfo {
   device_path?: string;
   pci_bus?: string;
   memory?: number;
+  memory_type?: 'dedicated' | 'shared';
   memoryFree?: number;
   memoryUsed?: number;
   driver_version?: string;

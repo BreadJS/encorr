@@ -280,8 +280,8 @@ export class EncorrNode {
       gpuIndex = this.systemInfo.gpus?.findIndex(gpu => {
         const identity = `${gpu.vendor || ''} ${gpu.name || ''}`.toLowerCase();
         if (requestedVendor === 'nvidia') return /nvidia|geforce|quadro|tesla/.test(identity);
-        if (requestedVendor === 'amd') return /amd|advanced micro|radeon|ati/.test(identity);
-        return /intel/.test(identity);
+        if (requestedVendor === 'amd') return /\bamd\b|advanced micro devices|\bradeon\b|\bati\b/.test(identity);
+        return /\bintel\b|\barc(?:\(tm\))?\b/.test(identity);
       });
       if (gpuIndex === undefined || gpuIndex < 0) gpuIndex = 0;
       this.logger.warn(`[JOB_ASSIGN] No gpu_device_id provided, selected ${requestedVendor} GPU ${gpuIndex}`);
@@ -768,7 +768,7 @@ export class EncorrNode {
     ]);
 
     // Get GPUs
-    const gpus = await this.detectGPUs();
+    const gpus = await this.detectGPUs(mem.total);
 
     // Detect FFmpeg and FFprobe
     const ffmpegDir = this.config.ffmpeg_dir;
@@ -910,7 +910,7 @@ export class EncorrNode {
     }
   }
 
-  private async detectGPUs(): Promise<GPUInfo[]> {
+  private async detectGPUs(systemMemoryBytes = 0): Promise<GPUInfo[]> {
     const si = require('systeminformation');
 
     this.logger.info('Detecting GPUs...');
@@ -928,8 +928,8 @@ export class EncorrNode {
         for (let i = 0; i < graphics.controllers.length; i++) {
           const controller = graphics.controllers[i];
           const identity = `${controller.vendor || ''} ${controller.model || ''}`.toLowerCase();
-          const isAmd = /amd|advanced micro|radeon|ati/.test(identity);
-          const isIntel = /intel|\barc\b/.test(identity);
+          const isAmd = /\bamd\b|advanced micro devices|\bradeon\b|\bati\b/.test(identity);
+          const isIntel = /\bintel\b|\barc(?:\(tm\))?\b/.test(identity);
 
           // Skip virtual displays
           if (this.isVirtualDisplay(controller.model || '')) {
@@ -947,6 +947,12 @@ export class EncorrNode {
           // systeminformation returns VRAM in megabytes (MB), not bytes
           const vramFreeMB = (controller as any).memoryFree;
           const vramUsedMB = (controller as any).memoryUsed;
+          const usesSharedIntelMemory = process.platform === 'win32'
+            && isIntel
+            && (/\barc(?:\(tm\))?\s*\d{3}[tv]\b/i.test(controller.model || '') || !vramMB || vramMB <= 2048);
+          const detectedMemory = usesSharedIntelMemory && systemMemoryBytes > 0
+            ? Math.floor(systemMemoryBytes / 2)
+            : vramMB ? vramMB * 1024 * 1024 : undefined;
 
           // Capture utilization metrics
           const utilizationGpu = (controller as any).utilizationGpu;
@@ -963,9 +969,10 @@ export class EncorrNode {
           gpus.push({
             name: controller.model || 'Unknown GPU',
             vendor: controller.vendor || this.getGPUVendor(controller.model || ''),
-            memory: vramMB ? vramMB * 1024 * 1024 : undefined, // Convert MB to bytes
-            memoryFree: vramFreeMB ? vramFreeMB * 1024 * 1024 : undefined, // Convert MB to bytes
-            memoryUsed: vramUsedMB ? vramUsedMB * 1024 * 1024 : undefined, // Convert MB to bytes
+            memory: detectedMemory,
+            memory_type: usesSharedIntelMemory ? 'shared' : 'dedicated',
+            memoryFree: !usesSharedIntelMemory && vramFreeMB ? vramFreeMB * 1024 * 1024 : undefined,
+            memoryUsed: !usesSharedIntelMemory && vramUsedMB ? vramUsedMB * 1024 * 1024 : undefined,
             driver_version: controller.driverVersion,
             utilizationGpu,
             utilizationMemory,
@@ -989,6 +996,7 @@ export class EncorrNode {
           name: device.name,
           vendor: 'AMD',
           memory: device.memory,
+          memory_type: 'dedicated',
           drm_card: device.drmCard,
           device_path: device.renderNode,
           pci_bus: device.pciBus,
@@ -1003,6 +1011,7 @@ export class EncorrNode {
           name: device.name,
           vendor: 'Intel',
           memory: device.memory,
+          memory_type: 'dedicated',
           drm_card: device.drmCard,
           device_path: device.renderNode,
           pci_bus: device.pciBus,
@@ -1028,7 +1037,7 @@ export class EncorrNode {
     const hasAmd = this.systemInfo.gpus.some(gpu =>
       gpu.vendor?.toLowerCase().includes('amd') || gpu.name?.toLowerCase().includes('amd') ||
       gpu.vendor?.toLowerCase().includes('advanced micro') ||
-      gpu.vendor?.toLowerCase().includes('ati') || gpu.name?.toLowerCase().includes('radeon')
+      /\bati\b/.test(gpu.vendor?.toLowerCase() || '') || gpu.name?.toLowerCase().includes('radeon')
     );
 
     const methods: string[] = [];
@@ -1076,11 +1085,11 @@ export class EncorrNode {
     // Intel Arc and Intel integrated GPUs can both provide QSV workers. The
     // FFmpeg capability probe, rather than the display type, decides whether
     // they can be scheduled.
-    if (vendor.includes('intel') || name.includes('intel') || name.includes('arc')) return false;
+    if (/\bintel\b|\barc(?:\(tm\))?\b/.test(`${vendor} ${name}`)) return false;
 
     // AMD APUs also expose working AMF/VAAPI encoders. Do not discard them
     // based on shared-memory size or a generic "Radeon Graphics" name.
-    if (vendor.includes('amd') || vendor.includes('ati') || vendor.includes('radeon') || vendor.includes('advanced')) {
+    if (/\bamd\b|advanced micro devices|\bradeon\b|\bati\b/.test(`${vendor} ${name}`)) {
       return false;
     }
 
@@ -1092,10 +1101,10 @@ export class EncorrNode {
     if (lowerName.includes('nvidia') || lowerName.includes('geforce') || lowerName.includes('quadro') || lowerName.includes('tesla')) {
       return 'NVIDIA';
     }
-    if (lowerName.includes('amd') || lowerName.includes('advanced micro') || lowerName.includes('radeon') || lowerName.includes('ati')) {
+    if (/\bamd\b|advanced micro devices|\bradeon\b|\bati\b/.test(lowerName)) {
       return 'AMD';
     }
-    if (lowerName.includes('intel')) {
+    if (/\bintel\b|\barc(?:\(tm\))?\b/.test(lowerName)) {
       return 'Intel';
     }
     if (lowerName.includes('apple') || lowerName.includes('m1') || lowerName.includes('m2') || lowerName.includes('m3')) {
