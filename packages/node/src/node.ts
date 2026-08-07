@@ -287,14 +287,26 @@ export class EncorrNode {
       this.logger.warn(`[JOB_ASSIGN] No gpu_device_id provided, selected ${requestedVendor} GPU ${gpuIndex}`);
     }
 
-    if (presetConfig.encoding_type === 'gpu' && presetConfig.gpu_type === 'amd' && process.platform === 'linux') {
+    if (presetConfig.encoding_type === 'gpu'
+      && (presetConfig.gpu_type === 'amd' || presetConfig.gpu_type === 'intel')
+      && process.platform === 'linux') {
       const selectedGpu = this.systemInfo.gpus?.[gpuIndex ?? 0];
       if (selectedGpu?.device_path) {
         presetConfig.gpu_device_path = selectedGpu.device_path;
-        this.logger.info(`[JOB_ASSIGN] Using AMD VAAPI device ${selectedGpu.device_path}`);
+        this.logger.info(`[JOB_ASSIGN] Using ${presetConfig.gpu_type === 'intel' ? 'Intel QSV' : 'AMD VAAPI'} device ${selectedGpu.device_path}`);
       } else {
-        this.logger.warn('[JOB_ASSIGN] AMD GPU has no resolved VAAPI render node; falling back to /dev/dri/renderD128');
+        this.logger.warn(`[JOB_ASSIGN] ${presetConfig.gpu_type === 'intel' ? 'Intel GPU' : 'AMD GPU'} has no resolved render node; falling back to /dev/dri/renderD128`);
       }
+    }
+
+    if (presetConfig.encoding_type === 'gpu' && presetConfig.gpu_type === 'intel' && process.platform === 'win32') {
+      const selectedIndex = gpuIndex ?? 0;
+      const intelAdapterIndex = (this.systemInfo.gpus || [])
+        .slice(0, selectedIndex + 1)
+        .filter(gpu => /intel|\barc\b/i.test(`${gpu.vendor || ''} ${gpu.name || ''}`))
+        .length - 1;
+      presetConfig.gpu_vendor_device_id = Math.max(0, intelAdapterIndex);
+      this.logger.info(`[JOB_ASSIGN] Intel Arc/QSV adapter index ${presetConfig.gpu_vendor_device_id} selected`);
     }
 
     // Check if this is an analyze job
@@ -374,7 +386,7 @@ export class EncorrNode {
 
       const vaapiDecodeUnsupported = !result.success
         && activeJob.config.encoding_type === 'gpu'
-        && activeJob.config.gpu_type === 'amd'
+        && (activeJob.config.gpu_type === 'amd' || activeJob.config.gpu_type === 'intel')
         && /No support for codec .* profile|hwaccel initialisation returned error|Failed setup for format vaapi/i.test(result.ffmpeg_logs || '');
 
       if (vaapiDecodeUnsupported) {
@@ -906,8 +918,10 @@ export class EncorrNode {
 
     try {
       const graphics = await si.graphics();
-      const amdDrmDevices = this.detectAmdDrmDevices();
+      const amdDrmDevices = this.detectDrmDevices('0x1002', 'AMD');
+      const intelDrmDevices = this.detectDrmDevices('0x8086', 'Intel');
       let nextAmdDevice = 0;
+      let nextIntelDevice = 0;
 
       // Process controllers (GPUs)
       if (graphics.controllers && graphics.controllers.length > 0) {
@@ -915,6 +929,7 @@ export class EncorrNode {
           const controller = graphics.controllers[i];
           const identity = `${controller.vendor || ''} ${controller.model || ''}`.toLowerCase();
           const isAmd = /amd|advanced micro|radeon|ati/.test(identity);
+          const isIntel = /intel|\barc\b/.test(identity);
 
           // Skip virtual displays
           if (this.isVirtualDisplay(controller.model || '')) {
@@ -941,7 +956,9 @@ export class EncorrNode {
           const powerLimit = (controller as any).powerLimit;
           const clockCore = (controller as any).clockCore;
           const clockMemory = (controller as any).clockMemory;
-          const amdDevice = isAmd ? amdDrmDevices[nextAmdDevice++] : undefined;
+          const hardwareDevice = isAmd
+            ? amdDrmDevices[nextAmdDevice++]
+            : isIntel ? intelDrmDevices[nextIntelDevice++] : undefined;
 
           gpus.push({
             name: controller.model || 'Unknown GPU',
@@ -957,9 +974,9 @@ export class EncorrNode {
             powerLimit,
             clockCore,
             clockMemory,
-            drm_card: amdDevice?.drmCard,
-            device_path: amdDevice?.renderNode,
-            pci_bus: amdDevice?.pciBus,
+            drm_card: hardwareDevice?.drmCard,
+            device_path: hardwareDevice?.renderNode,
+            pci_bus: hardwareDevice?.pciBus,
           });
         }
       }
@@ -971,6 +988,20 @@ export class EncorrNode {
         gpus.push({
           name: device.name,
           vendor: 'AMD',
+          memory: device.memory,
+          drm_card: device.drmCard,
+          device_path: device.renderNode,
+          pci_bus: device.pciBus,
+        });
+      }
+
+      // Headless Arc adapters may not appear in systeminformation but remain
+      // available through Linux DRM and oneVPL/QSV.
+      for (; nextIntelDevice < intelDrmDevices.length; nextIntelDevice++) {
+        const device = intelDrmDevices[nextIntelDevice];
+        gpus.push({
+          name: device.name,
+          vendor: 'Intel',
           memory: device.memory,
           drm_card: device.drmCard,
           device_path: device.renderNode,
@@ -1042,10 +1073,10 @@ export class EncorrNode {
     const name = (gpu.model || gpu.name || '').toLowerCase();
     const vendor = (gpu.vendor || '').toLowerCase();
 
-    // Intel integrated graphics - ALL Intel GPUs are integrated
-    if (vendor.includes('intel')) {
-      return true;
-    }
+    // Intel Arc and Intel integrated GPUs can both provide QSV workers. The
+    // FFmpeg capability probe, rather than the display type, decides whether
+    // they can be scheduled.
+    if (vendor.includes('intel') || name.includes('intel') || name.includes('arc')) return false;
 
     // AMD APUs also expose working AMF/VAAPI encoders. Do not discard them
     // based on shared-memory size or a generic "Radeon Graphics" name.
@@ -1073,7 +1104,7 @@ export class EncorrNode {
     return 'Unknown';
   }
 
-  private detectAmdDrmDevices(): Array<{
+  private detectDrmDevices(vendorId: string, vendorName: 'AMD' | 'Intel'): Array<{
     drmCard: string;
     renderNode: string;
     pciBus?: string;
@@ -1098,7 +1129,7 @@ export class EncorrNode {
       for (const drmCard of cards) {
         const deviceRoot = `/sys/class/drm/${drmCard}/device`;
         const vendorPath = `${deviceRoot}/vendor`;
-        if (!existsSync(vendorPath) || readFileSync(vendorPath, 'utf8').trim().toLowerCase() !== '0x1002') continue;
+        if (!existsSync(vendorPath) || readFileSync(vendorPath, 'utf8').trim().toLowerCase() !== vendorId) continue;
 
         const drmEntries = existsSync(`${deviceRoot}/drm`) ? readdirSync(`${deviceRoot}/drm`) : [];
         const renderName = drmEntries.find(entry => /^renderD\d+$/.test(entry));
@@ -1115,12 +1146,12 @@ export class EncorrNode {
           drmCard,
           renderNode: `/dev/dri/${renderName}`,
           pciBus,
-          name: pciId ? `AMD GPU (${pciId})` : `AMD GPU (${drmCard})`,
+          name: pciId ? `${vendorName} GPU (${pciId})` : `${vendorName} GPU (${drmCard})`,
           memory: Number.isFinite(memoryValue) && memoryValue! > 0 ? memoryValue : undefined,
         });
       }
     } catch (error: any) {
-      this.logger.warn(`[GPU] Failed to inspect AMD DRM devices: ${error?.message || error}`);
+      this.logger.warn(`[GPU] Failed to inspect ${vendorName} DRM devices: ${error?.message || error}`);
     }
 
     return devices;

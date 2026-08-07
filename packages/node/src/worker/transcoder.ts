@@ -372,10 +372,10 @@ export class Transcoder {
     }
 
     // Check for Intel QSV decoders
-    if (line.includes('hevc_qsv') || line.includes('[h264_qsv @')) {
+    if (line.includes('hevc_qsv') || line.includes('[hevc_qsv @')) {
       return 'Using decoder: GPU (Intel QSV - H.265)';
     }
-    if (line.includes('h264_qsv') || line.includes('[hevc_qsv @')) {
+    if (line.includes('h264_qsv') || line.includes('[h264_qsv @')) {
       return 'Using decoder: GPU (Intel QSV - H.264)';
     }
 

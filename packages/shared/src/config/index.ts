@@ -130,8 +130,8 @@ export const BUILTIN_PRESET_DESCRIPTIONS: Record<string, string> = {
   'fast-h264-cpu': 'Fast H.264 (CPU) - Fast encoding with H.264, minimal quality loss',
   'nvidia-h264-gpu': 'NVIDIA H.264 (GPU) - GPU-accelerated encoding with NVIDIA NVENC H.264',
   'nvidia-h265-gpu': 'NVIDIA H.265 (GPU) - GPU-accelerated encoding with NVIDIA NVENC H.265',
-  'intel-h264-gpu': 'Intel Quick Sync H.264 (GPU) - GPU-accelerated encoding with Intel QSV H.264',
-  'intel-h265-gpu': 'Intel Quick Sync H.265 (GPU) - GPU-accelerated encoding with Intel QSV H.265',
+  'intel-h264-gpu': 'Intel Arc / Quick Sync H.264 (GPU) - GPU-accelerated Intel H.264 encoding',
+  'intel-h265-gpu': 'Intel Arc / Quick Sync H.265 (GPU) - GPU-accelerated Intel H.265 encoding',
   'amd-h264-gpu': 'AMD H.264 (GPU) - GPU encoding with AMF on Windows or VAAPI on Linux',
   'amd-h265-gpu': 'AMD H.265 (GPU) - GPU encoding with AMF on Windows or VAAPI on Linux',
 };

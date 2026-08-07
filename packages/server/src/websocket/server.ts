@@ -142,7 +142,7 @@ export class EncorrWebSocketServer {
   // Helper Functions
   // ========================================================================
 
-  /** Apply the server's worker-GPU policy to reported system information. */
+  /** Keep usable encode devices while applying the server's worker-GPU policy. */
   private filterIntegratedGPUs(systemInfo: any): any {
     if (!systemInfo.gpus || !Array.isArray(systemInfo.gpus)) {
       return systemInfo;
@@ -152,10 +152,10 @@ export class EncorrWebSocketServer {
       const name = (gpu.name || gpu.model || '').toLowerCase();
       const vendor = (gpu.vendor || '').toLowerCase();
 
-      // Filter out all Intel GPUs (all are integrated)
-      if (vendor.includes('intel')) {
-        return false;
-      }
+      // Intel Arc and Intel integrated graphics both expose usable Quick Sync
+      // encoders. Capability checks later verify that FFmpeg actually reports
+      // h264_qsv/hevc_qsv before a job can be routed here.
+      if (vendor.includes('intel') || name.includes('intel') || name.includes('arc')) return true;
 
       // AMD APUs expose usable AMF/VAAPI encoders too. Keep them available as
       // workers instead of guessing capability from their name or shared VRAM.
@@ -346,7 +346,7 @@ export class EncorrWebSocketServer {
     this.logger.info(`Node registration: ${payload.name}`);
 
     try {
-      // Filter out integrated GPUs from system_info
+      // Normalize the GPUs accepted as encoding workers.
       const filteredSystemInfo = this.filterIntegratedGPUs(payload.system_info);
 
       // Check if node already exists
@@ -360,7 +360,7 @@ export class EncorrWebSocketServer {
         this.logger.info(`Node re-registered: ${node.id} (${payload.name})`);
         this.logger.info(`Updated system_info with ${filteredSystemInfo.gpus?.length || 0} GPU(s) (filtered from ${payload.system_info.gpus?.length || 0})`);
 
-        // Clean up any existing integrated GPUs in the database immediately
+        // Normalize any older GPU information already stored in the database.
         const currentNodeData = this.db.getNodeById(node.id);
         if (currentNodeData && currentNodeData.system_info.gpus) {
           const alreadyFiltered = this.filterIntegratedGPUs(currentNodeData.system_info);
@@ -368,6 +368,22 @@ export class EncorrWebSocketServer {
             this.logger.info(`Cleaned up integrated GPUs on re-registration: ${currentNodeData.system_info.gpus.length} -> ${alreadyFiltered.gpus.length}`);
             this.db.updateNodeSystemInfo(node.id, alreadyFiltered);
           }
+        }
+
+        // Preserve configured limits and add one usable slot for GPUs that
+        // were newly discovered (notably Arc devices hidden by older builds).
+        const refreshedNode = this.db.getNodeById(node.id);
+        const detectedGpuCount = filteredSystemInfo.gpus?.length || 0;
+        const currentLimits = refreshedNode?.max_workers || { cpu: 1, gpus: [] };
+        if (currentLimits.gpus.length < detectedGpuCount) {
+          this.db.updateNodeMaxWorkers(node.id, {
+            cpu: currentLimits.cpu,
+            gpus: [
+              ...currentLimits.gpus,
+              ...new Array(detectedGpuCount - currentLimits.gpus.length).fill(1),
+            ],
+          });
+          this.logger.info(`Added worker slots for ${detectedGpuCount - currentLimits.gpus.length} newly detected GPU(s)`);
         }
       } else {
         // Create new node
@@ -378,8 +394,7 @@ export class EncorrWebSocketServer {
         });
 
         // Initialize max_workers and config for new node
-        const cpuCount = payload.system_info.cpu_cores;
-        const gpuCount = payload.system_info.gpus?.length || 0;
+        const gpuCount = filteredSystemInfo.gpus?.length || 0;
 
         this.db.updateNodeUsage(node.id, {
           gpu_usage: new Array(gpuCount).fill(0),
@@ -388,6 +403,10 @@ export class EncorrWebSocketServer {
         this.db.updateNodeConfig(node.id, {
           cpu_preset: null,
           gpu_presets: new Array(gpuCount).fill(null),
+        });
+        this.db.updateNodeMaxWorkers(node.id, {
+          cpu: 1,
+          gpus: new Array(filteredSystemInfo.gpus?.length || 0).fill(1),
         });
 
         this.logger.info(`New node registered: ${node.id} (${payload.name})`);

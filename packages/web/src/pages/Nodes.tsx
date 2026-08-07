@@ -49,11 +49,11 @@ function cleanGpuName(name?: string) {
   );
 }
 
-function gpuColor(vendor?: string) {
-  const normalized = vendor?.toLowerCase() || '';
+function gpuColor(vendor?: string, name?: string) {
+  const normalized = `${vendor || ''} ${name || ''}`.toLowerCase();
   if (normalized.includes('nvidia')) return '#76b900';
-  if (normalized.includes('amd') || normalized.includes('radeon')) return '#ed1c24';
-  if (normalized.includes('intel')) return '#00a6fb';
+  if (normalized.includes('amd') || normalized.includes('advanced micro') || normalized.includes('radeon') || normalized.includes('ati')) return '#ef4444';
+  if (normalized.includes('intel') || normalized.includes('arc')) return '#3b82f6';
   if (normalized.includes('apple')) return '#a8a8ad';
   return '#74c69d';
 }
@@ -338,7 +338,7 @@ function NodeCard({
             {gpus.length > 0 ? (
               <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))' }}>
                 {gpus.map((gpu: any, index: number) => {
-                  const color = gpuColor(gpu.vendor);
+                    const color = gpuColor(gpu.vendor, gpu.name);
                   const memoryTotal = numberValue(gpu.memory);
                   const memoryUsed = numberValue(gpu.memoryUsed);
                   const memoryUsage = memoryTotal > 0

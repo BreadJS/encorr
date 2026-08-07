@@ -391,8 +391,8 @@ export class EncorrDatabase {
       },
       {
         id: 'builtin-intel-h264-gpu',
-        name: 'Intel Quick Sync H.264 (GPU)',
-        description: 'GPU-accelerated encoding with Intel QSV H.264',
+        name: 'Intel Arc / Quick Sync H.264 (GPU)',
+        description: 'Intel Arc and Quick Sync GPU encoding with QSV H.264',
         config: {
           video_codec: 'h264',
           encoding_type: 'gpu',
@@ -408,8 +408,8 @@ export class EncorrDatabase {
       },
       {
         id: 'builtin-intel-h265-gpu',
-        name: 'Intel Quick Sync H.265 (GPU)',
-        description: 'GPU-accelerated encoding with Intel QSV H.265',
+        name: 'Intel Arc / Quick Sync H.265 (GPU)',
+        description: 'Intel Arc and Quick Sync GPU encoding with QSV H.265',
         config: {
           video_codec: 'h265',
           encoding_type: 'gpu',

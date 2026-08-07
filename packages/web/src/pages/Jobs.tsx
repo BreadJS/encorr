@@ -54,11 +54,11 @@ function cleanGpuName(name?: string) {
   return bracketMatch?.[1] || name.replace(/^(NVIDIA Corporation|NVIDIA|AMD|Intel Corporation|Intel)\s*/i, '');
 }
 
-function vendorColor(vendor?: string) {
-  const value = vendor?.toLowerCase() || '';
+function vendorColor(vendor?: string, name?: string) {
+  const value = `${vendor || ''} ${name || ''}`.toLowerCase();
   if (value.includes('nvidia')) return '#76b900';
-  if (value.includes('amd') || value.includes('radeon')) return '#ed1c24';
-  if (value.includes('intel')) return '#00a6fb';
+  if (value.includes('amd') || value.includes('advanced micro') || value.includes('radeon') || value.includes('ati')) return '#ef4444';
+  if (value.includes('intel') || value.includes('arc')) return '#3b82f6';
   return '#74c69d';
 }
 
@@ -409,7 +409,7 @@ function WorkerCard({
             </div>
 
             {gpus.map((gpu: any, index: number) => {
-              const color = vendorColor(gpu.vendor);
+              const color = vendorColor(gpu.vendor, gpu.name);
               return (
                 <div key={`${gpu.name}-${index}`}>
                   <div className="mb-2 flex items-center justify-between gap-3 text-xs">
@@ -454,7 +454,7 @@ function WorkerCard({
             {gpus.map((gpu: any, index: number) => (
               <div key={`${gpu.name}-workers-${index}`} className="flex items-center justify-between gap-3">
                 <div className="flex min-w-0 items-center gap-2 text-xs text-gray-300">
-                  <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: vendorColor(gpu.vendor) }} />
+                  <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: vendorColor(gpu.vendor, gpu.name) }} />
                   <span className="truncate">GPU {index + 1}</span>
                 </div>
                 <Stepper

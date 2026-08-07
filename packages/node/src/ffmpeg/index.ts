@@ -203,6 +203,26 @@ export async function detectAvailableEncoders(ffmpegPath: string, gpus?: GPUInfo
         available: true,
       });
     }
+    // Linux Arc systems may expose encoding through VAAPI when FFmpeg was
+    // built without oneVPL/QSV. Keep this as a hardware-only Intel fallback.
+    if (platform() !== 'win32' && hasGpuVendor(gpus, 'intel') && output.includes('h264_vaapi')) {
+      encoders.push({
+        type: 'gpu',
+        gpu_type: 'intel',
+        encoder_name: 'h264_vaapi',
+        codec: 'h264',
+        available: true,
+      });
+    }
+    if (platform() !== 'win32' && hasGpuVendor(gpus, 'intel') && output.includes('hevc_vaapi')) {
+      encoders.push({
+        type: 'gpu',
+        gpu_type: 'intel',
+        encoder_name: 'hevc_vaapi',
+        codec: 'h265',
+        available: true,
+      });
+    }
 
     // Check for AMD encoders
     if (hasGpuVendor(gpus, 'amd') && output.includes('h264_amf')) {
@@ -457,6 +477,7 @@ export interface FFmpegConfig {
   encoding_type: EncoderType;
   gpu_type?: GPUVendor;
   gpu_device_id?: number; // Specific GPU device ID to use (for multi-GPU systems)
+  gpu_vendor_device_id?: number; // Vendor-local adapter index for APIs such as QSV
   gpu_device_path?: string;
   video_encoder?: string;
   quality_mode: 'crf' | 'cq' | 'qp';
@@ -504,7 +525,18 @@ export function getFFmpegEncoder(config: FFmpegConfig, availableEncoders?: FFmpe
   if (gpuType === 'nvidia') {
     return codec === 'h264' ? 'h264_nvenc' : 'hevc_nvenc';
   } else if (gpuType === 'intel') {
-    return codec === 'h264' ? 'h264_qsv' : 'hevc_qsv';
+    const candidates = platform() === 'win32'
+      ? (codec === 'h264' ? ['h264_qsv'] : ['hevc_qsv'])
+      : (codec === 'h264' ? ['h264_qsv', 'h264_vaapi'] : ['hevc_qsv', 'hevc_vaapi']);
+    if (config.video_encoder && candidates.includes(config.video_encoder)
+      && (!availableEncoders || availableEncoders.some(encoder =>
+        encoder.available !== false && encoder.encoder_name === config.video_encoder
+      ))) {
+      return config.video_encoder;
+    }
+    return candidates.find(candidate => availableEncoders?.some(encoder =>
+      encoder.available !== false && encoder.encoder_name === candidate
+    )) || candidates[0];
   } else if (gpuType === 'amd') {
     const candidates = platform() === 'win32'
       ? (codec === 'h264' ? ['h264_amf'] : ['hevc_amf'])
@@ -526,6 +558,9 @@ export function getFFmpegEncoder(config: FFmpegConfig, availableEncoders?: FFmpe
 function getQualityParams(config: FFmpegConfig): string[] {
   const params: string[] = [];
   const encoder = getFFmpegEncoder(config);
+  const hwDeviceId = config.gpu_type === 'intel'
+    ? (config.gpu_vendor_device_id ?? config.gpu_device_id)
+    : config.gpu_device_id;
   const codec = config.video_codec;
 
   // CPU encoders (libx264, libx265) use CRF
@@ -602,17 +637,9 @@ export function buildFFmpegArgs(options: FFmpegOptions): string[] {
         hwaccelOutputFormat = 'cuda';
       }
     } else if (config.gpu_type === 'intel') {
-      // Intel QSV decoders
-      if (sourceCodec.includes('265') || sourceCodec.includes('hevc')) {
-        hardwareDecoder = 'hevc_qsv';
-        hwaccelOutputFormat = 'qsv';
-      } else if (sourceCodec.includes('264') || sourceCodec.includes('avc')) {
-        hardwareDecoder = 'h264_qsv';
-        hwaccelOutputFormat = 'qsv';
-      } else if (sourceCodec.includes('mpeg2') || sourceCodec.includes('mpeg2video')) {
-        hardwareDecoder = 'mpeg2_qsv';
-        hwaccelOutputFormat = 'qsv';
-      }
+      // QSV needs a platform-specific device context, especially when an Arc
+      // card and an integrated Intel GPU coexist. The standard hwaccel path
+      // below creates that context and lets FFmpeg choose the QSV decoder.
     } else if (config.gpu_type === 'amd') {
       // AMD uses hwaccel (d3d11va) rather than explicit decoders
       // The decoder is selected automatically by hwaccel
@@ -630,13 +657,13 @@ export function buildFFmpegArgs(options: FFmpegOptions): string[] {
     } else {
       // Fallback to standard hwaccel method
       console.log(`[buildFFmpegArgs] No explicit decoder found for ${sourceCodec} on ${config.gpu_type}, using hwaccel`);
-      useHwaccelDecode(args, config.gpu_type, config.gpu_device_id, config.gpu_device_path, encoder);
+      useHwaccelDecode(args, config.gpu_type, hwDeviceId, config.gpu_device_path, encoder);
       args.push('-i', input);
     }
   } else {
     // Standard hardware acceleration (hint-based, may still use software decoding)
     if (config.encoding_type === 'gpu' && config.gpu_type) {
-      useHwaccelDecode(args, config.gpu_type, config.gpu_device_id, config.gpu_device_path, encoder);
+      useHwaccelDecode(args, config.gpu_type, hwDeviceId, config.gpu_device_path, encoder);
     }
 
     // Input
@@ -669,17 +696,18 @@ export function buildFFmpegArgs(options: FFmpegOptions): string[] {
   const filters: string[] = [];
 
   const usesVaapi = encoder.includes('vaapi');
+  const usesQsv = encoder.includes('qsv');
 
   if (usesVaapi && softwareDecodeForVaapi) {
     filters.push('format=nv12', 'hwupload');
   }
 
-  if (needs8BitConversion && !usesVaapi) {
+  if (needs8BitConversion && !usesVaapi && !usesQsv) {
     filters.push('format=yuv420p'); // Convert to 8-bit before encoding
   }
 
   if (config.deinterlace) {
-    filters.push(usesVaapi ? 'deinterlace_vaapi' : 'yadif=0:-1:0');
+    filters.push(usesVaapi ? 'deinterlace_vaapi' : usesQsv ? 'deinterlace_qsv' : 'yadif=0:-1:0');
   }
 
   if (usesVaapi) {
@@ -690,6 +718,12 @@ export function buildFFmpegArgs(options: FFmpegOptions): string[] {
     // 8-bit target for the built-in H.264 and H.265 AMD presets.
     scaleOptions.push('format=nv12');
     filters.push(`scale_vaapi=${scaleOptions.join(':')}`);
+  } else if (usesQsv && (needs8BitConversion || config.max_width || config.max_height)) {
+    const qsvOptions: string[] = [];
+    if (config.max_width) qsvOptions.push(`w=${config.max_width}`);
+    if (config.max_height) qsvOptions.push(`h=${config.max_height}`);
+    if (needs8BitConversion) qsvOptions.push('format=nv12');
+    filters.push(`vpp_qsv=${qsvOptions.join(':')}`);
   } else if (config.max_width || config.max_height) {
     filters.push(`scale=${config.max_width || -1}:${config.max_height || -1}`);
   }
@@ -767,13 +801,27 @@ function useHwaccelDecode(
       }
       break;
     case 'intel':
-      args.push('-hwaccel', 'qsv');
-      // For Intel QSV with device selection
-      if (gpuDeviceId !== undefined) {
-        // Initialize QSV device before using it
-        args.push('-init_hw_device', `qsv=qsv:hw_${gpuDeviceId}`);
-        args.push('-filter_hw_device', 'qsv');
+      if (encoder?.includes('vaapi')) {
+        const renderDevice = gpuDevicePath || '/dev/dri/renderD128';
+        args.push('-hwaccel', 'vaapi');
+        args.push('-hwaccel_device', renderDevice);
+        args.push('-hwaccel_output_format', 'vaapi');
+        break;
       }
+      if (platform() === 'win32') {
+        // oneVPL uses child_device to select the requested adapter. This is
+        // important on systems containing both an Intel iGPU and an Arc card.
+        args.push('-init_hw_device', `qsv=qs:hw,child_device=${gpuDeviceId ?? 0}`);
+      } else {
+        // Derive QSV from the exact DRM render node belonging to this Arc/iGPU.
+        const renderDevice = gpuDevicePath || '/dev/dri/renderD128';
+        args.push('-init_hw_device', `vaapi=va:${renderDevice}`);
+        args.push('-init_hw_device', 'qsv=qs@va');
+      }
+      args.push('-filter_hw_device', 'qs');
+      args.push('-hwaccel', 'qsv');
+      args.push('-hwaccel_device', 'qs');
+      args.push('-hwaccel_output_format', 'qsv');
       break;
     case 'amd':
       if (platform() === 'win32') {

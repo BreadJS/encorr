@@ -303,6 +303,7 @@ export interface FFmpegConfig {
   encoding_type: EncoderType;
   gpu_type?: GPUVendor;
   gpu_device_id?: number;  // Specific GPU device ID to use (for multi-GPU systems)
+  gpu_vendor_device_id?: number; // Device index within the selected vendor (used by QSV on Windows)
   gpu_device_path?: string; // Platform device path resolved locally by the node
   video_encoder?: string;  // Concrete encoder selected from the node's advertised capabilities
   quality_mode: 'crf' | 'cq' | 'qp';
