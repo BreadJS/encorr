@@ -160,6 +160,7 @@ export const api = {
       total_pages: number;
       status_counts: {
         all: number;
+        unanalyzed: number;
         ready: number;
         processing: number;
         transcoded: number;

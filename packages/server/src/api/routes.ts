@@ -1580,6 +1580,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
 
     const statusCounts = {
       all: allFiles.length,
+      unanalyzed: 0,
       ready: 0,
       processing: 0,
       transcoded: 0,
@@ -1611,10 +1612,15 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
             : latestReport.status;
         } else if (file.status === 'analyzed' || file.status === 'imported') {
           displayStatus = 'ready';
+        } else if (file.status === 'pending') {
+          // A library scan discovered this file, but no analysis job has been
+          // requested yet. Do not present discovery as queued work.
+          displayStatus = 'unanalyzed';
         }
       }
 
-      if (displayStatus === 'ready') statusCounts.ready++;
+      if (displayStatus === 'unanalyzed') statusCounts.unanalyzed++;
+      else if (displayStatus === 'ready') statusCounts.ready++;
       else if (displayStatus === 'processing') statusCounts.processing++;
       else if (displayStatus === 'transcoded') statusCounts.transcoded++;
       else if (displayStatus === 'completed') statusCounts.completed++;

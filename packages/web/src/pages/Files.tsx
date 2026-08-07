@@ -211,7 +211,7 @@ export function Files() {
         } else if (file.status === 'analyzed' || file.status === 'imported') {
           displayStatus = 'ready';
         } else if (file.status === 'pending') {
-          displayStatus = 'pending';
+          displayStatus = 'unanalyzed';
         }
       }
 
@@ -231,6 +231,7 @@ export function Files() {
   const currentPageStatusCounts = useMemo(() => {
     const counts = {
       all: filesWithJobStatus.length,
+      unanalyzed: 0,
       ready: 0,
       processing: 0,
       transcoded: 0,
@@ -239,7 +240,8 @@ export function Files() {
       cancelled: 0,
     };
     filesWithJobStatus.forEach((file: any) => {
-      if (file.displayStatus === 'ready') counts.ready++;
+      if (file.displayStatus === 'unanalyzed') counts.unanalyzed++;
+      else if (file.displayStatus === 'ready') counts.ready++;
       else if (file.displayStatus === 'processing') counts.processing++;
       else if (file.displayStatus === 'transcoded') counts.transcoded++;
       else if (file.displayStatus === 'completed') counts.completed++;
@@ -538,11 +540,11 @@ export function Files() {
       );
     }
 
-    if (status === 'pending') {
+    if (status === 'unanalyzed') {
       return (
         <div className="flex items-center gap-2">
-          <Clock className="h-3.5 w-3.5 flex-shrink-0 text-amber-400" />
-          <span className="text-xs text-amber-300">Pending</span>
+          <FileText className="h-3.5 w-3.5 flex-shrink-0 text-gray-400" />
+          <span className="text-xs text-gray-300">Unanalyzed</span>
         </div>
       );
     }
@@ -784,6 +786,16 @@ export function Files() {
             All ({statusCounts.all})
           </button>
           <button
+            onClick={() => { setSelectedStatus('unanalyzed'); setCurrentPage(1); }}
+            className={`px-3 sm:px-4 py-2 rounded-t-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
+              selectedStatus === 'unanalyzed'
+                ? 'bg-[#252326] text-white'
+                : 'text-gray-400 hover:text-white hover:bg-[#252326]/50'
+            }`}
+          >
+            Unanalyzed ({statusCounts.unanalyzed})
+          </button>
+          <button
             onClick={() => { setSelectedStatus('ready'); setCurrentPage(1); }}
             className={`px-3 sm:px-4 py-2 rounded-t-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
               selectedStatus === 'ready'
@@ -926,13 +938,13 @@ export function Files() {
                     style={{ backgroundColor: '#1a181a', border: '1px solid #39363a' }}
                   >
                     <option value="all">All Statuses</option>
+                    <option value="unanalyzed">Unanalyzed</option>
                     <option value="ready">Transcodeable</option>
                     <option value="processing">Processing</option>
                     <option value="transcoded">Transcoded</option>
                     <option value="completed">Completed</option>
                     <option value="failed">Failed</option>
                     <option value="cancelled">Cancelled</option>
-                    <option value="pending">Pending</option>
                   </select>
                 </div>
 
