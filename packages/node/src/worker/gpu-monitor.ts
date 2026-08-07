@@ -315,7 +315,7 @@ export class GPUMonitor {
   private async queryWindowsGpuEngineUsage(): Promise<Map<number, GPUUsageData>> {
     return new Promise((resolve, reject) => {
       const script = [
-        '$ErrorActionPreference = "Stop"',
+        '$ErrorActionPreference = "Stop";',
         '$result = try {',
         '$samples = (Get-Counter -Counter "\\GPU Engine(*)\\Utilization Percentage" -SampleInterval 1 -MaxSamples 1).CounterSamples;',
         '$samples | ForEach-Object { [pscustomobject]@{ Name = $_.InstanceName; UtilizationPercentage = $_.CookedValue } }',
@@ -324,7 +324,7 @@ export class GPUMonitor {
         '| Select-Object Name, UtilizationPercentage',
         '};',
         '$result | ConvertTo-Json -Compress',
-      ].join(' ');
+      ].join('\n');
       const powershell = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
