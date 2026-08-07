@@ -1883,6 +1883,15 @@ export class EncorrWebSocketServer {
     return Boolean(this.resolveMappingForNode(node.id, file));
   }
 
+  private setQueuedWaitingReason(job: any, nodes: any[], workerType: 'CPU' | 'GPU'): void {
+    const connectedNodes = nodes.filter(node => this.isNodeConnected(node.id));
+    const mappedNodes = connectedNodes.filter(node => this.nodeCanAccessJob(node, job));
+    const reason = mappedNodes.length === 0
+      ? 'No accessible folder mapping on any connected node'
+      : `Waiting for a compatible ${workerType} slot`;
+    if (job.current_action !== reason) this.db.updateJobProgress(job.id, 0, reason);
+  }
+
   private reserveCpuAssignment(nodeId: string, jobId: string): void {
     const reservations = this.cpuJobReservations.get(nodeId) || new Set<string>();
     reservations.add(jobId);
@@ -2237,6 +2246,7 @@ export class EncorrWebSocketServer {
       if (!nodeWithCpu) {
         // Mapping compatibility is job-specific. One inaccessible file must
         // not block every later analysis job that another CPU worker can read.
+        this.setQueuedWaitingReason(job, onlineNodes, 'CPU');
         this.logger.debug(`[ANALYZE_ASSIGN] No mapped CPU capacity for job ${job.id}; leaving only this job queued`);
         continue;
       }
@@ -2251,6 +2261,7 @@ export class EncorrWebSocketServer {
       if (job.quick_select_id) {
         const route = this.resolveQuickSelectRoute(job, onlineNodes);
         if (!route) {
+          this.setQueuedWaitingReason(job, onlineNodes, job.allow_gpu !== false ? 'GPU' : 'CPU');
           this.logger.debug(`[QUICK_SELECT] No compatible capacity currently available for job ${job.id}`);
           continue;
         }
@@ -2302,6 +2313,7 @@ export class EncorrWebSocketServer {
             this.logger.warn(`[GPU_SELECT] findAvailableGpuDevice returned null for node ${nodeWithGpu.name}`);
           }
         } else {
+          this.setQueuedWaitingReason(job, onlineNodes, 'GPU');
           this.logger.debug(`[GPU_SELECT] No compatible ${preset?.config?.gpu_type || 'GPU'} capacity for job ${job.id}; leaving it queued`);
         }
         // Don't fall back to CPU for GPU jobs - keep them queued until GPU is available
@@ -2315,6 +2327,7 @@ export class EncorrWebSocketServer {
           assignedCount++;
         }
       } else {
+        this.setQueuedWaitingReason(job, onlineNodes, 'CPU');
         this.logger.debug(`[CPU_SELECT] No mapped CPU capacity for job ${job.id}; leaving only this job queued`);
       }
     }

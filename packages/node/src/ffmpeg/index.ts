@@ -484,6 +484,7 @@ export interface FFmpegConfig {
   // GPU-only pipeline settings (for explicit decoder selection)
   source_codec?: string; // Source codec to select appropriate decoder
   use_explicit_decoder?: boolean; // Use explicit decoder (e.g., hevc_cuvid) instead of -hwaccel
+  software_decode?: boolean; // Decode on CPU while retaining the selected GPU encoder
 }
 
 export function getFFmpegEncoder(config: FFmpegConfig, availableEncoders?: FFmpegEncoderInfo[]): string {
@@ -568,10 +569,20 @@ export function buildFFmpegArgs(options: FFmpegOptions): string[] {
   const { input, output, config } = options;
   const args: string[] = [];
   const encoder = getFFmpegEncoder(config);
+  const softwareDecodeForVaapi = config.software_decode === true && encoder.includes('vaapi');
 
+  if (softwareDecodeForVaapi) {
+    // Some VAAPI devices can encode a codec that they cannot decode (for
+    // example particular MPEG-2 profiles). Upload software-decoded frames to
+    // the same render device and keep the actual encode on the GPU.
+    const renderDevice = config.gpu_device_path || '/dev/dri/renderD128';
+    args.push('-init_hw_device', `vaapi=va:${renderDevice}`);
+    args.push('-filter_hw_device', 'va');
+    args.push('-i', input);
+  }
   // For GPU encoding with explicit decoder selection (true GPU-only pipeline)
   // This uses hardware decoder + GPU memory output format = complete GPU pipeline
-  if (config.encoding_type === 'gpu' && config.gpu_type && config.use_explicit_decoder && config.source_codec) {
+  else if (config.encoding_type === 'gpu' && config.gpu_type && config.use_explicit_decoder && config.source_codec) {
     const sourceCodec = config.source_codec.toLowerCase();
 
     // Select the appropriate hardware decoder based on GPU type and source codec
@@ -658,6 +669,10 @@ export function buildFFmpegArgs(options: FFmpegOptions): string[] {
   const filters: string[] = [];
 
   const usesVaapi = encoder.includes('vaapi');
+
+  if (usesVaapi && softwareDecodeForVaapi) {
+    filters.push('format=nv12', 'hwupload');
+  }
 
   if (needs8BitConversion && !usesVaapi) {
     filters.push('format=yuv420p'); // Convert to 8-bit before encoding

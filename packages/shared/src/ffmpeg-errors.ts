@@ -2,6 +2,7 @@ export type FFmpegErrorCode =
   | 'gpu_memory_exhausted'
   | 'gpu_encoder_busy'
   | 'gpu_unavailable'
+  | 'hardware_decode_unsupported'
   | 'disk_full'
   | 'permission_denied'
   | 'source_missing'
@@ -55,6 +56,15 @@ export function parseFFmpegError(stderr: string, fallback = 'FFmpeg failed'): Pa
     return {
       code: 'gpu_unavailable',
       message: 'The AMD hardware encoder could not access the GPU. Check the AMD driver, FFmpeg AMF/VAAPI support, and access to the GPU render device.',
+      retryPossible: true,
+      recognized: true,
+    };
+  }
+
+  if (/No support for codec .* profile|hwaccel initialisation returned error|Failed setup for format vaapi/i.test(output)) {
+    return {
+      code: 'hardware_decode_unsupported',
+      message: 'The GPU cannot decode this source profile. Encorr can still use GPU encoding with software decoding.',
       retryPossible: true,
       recognized: true,
     };

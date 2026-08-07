@@ -342,36 +342,58 @@ export class EncorrNode {
 
     try {
       // Run transcoding
-      const result = await this.transcoder.transcode(
-        {
-          jobId,
-          sourcePath: activeJob.sourcePath,
-          destPath: activeJob.destPath,
-          config: activeJob.config,
-          ffmpegPath: this.systemInfo.ffmpeg_path || '',
-          cacheDirectory: this.config.cache_dir,
-          tempDirectory: this.config.temp_dir,
-          availableEncoders: this.systemInfo.ffmpeg_encoders,
-        },
-        (progress, action, eta, fps, ratio) => {
-          // Update progress - ALWAYS update fps, eta, and ratio (including undefined)
-          // The transcoder now accumulates values, so we trust what it sends
-          activeJob.progress = progress;
-          activeJob.currentAction = action;
-          activeJob.fps = fps;  // Always update (undefined is valid - means no FPS data yet)
-          activeJob.eta = eta;  // Always update (undefined is valid - means no ETA data yet)
-          activeJob.ratio = ratio;  // Always update (undefined is valid - means no ratio data yet)
+      const reportProgress = (progress: number, action: string, eta?: number, fps?: number, ratio?: string) => {
+        activeJob.progress = progress;
+        activeJob.currentAction = action;
+        activeJob.fps = fps;
+        activeJob.eta = eta;
+        activeJob.ratio = ratio;
+        this.wsClient.sendJobProgress(jobId, progress, action, eta, fps, ratio);
 
-          // Send to server
-          this.wsClient.sendJobProgress(jobId, progress, action, eta, fps, ratio);
-
-          // Log progress updates (every 10% or on action change to reduce spam)
-          if (Math.floor(progress) % 10 === 0 || progress === 0) {
-            const etaFormatted = eta ? formatDuration(eta) : undefined;
-            this.logger.info(`[PROGRESS] Job ${jobId}: ${progress.toFixed(1)}% - ${action}${fps ? ` @ ${fps.toFixed(1)} fps` : ''}${ratio ? ` (Ratio: ${ratio})` : ''}${etaFormatted ? ` (ETA: ${etaFormatted})` : ''}`);
-          }
+        if (Math.floor(progress) % 10 === 0 || progress === 0) {
+          const etaFormatted = eta ? formatDuration(eta) : undefined;
+          this.logger.info(`[PROGRESS] Job ${jobId}: ${progress.toFixed(1)}% - ${action}${fps ? ` @ ${fps.toFixed(1)} fps` : ''}${ratio ? ` (Ratio: ${ratio})` : ''}${etaFormatted ? ` (ETA: ${etaFormatted})` : ''}`);
         }
+      };
+
+      const transcodeOptions = {
+        jobId,
+        sourcePath: activeJob.sourcePath,
+        destPath: activeJob.destPath,
+        config: activeJob.config,
+        ffmpegPath: this.systemInfo.ffmpeg_path || '',
+        cacheDirectory: this.config.cache_dir,
+        tempDirectory: this.config.temp_dir,
+        availableEncoders: this.systemInfo.ffmpeg_encoders,
+      };
+
+      let result = await this.transcoder.transcode(
+        transcodeOptions,
+        reportProgress,
       );
+
+      const vaapiDecodeUnsupported = !result.success
+        && activeJob.config.encoding_type === 'gpu'
+        && activeJob.config.gpu_type === 'amd'
+        && /No support for codec .* profile|hwaccel initialisation returned error|Failed setup for format vaapi/i.test(result.ffmpeg_logs || '');
+
+      if (vaapiDecodeUnsupported) {
+        const retryAction = 'GPU decode unsupported · retrying with software decode';
+        this.logger.warn(`[GPU_DECODE_FALLBACK] Job ${jobId}: VAAPI cannot decode this source profile; keeping GPU encoding and retrying with software decode`);
+        this.wsClient.sendJobProgress(jobId, 0, retryAction);
+        activeJob.currentAction = retryAction;
+        result = await this.transcoder.transcode(
+        {
+          ...transcodeOptions,
+          config: {
+            ...activeJob.config,
+            use_explicit_decoder: false,
+            software_decode: true,
+          },
+        },
+          reportProgress,
+        );
+      }
 
       if (result.success) {
         this.logger.info(`[JOB_COMPLETE] Job ${jobId} completed successfully`);

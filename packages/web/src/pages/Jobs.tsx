@@ -254,10 +254,16 @@ function JobRow({ job, tab, onDelete, deleting }: {
             <span>{job.error_message}</span>
           </div>
         )}
+        {tab === 'queue' && String(job.current_action || '').includes('folder mapping') && (
+          <div className="mt-2 flex items-start gap-1.5 rounded-md border border-amber-500/25 bg-amber-500/5 px-2 py-1.5 text-xs leading-5 text-amber-300">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>{job.current_action}. Add a mapping for a connected worker that can access this library.</span>
+          </div>
+        )}
       </div>
 
       <div className="text-xs text-gray-400">
-        <p className="truncate">{job.node_name || (tab === 'queue' ? 'Awaiting worker' : 'Unknown node')}</p>
+        <p className="truncate">{job.node_name || (tab === 'queue' ? (job.current_action || 'Awaiting worker') : 'Unknown node')}</p>
         <p className="mt-1 text-[11px] text-gray-600">
           {tab === 'success' ? `Finished ${formatTimestamp(job.completed_at)}` : `Created ${formatTimestamp(job.created_at)}`}
         </p>
@@ -280,7 +286,7 @@ function JobRow({ job, tab, onDelete, deleting }: {
         ) : (
           <div>
             <div className="mb-1.5 flex justify-between text-[11px] text-gray-500">
-              <span>{job.depends_on_job_id ? 'Waiting for analysis' : 'Queued'}</span><span>{percentage(job.progress).toFixed(0)}%</span>
+              <span>{job.depends_on_job_id ? 'Waiting for analysis' : (job.current_action || 'Queued')}</span><span>{percentage(job.progress).toFixed(0)}%</span>
             </div>
             <ProgressBar value={job.progress} color="#f59e0b" />
           </div>
