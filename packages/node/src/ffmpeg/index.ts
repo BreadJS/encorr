@@ -558,9 +558,6 @@ export function getFFmpegEncoder(config: FFmpegConfig, availableEncoders?: FFmpe
 function getQualityParams(config: FFmpegConfig): string[] {
   const params: string[] = [];
   const encoder = getFFmpegEncoder(config);
-  const hwDeviceId = config.gpu_type === 'intel'
-    ? (config.gpu_vendor_device_id ?? config.gpu_device_id)
-    : config.gpu_device_id;
   const codec = config.video_codec;
 
   // CPU encoders (libx264, libx265) use CRF
@@ -604,7 +601,17 @@ export function buildFFmpegArgs(options: FFmpegOptions): string[] {
   const { input, output, config } = options;
   const args: string[] = [];
   const encoder = getFFmpegEncoder(config);
-  const softwareDecodeForVaapi = config.software_decode === true && encoder.includes('vaapi');
+  const hwDeviceId = config.gpu_type === 'intel'
+    ? (config.gpu_vendor_device_id ?? config.gpu_device_id)
+    : config.gpu_device_id;
+  const sourceCodec = String(config.source_codec || '').toLowerCase();
+  // MPEG-2 VAAPI decoding can reject some profiles or silently corrupt the
+  // rightmost frame columns. Decode it in software, upload clean NV12 frames,
+  // and retain VAAPI GPU encoding.
+  const unsafeMpeg2VaapiDecode = encoder.includes('vaapi')
+    && (sourceCodec.includes('mpeg2') || sourceCodec.includes('mpeg2video'));
+  const softwareDecodeForVaapi = encoder.includes('vaapi')
+    && (config.software_decode === true || unsafeMpeg2VaapiDecode);
 
   if (softwareDecodeForVaapi) {
     // Some VAAPI devices can encode a codec that they cannot decode (for
