@@ -1819,18 +1819,59 @@ export class EncorrWebSocketServer {
     return preset?.config?.action === 'analyze';
   }
 
-  private resolveMappingForNode(nodeId: string, file: any): any | null {
+  private joinNodePath(basePath: string, relativePath: string): string {
+    const usesWindowsSeparators = /\\/.test(basePath) || /^[A-Za-z]:/.test(basePath);
+    const separator = usesWindowsSeparators ? '\\' : '/';
+    const cleanBase = basePath.replace(/[\\/]+$/, '');
+    const cleanRelative = relativePath.replace(/^[\\/]+/, '').replace(/[\\/]+/g, separator);
+    return cleanRelative ? `${cleanBase}${separator}${cleanRelative}` : cleanBase;
+  }
+
+  private getServerFilePath(file: any, sourceMapping: any): string | null {
+    if (sourceMapping.server_path?.startsWith('library:')) {
+      const libraryId = sourceMapping.server_path.slice('library:'.length);
+      const library = this.db.getLibraryById(libraryId);
+      return library ? this.joinNodePath(library.path, file.relative_path) : null;
+    }
+    return this.joinNodePath(sourceMapping.server_path, file.relative_path);
+  }
+
+  private resolveMappingForNode(nodeId: string, file: any): { mapping: any; sourcePath: string } | null {
     if (!file?.folder_mapping_id) return null;
     const sourceMapping = this.db.getFolderMappingById(file.folder_mapping_id);
     if (!sourceMapping) return null;
 
     const nodeMappings = this.db.getFolderMappingsByNode(nodeId);
     if (sourceMapping.server_path?.startsWith('library:')) {
-      return nodeMappings.find(mapping => mapping.server_path === sourceMapping.server_path) || null;
+      const libraryMapping = nodeMappings.find(mapping => mapping.server_path === sourceMapping.server_path);
+      if (libraryMapping) {
+        return {
+          mapping: libraryMapping,
+          sourcePath: this.joinNodePath(libraryMapping.node_path, file.relative_path),
+        };
+      }
     }
 
-    if (sourceMapping.node_id === nodeId) return sourceMapping;
-    return nodeMappings.find(mapping => mapping.server_path === sourceMapping.server_path) || null;
+    const serverFilePath = this.getServerFilePath(file, sourceMapping);
+    if (!serverFilePath) return null;
+    const normalizedFilePath = serverFilePath.replace(/\\/g, '/');
+    const pathMapping = nodeMappings
+      .filter(mapping => !mapping.server_path?.startsWith('library:'))
+      .map(mapping => ({
+        mapping,
+        normalizedServerPath: mapping.server_path.replace(/\\/g, '/').replace(/\/+$/, ''),
+      }))
+      .filter(({ normalizedServerPath }) =>
+        normalizedFilePath === normalizedServerPath || normalizedFilePath.startsWith(`${normalizedServerPath}/`)
+      )
+      .sort((a, b) => b.normalizedServerPath.length - a.normalizedServerPath.length)[0];
+
+    if (!pathMapping) return null;
+    const suffix = normalizedFilePath.slice(pathMapping.normalizedServerPath.length);
+    return {
+      mapping: pathMapping.mapping,
+      sourcePath: this.joinNodePath(pathMapping.mapping.node_path, suffix),
+    };
   }
 
   private nodeCanAccessJob(node: any, job: any): boolean {
@@ -2371,12 +2412,13 @@ export class EncorrWebSocketServer {
       return false;
     }
 
-    const mapping = this.resolveMappingForNode(node.id, file);
-    if (!mapping) {
+    const resolvedMapping = this.resolveMappingForNode(node.id, file);
+    if (!resolvedMapping) {
       this.logger.warn(`[NODE_MAPPING] Not assigning job ${job.id} to ${node.name}: no mapping for ${sourceMapping.server_path}`);
       return false;
     }
-    this.logger.info(`[NODE_MAPPING] Job ${job.id} on ${node.name}: ${sourceMapping.server_path} -> ${mapping.node_path}`);
+    const { sourcePath } = resolvedMapping;
+    this.logger.info(`[NODE_MAPPING] Job ${job.id} on ${node.name}: ${sourceMapping.server_path} -> ${sourcePath}`);
 
     // Check if this is an analyze-only job
     const isAnalyzeJob = preset.config?.action === 'analyze';
@@ -2387,11 +2429,7 @@ export class EncorrWebSocketServer {
 
     // For library files, get metadata from library_files table
     if (sourceMapping.server_path?.startsWith('library:')) {
-      const libraryId = sourceMapping.server_path.replace('library:', '');
-      const library = this.db.getLibraryById(libraryId);
-      const serverFilePath = library
-        ? `${library.path.replace(/[\\/]+$/, '')}/${file.relative_path.replace(/^[\\/]+/, '')}`
-        : '';
+      const serverFilePath = this.getServerFilePath(file, sourceMapping) || '';
       const libFile = serverFilePath ? this.db.getLibraryFileByFilepath(serverFilePath) : undefined;
       if (libFile?.metadata) {
         metadata = libFile.metadata;
@@ -2426,33 +2464,10 @@ export class EncorrWebSocketServer {
       }
     }
 
-    // Determine source path
-    let sourcePath: string;
-
-    if (sourceMapping.server_path?.startsWith('library:')) {
-      const basePath = mapping.node_path;
-      if (basePath && (basePath.includes('.mkv') || basePath.includes('.mp4') || basePath.includes('.avi'))) {
-        sourcePath = basePath;
-      } else {
-        sourcePath = `${basePath}/${file.relative_path}`;
-      }
-    } else {
-      sourcePath = `${mapping.node_path}/${file.relative_path}`;
-    }
-
     // Determine destination path (only for transcode jobs, not analyze)
     let destPath: string | undefined;
     if (!isAnalyzeJob) {
-      if (sourceMapping.server_path?.startsWith('library:')) {
-        const basePath = mapping.node_path;
-        if (basePath && (basePath.includes('.mkv') || basePath.includes('.mp4') || basePath.includes('.avi'))) {
-          destPath = basePath.replace(/\.[^.]+$/, '_enc.mkv');
-        } else {
-          destPath = `${basePath}/${file.relative_path.replace(/\.[^.]+$/, '_enc.mkv')}`;
-        }
-      } else {
-        destPath = `${mapping.node_path}/${file.relative_path.replace(/\.[^.]+$/, '_enc.mkv')}`;
-      }
+      destPath = sourcePath.replace(/\.[^\\/.]+$/, '_enc.mkv');
     }
 
     this.logger.debug(`Assigning job ${job.id} to node ${node.name} (${node.id})${isAnalyzeJob ? ' (analyze only)' : ''}`);
