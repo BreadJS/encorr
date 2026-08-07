@@ -15,6 +15,7 @@ export interface GPUUsageData {
   memoryTotal?: number;
   temperatureGpu?: number;
   powerDraw?: number;
+  powerLimit?: number;
   fanSpeed?: number;
 }
 
@@ -211,20 +212,30 @@ export class GPUMonitor {
       const cardNum = gpu?.drm_card || `card${gpuIndex}`;
       const hwmonRoot = `/sys/class/drm/${cardNum}/device/hwmon`;
       const hwmonEntries = await readdirAsync(hwmonRoot).catch(() => [] as string[]);
-      const temperaturePath = hwmonEntries.length > 0
-        ? `${hwmonRoot}/${hwmonEntries[0]}/temp1_input`
-        : null;
+      const namedHwmonEntries = await Promise.all(hwmonEntries.map(async entry => ({
+        entry,
+        name: await readFileAsync(`${hwmonRoot}/${entry}/name`, 'utf8').catch(() => ''),
+      })));
+      const hwmonEntry = namedHwmonEntries.find(item => item.name.trim().toLowerCase() === 'amdgpu')?.entry
+        || hwmonEntries[0];
+      const hwmonPath = hwmonEntry ? `${hwmonRoot}/${hwmonEntry}` : null;
 
       const [
         usageStr,
         vramUsedStr,
         vramTotalStr,
-        tempStr
+        tempStr,
+        powerAverageStr,
+        powerInputStr,
+        powerCapStr,
       ] = await Promise.all([
         readFileAsync(`/sys/class/drm/${cardNum}/device/gpu_busy_percent`, 'utf8').catch(() => null),
         readFileAsync(`/sys/class/drm/${cardNum}/device/mem_info_vram_used`, 'utf8').catch(() => null),
         readFileAsync(`/sys/class/drm/${cardNum}/device/mem_info_vram_total`, 'utf8').catch(() => null),
-        temperaturePath ? readFileAsync(temperaturePath, 'utf8').catch(() => null) : Promise.resolve(null),
+        hwmonPath ? readFileAsync(`${hwmonPath}/temp1_input`, 'utf8').catch(() => null) : Promise.resolve(null),
+        hwmonPath ? readFileAsync(`${hwmonPath}/power1_average`, 'utf8').catch(() => null) : Promise.resolve(null),
+        hwmonPath ? readFileAsync(`${hwmonPath}/power1_input`, 'utf8').catch(() => null) : Promise.resolve(null),
+        hwmonPath ? readFileAsync(`${hwmonPath}/power1_cap`, 'utf8').catch(() => null) : Promise.resolve(null),
       ]);
 
       const data: GPUUsageData = {};
@@ -240,6 +251,19 @@ export class GPUMonitor {
 
       if (tempStr) {
         data.temperatureGpu = Math.round(parseInt(tempStr.trim()) / 1000); // millidegrees to C
+      }
+
+      // amdgpu hwmon reports power in microwatts. Discrete cards commonly
+      // expose power1_average, while APUs and some newer drivers only expose
+      // power1_input, so accept either and prefer the averaged reading.
+      const powerMicrowatts = Number.parseInt((powerAverageStr || powerInputStr || '').trim(), 10);
+      if (Number.isFinite(powerMicrowatts) && powerMicrowatts >= 0) {
+        data.powerDraw = powerMicrowatts / 1_000_000;
+      }
+
+      const powerLimitMicrowatts = Number.parseInt((powerCapStr || '').trim(), 10);
+      if (Number.isFinite(powerLimitMicrowatts) && powerLimitMicrowatts > 0) {
+        data.powerLimit = powerLimitMicrowatts / 1_000_000;
       }
 
       return Object.keys(data).length > 0 ? data : null;

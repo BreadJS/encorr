@@ -596,6 +596,7 @@ export class EncorrWebSocketServer {
             memoryFree: liveGpu.memoryFree,
             temperatureGpu: liveGpu.temperatureGpu,
             powerDraw: liveGpu.powerDraw,
+            powerLimit: liveGpu.powerLimit,
             clockCore: liveGpu.clockCore,
             clockMemory: liveGpu.clockMemory,
           };
@@ -1175,6 +1176,7 @@ export class EncorrWebSocketServer {
               memoryUsed: updateData.memoryUsed,
               memoryFree: updateData.memoryFree,
               powerDraw: updateData.powerDraw,
+              powerLimit: updateData.powerLimit,
               clockCore: updateData.clockCore,
             };
           }

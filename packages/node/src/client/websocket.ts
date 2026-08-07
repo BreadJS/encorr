@@ -325,6 +325,7 @@ export class WebSocketClient extends EventEmitter {
       memoryFree?: number;
       temperatureGpu?: number;
       powerDraw?: number;
+      powerLimit?: number;
       clockCore?: number;
       clockMemory?: number;
     }>
