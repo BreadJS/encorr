@@ -590,15 +590,15 @@ export class EncorrWebSocketServer {
           if (!liveGpu) return staticGpu;
           return {
             ...staticGpu,
-            utilizationGpu: liveGpu.utilizationGpu,
-            utilizationMemory: liveGpu.utilizationMemory,
-            memoryUsed: liveGpu.memoryUsed,
-            memoryFree: liveGpu.memoryFree,
-            temperatureGpu: liveGpu.temperatureGpu,
-            powerDraw: liveGpu.powerDraw,
-            powerLimit: liveGpu.powerLimit,
-            clockCore: liveGpu.clockCore,
-            clockMemory: liveGpu.clockMemory,
+            utilizationGpu: liveGpu.utilizationGpu ?? staticGpu.utilizationGpu,
+            utilizationMemory: liveGpu.utilizationMemory ?? staticGpu.utilizationMemory,
+            memoryUsed: liveGpu.memoryUsed ?? staticGpu.memoryUsed,
+            memoryFree: liveGpu.memoryFree ?? staticGpu.memoryFree,
+            temperatureGpu: liveGpu.temperatureGpu ?? staticGpu.temperatureGpu,
+            powerDraw: liveGpu.powerDraw ?? staticGpu.powerDraw,
+            powerLimit: liveGpu.powerLimit ?? staticGpu.powerLimit,
+            clockCore: liveGpu.clockCore ?? staticGpu.clockCore,
+            clockMemory: liveGpu.clockMemory ?? staticGpu.clockMemory,
           };
         });
 
@@ -1170,14 +1170,14 @@ export class EncorrWebSocketServer {
           if (updateData) {
             return {
               ...gpu,
-              utilizationGpu: updateData.utilizationGpu,
-              utilizationMemory: updateData.utilizationMemory,
-              temperatureGpu: updateData.temperatureGpu,
-              memoryUsed: updateData.memoryUsed,
-              memoryFree: updateData.memoryFree,
-              powerDraw: updateData.powerDraw,
-              powerLimit: updateData.powerLimit,
-              clockCore: updateData.clockCore,
+              utilizationGpu: updateData.utilizationGpu ?? gpu.utilizationGpu,
+              utilizationMemory: updateData.utilizationMemory ?? gpu.utilizationMemory,
+              temperatureGpu: updateData.temperatureGpu ?? gpu.temperatureGpu,
+              memoryUsed: updateData.memoryUsed ?? gpu.memoryUsed,
+              memoryFree: updateData.memoryFree ?? gpu.memoryFree,
+              powerDraw: updateData.powerDraw ?? gpu.powerDraw,
+              powerLimit: updateData.powerLimit ?? gpu.powerLimit,
+              clockCore: updateData.clockCore ?? gpu.clockCore,
             };
           }
           return gpu;
