@@ -863,12 +863,12 @@ export class EncorrNode {
           if (gpuUsageMap.size > 0) {
             gpuData = [];
 
-            // Convert Map to array in GPU order
+            // Preserve the system-info GPU order. The server merges this array
+            // by index, so omitting an unmonitored GPU would shift Intel Arc
+            // telemetry onto the wrong adapter.
             for (let i = 0; i < this.systemInfo.gpus.length; i++) {
               const usage = gpuUsageMap.get(i);
-              if (usage) {
-                gpuData.push(usage);
-              }
+              gpuData.push(usage || {});
             }
 
             // Detailed GPU logging - log every 10 seconds

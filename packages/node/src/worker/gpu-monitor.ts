@@ -33,6 +33,7 @@ export class GPUMonitor {
     // Separate GPUs by vendor for efficient querying
     const nvidiaGpus: Array<{ index: number; gpu: any }> = [];
     const amdGpus: Array<{ index: number; gpu: any }> = [];
+    const intelGpus: Array<{ index: number; gpu: any }> = [];
 
     for (let i = 0; i < gpus.length; i++) {
       const gpu = gpus[i];
@@ -42,8 +43,9 @@ export class GPUMonitor {
         nvidiaGpus.push({ index: i, gpu });
       } else if (/\bamd\b|advanced micro devices|\bradeon\b|\bati\b/.test(vendor)) {
         amdGpus.push({ index: i, gpu });
+      } else if (/\bintel\b|\barc(?:\(tm\))?\b/.test(vendor)) {
+        intelGpus.push({ index: i, gpu });
       }
-      // Intel and others - skip for now
     }
 
     // Query all NVIDIA GPUs in a single nvidia-smi call
@@ -69,6 +71,25 @@ export class GPUMonitor {
         if (data) results.set(index, data);
       } catch (error: any) {
         console.error('[GPUMonitor] Failed to get AMD GPU usage:', error?.message || error);
+      }
+    }
+
+    // Windows exposes Intel Arc utilisation through the GPU Engine performance
+    // counters, not through systeminformation. The counter's `phys_N` index is
+    // normally the graphics-controller index; fall back to the ordered Intel
+    // adapters if Windows has assigned physical indexes differently.
+    if (intelGpus.length > 0 && process.platform === 'win32') {
+      try {
+        const usageByPhysicalIndex = await this.getWindowsGpuEngineUsage();
+        const physicalIndexes = [...usageByPhysicalIndex.keys()].sort((a, b) => a - b);
+
+        intelGpus.forEach(({ index }, intelIndex) => {
+          const usage = usageByPhysicalIndex.get(index)
+            ?? usageByPhysicalIndex.get(physicalIndexes[intelIndex]);
+          if (usage) results.set(index, usage);
+        });
+      } catch (error: any) {
+        console.error('[GPUMonitor] Failed to get Intel GPU usage:', error?.message || error);
       }
     }
 
@@ -220,6 +241,70 @@ export class GPUMonitor {
     }
   }
 
+  /**
+   * Read Windows' built-in GPU Engine performance counters. Intel Arc drivers
+   * do not provide an nvidia-smi-style utility, while these counters contain
+   * the same engine load used by Task Manager. Task Manager reports the busiest
+   * engine, so use the maximum engine value for each physical adapter rather
+   * than summing simultaneous 3D, encode, decode, and copy engines.
+   */
+  private async getWindowsGpuEngineUsage(): Promise<Map<number, GPUUsageData>> {
+    return new Promise((resolve, reject) => {
+      const script = [
+        '$ErrorActionPreference = "Stop"',
+        'Get-CimInstance -ClassName Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine',
+        '| Select-Object Name, UtilizationPercentage',
+        '| ConvertTo-Json -Compress',
+      ].join(' ');
+      const powershell = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      let settled = false;
+      const finish = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        callback();
+      };
+
+      powershell.stdout.on('data', data => { stdout += data.toString(); });
+      powershell.stderr.on('data', data => { stderr += data.toString(); });
+      powershell.on('error', error => finish(() => reject(error)));
+      powershell.on('close', code => finish(() => {
+        if (code !== 0 || !stdout.trim()) {
+          reject(new Error(stderr.trim() || `PowerShell exited with code ${code}`));
+          return;
+        }
+
+        try {
+          const entries = JSON.parse(stdout) as Array<{ Name?: string; UtilizationPercentage?: number }> | { Name?: string; UtilizationPercentage?: number };
+          const usageByPhysicalIndex = new Map<number, GPUUsageData>();
+          for (const entry of (Array.isArray(entries) ? entries : [entries])) {
+            const match = entry.Name?.match(/(?:^|_)phys_(\d+)(?:_|$)/i);
+            const utilization = Number(entry.UtilizationPercentage);
+            if (!match || !Number.isFinite(utilization)) continue;
+
+            const physicalIndex = Number(match[1]);
+            const previous = usageByPhysicalIndex.get(physicalIndex)?.utilizationGpu ?? 0;
+            usageByPhysicalIndex.set(physicalIndex, {
+              utilizationGpu: Math.max(previous, Math.max(0, Math.min(100, Math.round(utilization)))),
+            });
+          }
+          resolve(usageByPhysicalIndex);
+        } catch (error) {
+          reject(error);
+        }
+      }));
+
+      setTimeout(() => finish(() => {
+        powershell.kill();
+        reject(new Error('Timed out reading Windows GPU Engine counters'));
+      }), 1500);
+    });
+  }
+
   private getGPUVendor(gpu: any): string {
     const name = (gpu.name || gpu.model || '').toLowerCase();
     if (name.includes('nvidia') || name.includes('geforce') || name.includes('quadro') || name.includes('tesla')) {
@@ -227,6 +312,9 @@ export class GPUMonitor {
     }
     if (/\bamd\b|advanced micro devices|\bradeon\b|\bati\b/.test(name)) {
       return 'amd';
+    }
+    if (/\bintel\b|\barc(?:\(tm\))?\b/.test(name)) {
+      return 'intel';
     }
     return 'unknown';
   }

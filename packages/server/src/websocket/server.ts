@@ -518,54 +518,25 @@ export class EncorrWebSocketServer {
         // Extract GPU utilization percentages
         gpuUsage = payload.gpus.map(gpu => gpu.utilizationGpu ?? 0);
 
-        // Rebuild GPU list by matching each incoming GPU with static info from DB
-        const updatedGpus: any[] = [];
-        const usedStaticIndices = new Set<number>();
-
-        for (const liveGpu of payload.gpus) {
-          // Find matching static GPU info from the filtered DB GPUs by vendor
-          const staticGpuIndex = filteredSystemInfo.gpus.findIndex((existingGpu: any, idx: number) => {
-            if (usedStaticIndices.has(idx)) return false; // Skip already matched
-
-            const existingVendor = (existingGpu.vendor || '').toLowerCase();
-            const existingName = (existingGpu.name || '').toLowerCase();
-
-            // NVIDIA GPUs match NVIDIA
-            if (existingVendor.includes('nvidia') || existingName.includes('nvidia') ||
-                existingName.includes('geforce') || existingName.includes('rtx') || existingName.includes('quadro')) {
-              return true;
-            }
-
-            // AMD GPUs match AMD
-            if (existingVendor.includes('amd') || existingVendor.includes('advanced') || existingName.includes('amd') ||
-                existingName.includes('radeon') || /\bati\b/.test(existingVendor)) {
-              return true;
-            }
-
-            return false;
-          });
-
-          if (staticGpuIndex >= 0) {
-            const staticGpu = filteredSystemInfo.gpus[staticGpuIndex];
-            usedStaticIndices.add(staticGpuIndex);
-
-            // Merge static info with live data
-            updatedGpus.push({
-              ...staticGpu,
-              utilizationGpu: liveGpu.utilizationGpu,
-              utilizationMemory: liveGpu.utilizationMemory,
-              memoryUsed: liveGpu.memoryUsed,
-              memoryFree: liveGpu.memoryFree,
-              temperatureGpu: liveGpu.temperatureGpu,
-              powerDraw: liveGpu.powerDraw,
-              clockCore: liveGpu.clockCore,
-              clockMemory: liveGpu.clockMemory,
-            });
-          } else {
-            // No matching static GPU found - this shouldn't happen, but log it
-            this.logger.warn(`No matching static GPU found for live GPU data: ${JSON.stringify(liveGpu)}`);
-          }
-        }
+        // Node telemetry is deliberately sent in the same order as its static
+        // GPU list. Merge by index so Intel Arc (and mixed-vendor systems) do
+        // not depend on a vendor-matching branch that previously only covered
+        // NVIDIA and AMD.
+        const updatedGpus = filteredSystemInfo.gpus.map((staticGpu: any, index: number) => {
+          const liveGpu = payload.gpus![index];
+          if (!liveGpu) return staticGpu;
+          return {
+            ...staticGpu,
+            utilizationGpu: liveGpu.utilizationGpu,
+            utilizationMemory: liveGpu.utilizationMemory,
+            memoryUsed: liveGpu.memoryUsed,
+            memoryFree: liveGpu.memoryFree,
+            temperatureGpu: liveGpu.temperatureGpu,
+            powerDraw: liveGpu.powerDraw,
+            clockCore: liveGpu.clockCore,
+            clockMemory: liveGpu.clockMemory,
+          };
+        });
 
         // Update with rebuilt GPU list (only GPUs with live data)
         this.db.updateNodeSystemInfo(connection.nodeId!, {
