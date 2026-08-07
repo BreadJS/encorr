@@ -1,7 +1,7 @@
 import { existsSync } from 'fs';
 import { platform } from 'os';
 import { join } from 'path';
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import type { FFmpegEncoderInfo, FFmpegDecoderInfo, HwaccelInfo, EncoderType, GPUVendor, VideoCodec, GPUInfo } from '@encorr/shared';
 
 // Re-export types for convenience
@@ -105,8 +105,10 @@ export function findFFprobe(): string | null {
 
 export function getFFmpegVersion(ffmpegPath: string): string | null {
   try {
-    const output = execSync(`"${ffmpegPath}" -version`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
-    const match = output.match(/ffmpeg version ([\d.]+)/);
+    // Avoid shell quoting differences on Windows and accept distro/nightly
+    // versions such as "n7.1", "N-117000", or "7.1-full_build".
+    const output = execFileSync(ffmpegPath, ['-version'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const match = output.match(/^ffmpeg version\s+([^\s]+)/im);
     return match ? match[1] : null;
   } catch {
     return null;
@@ -115,8 +117,8 @@ export function getFFmpegVersion(ffmpegPath: string): string | null {
 
 export function getFFprobeVersion(ffprobePath: string): string | null {
   try {
-    const output = execSync(`"${ffprobePath}" -version`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
-    const match = output.match(/ffprobe version ([\d.]+)/);
+    const output = execFileSync(ffprobePath, ['-version'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const match = output.match(/^ffprobe version\s+([^\s]+)/im);
     return match ? match[1] : null;
   } catch {
     return null;

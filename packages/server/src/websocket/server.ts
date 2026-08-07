@@ -2206,8 +2206,10 @@ export class EncorrWebSocketServer {
       // Find node with available CPU workers
       const nodeWithCpu = this.findNodeWithAvailableCpu(onlineNodes, job);
       if (!nodeWithCpu) {
-        this.logger.debug(`CPU capacity is full; leaving ${analyzeJobs.length - assignedCount} analyze job(s) queued`);
-        break;
+        // Mapping compatibility is job-specific. One inaccessible file must
+        // not block every later analysis job that another CPU worker can read.
+        this.logger.debug(`[ANALYZE_ASSIGN] No mapped CPU capacity for job ${job.id}; leaving only this job queued`);
+        continue;
       }
 
       if (this.assignJobToNodeWithRetry(nodeWithCpu, job, preset)) {
@@ -2216,7 +2218,6 @@ export class EncorrWebSocketServer {
     }
 
     // Process transcode jobs (can use GPU or CPU)
-    let cpuCapacityExhausted = false;
     for (const { job, preset } of transcodeJobs) {
       if (job.quick_select_id) {
         const route = this.resolveQuickSelectRoute(job, onlineNodes);
@@ -2279,15 +2280,13 @@ export class EncorrWebSocketServer {
       }
 
       // CPU jobs - assign to CPU workers
-      if (cpuCapacityExhausted) continue;
       const nodeWithCpu = this.findNodeWithAvailableCpu(onlineNodes, job);
       if (nodeWithCpu) {
         if (this.assignJobToNodeWithRetry(nodeWithCpu, job, preset)) {
           assignedCount++;
         }
       } else {
-        cpuCapacityExhausted = true;
-        this.logger.debug(`CPU capacity is full; remaining CPU jobs stay queued`);
+        this.logger.debug(`[CPU_SELECT] No mapped CPU capacity for job ${job.id}; leaving only this job queued`);
       }
     }
 
@@ -2306,6 +2305,8 @@ export class EncorrWebSocketServer {
     let bestNode: any | null = null;
     let maxAvailableCpu = 0;
     let minActiveJobs = Infinity;
+    let connectedNodes = 0;
+    let mappedNodes = 0;
 
     this.logger.debug(`[FIND_CPU] Checking ${nodes.length} nodes for available CPU workers`);
 
@@ -2315,10 +2316,12 @@ export class EncorrWebSocketServer {
         this.logger.debug(`[FIND_CPU] Skipping node ${node.name} (${node.id}) - not connected via WebSocket`);
         continue;
       }
+      connectedNodes++;
       if (job && !this.nodeCanAccessJob(node, job)) {
         this.logger.debug(`[FIND_CPU] Skipping node ${node.name} for job ${job.id} - no matching folder mapping`);
         continue;
       }
+      mappedNodes++;
 
       const available = this.getAvailableWorkers(node);
 
@@ -2342,6 +2345,8 @@ export class EncorrWebSocketServer {
 
     if (bestNode) {
       this.logger.debug(`[CPU_AVAIL] Node ${bestNode.name} selected with ${maxAvailableCpu} CPU slots available (active jobs: ${minActiveJobs})`);
+    } else if (job) {
+      this.logger.info(`[CPU_AVAIL] Job ${job.id} awaiting worker: connected_nodes=${connectedNodes}, mapped_nodes=${mappedNodes}, free_cpu_slots=0`);
     }
 
     return bestNode;
