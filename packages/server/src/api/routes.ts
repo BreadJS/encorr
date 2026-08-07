@@ -2176,6 +2176,12 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     return sendSuccess(jobs);
   });
 
+  // Lightweight data used by the UI to estimate output size without running
+  // a sample encode. Only successful size ratios are returned.
+  fastify.get('/jobs/estimate-history', async () => {
+    return sendSuccess(db.getTranscodeEstimateHistory());
+  });
+
   // Smart transcoding endpoint - automatically selects optimal presets or uses user-selected preset
   fastify.post('/jobs/smart', async (request, reply) => {
     const data = request.body as SmartTranscodeRequest;

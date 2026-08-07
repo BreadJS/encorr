@@ -6,7 +6,7 @@ import { useState, useMemo, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Dialog } from '@/components/ui/Dialog';
 import { Button } from '@/components/ui/Button';
-import { Loader2, Cpu, Zap, Settings2, CheckCircle2, ChevronDown, AlertTriangle, Copy, Replace } from 'lucide-react';
+import { Loader2, Cpu, Zap, Settings2, CheckCircle2, ChevronDown, AlertTriangle, Copy, Replace, HardDrive } from 'lucide-react';
 import { BUILTIN_PRESETS } from '@/data/presets';
 import { api } from '@/utils/api';
 import type { TranscodeMode } from '@encorr/shared';
@@ -35,6 +35,24 @@ interface SmartTranscodeDialogProps {
   onOpenChange: (open: boolean) => void;
   files: LibraryFile[];
   onConfirm: (mode: TranscodeMode, presetId: string, quickSelectId: string | undefined, postAction: 'keep' | 'replace' | 'backup_replace') => Promise<void>;
+}
+
+interface EstimateHistorySample {
+  preset_id: string | null;
+  original_codec: string | null;
+  output_codec: string | null;
+  original_resolution: string | null;
+  original_size: number;
+  output_size: number;
+}
+
+interface FileSizeEstimate {
+  fileId: string;
+  original: number;
+  low: number;
+  high: number;
+  midpoint: number;
+  basedOnHistory: boolean;
 }
 
 // ============================================================================
@@ -107,6 +125,99 @@ const theme = {
   textMuted: '#6b7280',
 };
 
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return 'Unknown';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const unit = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  return `${(bytes / Math.pow(1024, unit)).toFixed(unit >= 3 ? 2 : 1)} ${units[unit]}`;
+}
+
+function normalizeCodec(codec: unknown): string {
+  const value = String(codec || '').toLowerCase();
+  if (value.includes('265') || value.includes('hevc')) return 'h265';
+  if (value.includes('264') || value.includes('avc')) return 'h264';
+  if (value.includes('av1')) return 'av1';
+  return value || 'unknown';
+}
+
+function percentile(values: number[], fraction: number): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  if (sorted.length === 0) return 0;
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * fraction)))];
+}
+
+function fallbackRatio(file: LibraryFile, targetCodec: string): number {
+  const sourceCodec = normalizeCodec(file.metadata?.video_codec);
+  const duration = Number(file.metadata?.duration || 0);
+  const size = Number(file.filesize || file.metadata?.size || 0);
+  const bitrate = Number(file.metadata?.bitrate || 0) || (duration > 0 ? (size * 8) / duration : 0);
+  const highBitrate = bitrate >= 8_000_000;
+
+  if (targetCodec === 'h265') {
+    if (sourceCodec === 'h264') return highBitrate ? 0.48 : 0.60;
+    if (sourceCodec === 'h265') return highBitrate ? 0.78 : 0.92;
+    return highBitrate ? 0.55 : 0.70;
+  }
+  if (targetCodec === 'h264') {
+    if (sourceCodec === 'h265' || sourceCodec === 'av1') return 1.25;
+    if (sourceCodec === 'h264') return 0.92;
+    return 0.75;
+  }
+  if (targetCodec === 'av1') return sourceCodec === 'av1' ? 0.92 : 0.52;
+  return 0.75;
+}
+
+function estimateFileSize(
+  file: LibraryFile,
+  history: EstimateHistorySample[],
+  presetIds: string[],
+  targetCodec: string,
+): FileSizeEstimate {
+  const original = Number(file.filesize || file.metadata?.size || 0);
+  const sourceCodec = normalizeCodec(file.metadata?.video_codec);
+  const valid = history.filter(sample => {
+    const ratio = sample.output_size / sample.original_size;
+    return Number.isFinite(ratio) && ratio >= 0.08 && ratio <= 3;
+  });
+  const exactPreset = valid.filter(sample => sample.preset_id && presetIds.includes(sample.preset_id));
+  const sameSource = (samples: EstimateHistorySample[]) => samples.filter(sample => normalizeCodec(sample.original_codec) === sourceCodec);
+  const sameTarget = valid.filter(sample => normalizeCodec(sample.output_codec) === targetCodec);
+  const candidates = sameSource(exactPreset).length >= 3
+    ? sameSource(exactPreset)
+    : exactPreset.length >= 3
+      ? exactPreset
+      : sameSource(sameTarget).length >= 3
+        ? sameSource(sameTarget)
+        : sameTarget.length >= 3
+          ? sameTarget
+          : [];
+
+  if (candidates.length > 0) {
+    const ratios = candidates.map(sample => sample.output_size / sample.original_size);
+    const median = percentile(ratios, 0.5);
+    const lowRatio = Math.min(median * 0.92, percentile(ratios, 0.2));
+    const highRatio = Math.max(median * 1.08, percentile(ratios, 0.8));
+    return {
+      fileId: file.id,
+      original,
+      low: original * lowRatio,
+      high: original * highRatio,
+      midpoint: original * median,
+      basedOnHistory: true,
+    };
+  }
+
+  const ratio = fallbackRatio(file, targetCodec);
+  return {
+    fileId: file.id,
+    original,
+    low: original * ratio * 0.8,
+    high: original * ratio * 1.2,
+    midpoint: original * ratio,
+    basedOnHistory: false,
+  };
+}
+
 // ============================================================================
 // Component
 // ============================================================================
@@ -151,6 +262,13 @@ export function SmartTranscodeDialog({
   const { data: quickSelectPresets = [] } = useQuery({
     queryKey: ['quick-select-presets'],
     queryFn: () => api.getQuickSelectPresets(),
+    refetchOnWindowFocus: false,
+  });
+
+  const { data: estimateHistory = [] } = useQuery({
+    queryKey: ['transcode-estimate-history'],
+    queryFn: () => api.getTranscodeEstimateHistory(),
+    staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
   });
 
@@ -316,6 +434,44 @@ export function SmartTranscodeDialog({
   };
 
   const currentPreset = getCurrentPreset();
+
+  const estimatePresetIds = useMemo(() => {
+    if (mode === 'cpu') return cpuPresetId ? [cpuPresetId] : [];
+    if (mode === 'gpu') {
+      const route = quickSelectPresets.find((preset: any) => preset.id === selectedQuickSelectPresetId);
+      return [route?.nvidia_preset_id, route?.amd_preset_id, route?.intel_preset_id]
+        .filter((id): id is string => Boolean(id));
+    }
+    return allPresets
+      .filter(preset => getVideoCodec(preset) === 'h265')
+      .map(preset => preset.id);
+  }, [mode, cpuPresetId, quickSelectPresets, selectedQuickSelectPresetId, allPresets]);
+
+  const estimateTargetCodec = useMemo(() => {
+    if (mode === 'cpu') return getVideoCodec(allPresets.find(preset => preset.id === cpuPresetId)) || 'h265';
+    if (mode === 'gpu') {
+      const routedPreset = allPresets.find(preset => estimatePresetIds.includes(preset.id));
+      return getVideoCodec(routedPreset) || 'h265';
+    }
+    return 'h265';
+  }, [mode, allPresets, cpuPresetId, estimatePresetIds]);
+
+  const sizeEstimates = useMemo(
+    () => files.map(file => estimateFileSize(file, estimateHistory, estimatePresetIds, estimateTargetCodec)),
+    [files, estimateHistory, estimatePresetIds, estimateTargetCodec],
+  );
+
+  const estimateSummary = useMemo(() => sizeEstimates.reduce((summary, estimate) => ({
+    original: summary.original + estimate.original,
+    low: summary.low + estimate.low,
+    high: summary.high + estimate.high,
+    midpoint: summary.midpoint + estimate.midpoint,
+    historicalFiles: summary.historicalFiles + (estimate.basedOnHistory ? 1 : 0),
+  }), { original: 0, low: 0, high: 0, midpoint: 0, historicalFiles: 0 }), [sizeEstimates]);
+
+  const estimatedChangePercent = estimateSummary.original > 0
+    ? ((estimateSummary.midpoint - estimateSummary.original) / estimateSummary.original) * 100
+    : 0;
 
   return (
     <Dialog
@@ -713,6 +869,30 @@ export function SmartTranscodeDialog({
           </div>
         )}
 
+        {estimateSummary.original > 0 && (
+          <div className="rounded-lg border p-3" style={{ backgroundColor: theme.bgSecondary, borderColor: theme.border }}>
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2 text-sm font-medium text-white">
+                  <HardDrive className="h-4 w-4 text-[#74c69d]" />
+                  Instant size estimate
+                </div>
+                <p className="mt-1 text-xs text-gray-500">
+                  Based on source metadata{estimateSummary.historicalFiles > 0 ? ' and completed Encorr transcodes' : ''}. No sample encode is run.
+                </p>
+              </div>
+              <div className="shrink-0 text-right">
+                <p className="text-base font-semibold text-white">
+                  {formatBytes(estimateSummary.low)}–{formatBytes(estimateSummary.high)}
+                </p>
+                <p className={`text-xs font-medium ${estimatedChangePercent <= 0 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                  {Math.abs(estimatedChangePercent).toFixed(0)}% {estimatedChangePercent <= 0 ? 'smaller' : 'larger'} estimated
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="space-y-2">
           <h3 className="text-base font-semibold text-white">After Each Transcode</h3>
           <p className="text-xs leading-5 text-gray-500">Choose what Encorr should do after each output is successfully created.</p>
@@ -750,19 +930,36 @@ export function SmartTranscodeDialog({
           <h3 className="text-base font-semibold text-white">Files to Transcode ({files.length})</h3>
           <div className="max-h-40 overflow-y-auto rounded-md border" style={{ borderColor: theme.border, backgroundColor: theme.bgSecondary }}>
             <div className="grid grid-cols-12 gap-2 border-b p-2 text-xs font-medium text-gray-400" style={{ borderColor: theme.border, backgroundColor: theme.bgTertiary }}>
-              <div className="col-span-12">File Name</div>
+              <div className="col-span-7">File Name</div>
+              <div className="col-span-2 text-right">Current</div>
+              <div className="col-span-3 text-right">Estimated</div>
             </div>
-            {files.map((file) => (
+            {files.map((file, index) => {
+              const estimate = sizeEstimates[index];
+              const change = estimate?.original > 0
+                ? ((estimate.midpoint - estimate.original) / estimate.original) * 100
+                : 0;
+              return (
               <div
                 key={file.id}
-                className="border-b p-2 text-sm last:border-0"
+                className="grid grid-cols-12 items-center gap-2 border-b p-2 text-sm last:border-0"
                 style={{ borderColor: theme.border }}
               >
-                <div className="truncate text-gray-300" title={file.filename}>
+                <div className="col-span-7 truncate text-gray-300" title={file.filename}>
                   {file.filename}
                 </div>
+                <div className="col-span-2 text-right text-xs text-gray-500">{formatBytes(estimate?.original || 0)}</div>
+                <div className="col-span-3 text-right">
+                  <div className="text-xs text-gray-300">{estimate ? `${formatBytes(estimate.low)}–${formatBytes(estimate.high)}` : 'Unknown'}</div>
+                  {estimate?.original > 0 && (
+                    <div className={`text-[10px] ${change <= 0 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                      {Math.abs(change).toFixed(0)}% {change <= 0 ? 'smaller' : 'larger'}
+                    </div>
+                  )}
+                </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       </div>

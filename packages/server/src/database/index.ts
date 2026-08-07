@@ -2558,6 +2558,34 @@ export class EncorrDatabase {
     `).all();
   }
 
+  getTranscodeEstimateHistory(limit = 1000): Array<{
+    preset_id: string | null;
+    original_codec: string | null;
+    output_codec: string | null;
+    original_resolution: string | null;
+    original_size: number;
+    output_size: number;
+  }> {
+    return this.db.prepare(`
+      SELECT preset_id, original_codec, output_codec, original_resolution,
+        original_size, output_size
+      FROM job_reports
+      WHERE job_type = 'transcode'
+        AND status = 'completed'
+        AND original_size > 0
+        AND output_size > 0
+      ORDER BY COALESCE(completed_at, created_at) DESC
+      LIMIT ?
+    `).all(Math.max(1, Math.min(limit, 5000))) as Array<{
+      preset_id: string | null;
+      original_codec: string | null;
+      output_codec: string | null;
+      original_resolution: string | null;
+      original_size: number;
+      output_size: number;
+    }>;
+  }
+
   getJobReportById(id: string): any | undefined {
     return this.db.prepare('SELECT * FROM job_reports WHERE id = ?').get(id);
   }

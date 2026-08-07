@@ -216,6 +216,14 @@ export const api = {
     method: 'POST',
     body: JSON.stringify(data),
   }),
+  getTranscodeEstimateHistory: () => request<Array<{
+    preset_id: string | null;
+    original_codec: string | null;
+    output_codec: string | null;
+    original_resolution: string | null;
+    original_size: number;
+    output_size: number;
+  }>>('/jobs/estimate-history'),
   createSmartJob: (data: { file_ids: string[]; mode: 'auto' | 'gpu' | 'cpu'; preset_id?: string; quick_select_id?: string; post_action?: 'keep' | 'replace' | 'backup_replace' }) =>
     request<{
       success: boolean;
