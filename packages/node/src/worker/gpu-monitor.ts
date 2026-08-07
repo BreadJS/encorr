@@ -88,6 +88,19 @@ export class GPUMonitor {
         const usageByPhysicalIndex = await this.getWindowsGpuEngineUsage();
         const physicalIndexes = [...usageByPhysicalIndex.keys()].sort((a, b) => a - b);
 
+        // Filtering virtual/basic display adapters can shift Windows' phys_N
+        // indexes away from our compact GPU array. With one real Intel GPU,
+        // the busiest physical adapter is unambiguous and avoids reading an
+        // idle phantom adapter at phys_0 forever.
+        if (intelGpus.length === 1 && gpus.length === 1) {
+          const busiest = [...usageByPhysicalIndex.values()].reduce<GPUUsageData | undefined>((best, candidate) =>
+            (candidate.utilizationGpu ?? 0) > (best?.utilizationGpu ?? -1) ? candidate : best,
+          undefined);
+          const intelGpu = intelGpus[0];
+          if (busiest && intelGpu) results.set(intelGpu.index, busiest);
+          return results;
+        }
+
         intelGpus.forEach(({ index }, intelIndex) => {
           const fallbackPhysicalIndex = physicalIndexes[intelIndex];
           const usage = usageByPhysicalIndex.get(index)
@@ -303,9 +316,14 @@ export class GPUMonitor {
     return new Promise((resolve, reject) => {
       const script = [
         '$ErrorActionPreference = "Stop"',
+        '$result = try {',
+        '$samples = (Get-Counter -Counter "\\GPU Engine(*)\\Utilization Percentage" -SampleInterval 1 -MaxSamples 1).CounterSamples;',
+        '$samples | ForEach-Object { [pscustomobject]@{ Name = $_.InstanceName; UtilizationPercentage = $_.CookedValue } }',
+        '} catch {',
         'Get-CimInstance -ClassName Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine',
         '| Select-Object Name, UtilizationPercentage',
-        '| ConvertTo-Json -Compress',
+        '};',
+        '$result | ConvertTo-Json -Compress',
       ].join(' ');
       const powershell = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
         windowsHide: true,
@@ -331,16 +349,30 @@ export class GPUMonitor {
 
         try {
           const entries = JSON.parse(stdout) as Array<{ Name?: string; UtilizationPercentage?: number }> | { Name?: string; UtilizationPercentage?: number };
-          const usageByPhysicalIndex = new Map<number, GPUUsageData>();
+          const engineTotals = new Map<string, { physicalIndex: number; utilization: number }>();
           for (const entry of (Array.isArray(entries) ? entries : [entries])) {
             const match = entry.Name?.match(/(?:^|_)phys_(\d+)(?:_|$)/i);
             const utilization = Number(entry.UtilizationPercentage);
             if (!match || !Number.isFinite(utilization)) continue;
 
             const physicalIndex = Number(match[1]);
-            const previous = usageByPhysicalIndex.get(physicalIndex)?.utilizationGpu ?? 0;
-            usageByPhysicalIndex.set(physicalIndex, {
-              utilizationGpu: Math.max(previous, Math.max(0, Math.min(100, Math.round(utilization)))),
+            const engineMatch = entry.Name?.match(/_eng_(\d+)_engtype_([^_]+)/i);
+            const engineKey = `${physicalIndex}:${engineMatch?.[1] || entry.Name}:${engineMatch?.[2] || 'unknown'}`;
+            const previous = engineTotals.get(engineKey)?.utilization ?? 0;
+            engineTotals.set(engineKey, {
+              physicalIndex,
+              // The counter has one instance per process. Add processes that
+              // use the same hardware engine, then select the busiest engine
+              // below, matching Task Manager's overall GPU presentation.
+              utilization: previous + Math.max(0, utilization),
+            });
+          }
+
+          const usageByPhysicalIndex = new Map<number, GPUUsageData>();
+          for (const engine of engineTotals.values()) {
+            const previous = usageByPhysicalIndex.get(engine.physicalIndex)?.utilizationGpu ?? 0;
+            usageByPhysicalIndex.set(engine.physicalIndex, {
+              utilizationGpu: Math.max(previous, Math.min(100, Math.round(engine.utilization))),
             });
           }
           resolve(usageByPhysicalIndex);
@@ -352,7 +384,7 @@ export class GPUMonitor {
       setTimeout(() => finish(() => {
         powershell.kill();
         reject(new Error('Timed out reading Windows GPU Engine counters'));
-      }), 1500);
+      }), 5000);
     });
   }
 
