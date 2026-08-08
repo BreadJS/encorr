@@ -318,6 +318,7 @@ export class WebSocketClient extends EventEmitter {
     activeJobs: Array<{ job_id: string; progress: number }>,
     cpuPercent?: number,
     ramPercent?: number,
+    corePercent?: number[],
     gpuData?: Array<{
       utilizationGpu?: number;
       utilizationMemory?: number;
@@ -350,13 +351,16 @@ export class WebSocketClient extends EventEmitter {
     this.logger.debug(`[HEARTBEAT] Sending: status=${status}, active_jobs=${JSON.stringify(activeJobs)}, cpu=${cpuPercent}%, ram=${ramPercent}%`);
 
     // Add system_load if provided
-    if (cpuPercent !== undefined || ramPercent !== undefined) {
+    if (cpuPercent !== undefined || ramPercent !== undefined || corePercent !== undefined) {
       payload.system_load = {};
       if (cpuPercent !== undefined) {
         payload.system_load.cpu_percent = cpuPercent;
       }
       if (ramPercent !== undefined) {
         payload.system_load.memory_percent = ramPercent;
+      }
+      if (corePercent !== undefined) {
+        payload.system_load.core_percent = corePercent;
       }
     }
 

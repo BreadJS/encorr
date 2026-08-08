@@ -40,7 +40,17 @@ function percent(value: unknown) {
 }
 
 function formatDriveRate(value: unknown) {
-  return (numberValue(value) / 1024 / 1024).toFixed(1);
+  const bytesPerSecond = Math.max(0, numberValue(value));
+  if (bytesPerSecond >= 1024 * 1024) return `${(bytesPerSecond / 1024 / 1024).toFixed(1)} MB/s`;
+  if (bytesPerSecond >= 1024) return `${(bytesPerSecond / 1024).toFixed(1)} KB/s`;
+  return `${Math.round(bytesPerSecond)} B/s`;
+}
+
+function coreUsageColor(value: unknown) {
+  const usage = percent(value);
+  if (usage >= 90) return '#ef4444';
+  if (usage >= 70) return '#f59e0b';
+  return '#74c69d';
 }
 
 function cleanGpuName(name?: string) {
@@ -297,6 +307,23 @@ function NodeCard({
               <div className="mb-2 flex items-center justify-between gap-4 text-xs"><span className="flex min-w-0 items-center gap-2 text-gray-300"><Cpu className="h-3.5 w-3.5 shrink-0 text-gray-500" /><span className="truncate">{node.system_info?.cpu || 'Unknown CPU'}</span></span><span className="shrink-0 font-semibold tabular-nums text-gray-200">{online ? `${Math.round(percent(node.cpu_usage))}%` : '—'}</span></div>
               <UsageBar value={online ? node.cpu_usage : 0} />
               <p className="mt-2 text-xs text-gray-400">{node.system_info?.cpu_cores || '—'} logical cores</p>
+              {Array.isArray(node.cpu_core_usage) && node.cpu_core_usage.length > 0 && (
+                <div className="mt-4 border-t border-white/[0.06] pt-3">
+                  <div className="mb-2 flex items-center justify-between text-[10px] uppercase tracking-[0.12em] text-gray-500"><span>Per-core usage</span><span>{node.cpu_core_usage.length} logical cores</span></div>
+                  <div className="grid grid-cols-4 gap-1.5 sm:grid-cols-6 xl:grid-cols-4 2xl:grid-cols-6">
+                    {node.cpu_core_usage.map((core: number, index: number) => {
+                      const usage = percent(core);
+                      const color = coreUsageColor(usage);
+                      return (
+                        <div key={index} className="node-core-tile rounded-md px-1.5 py-1.5" title={`Logical core ${index + 1}: ${Math.round(usage)}%`}>
+                          <div className="flex items-center justify-between gap-1 text-[9px] leading-none"><span className="text-gray-500">C{index + 1}</span><span className="font-semibold tabular-nums" style={{ color }}>{Math.round(usage)}%</span></div>
+                          <div className="node-track mt-1.5 h-1 overflow-hidden rounded-full"><div className="h-full rounded-full transition-[width] duration-500" style={{ width: `${usage}%`, backgroundColor: color }} /></div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
             <div>
               <div className="mb-2 flex items-center justify-between text-xs"><span className="flex items-center gap-2 text-gray-300"><Database className="h-3.5 w-3.5 text-gray-500" /> Memory</span><span className="font-semibold tabular-nums text-gray-200">{online ? `${Math.round(percent(node.ram_usage))}%` : '—'}</span></div>
@@ -310,7 +337,7 @@ function NodeCard({
           <div className="mb-4 flex items-center justify-between gap-3"><h3 className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-400">Drive usage</h3><span className="text-xs text-gray-500">{driveEntries.length} detected</span></div>
           {driveEntries.length > 0 ? <div className="space-y-4">{driveEntries.map(({ drive, reasons }, index: number) => {
             const size = numberValue(drive.size); const used = numberValue(drive.used); const available = numberValue(drive.available, Math.max(0, size - used)); const usage = size > 0 ? (used / size) * 100 : numberValue(drive.use); const hasRate = drive.read_bytes_per_sec != null && drive.write_bytes_per_sec != null;
-            return <div key={`${drive.filesystem}-${drive.mount}-${index}`}><div className="flex items-start justify-between gap-3 text-xs"><div className="flex min-w-0 items-start gap-2 text-gray-300"><HardDrive className="mt-0.5 h-3.5 w-3.5 shrink-0 text-gray-500" /><div className="min-w-0"><div className="flex flex-wrap items-center gap-1.5"><span className="truncate font-semibold">{drive.mount || drive.filesystem || 'Drive'}</span>{reasons.map(reason => <span key={reason} className="rounded border border-white/[0.08] bg-white/[0.04] px-1.5 py-px text-[9px] text-gray-400">{reason}</span>)}</div><p className="mt-1 truncate text-[11px] text-gray-500">{[drive.filesystem, drive.type].filter(Boolean).join(' · ')}</p></div></div><div className="shrink-0 text-right tabular-nums"><p className="text-gray-300">{formatBytes(used)} / {formatBytes(size)}</p><p className="mt-1 text-[11px] text-gray-500">{formatBytes(available)} free</p></div></div><div className="mt-2"><UsageBar value={usage} color={usage >= 90 ? '#ef4444' : usage >= 75 ? '#f59e0b' : '#74c69d'} /></div><div className="mt-2 flex items-center gap-2 text-[10px]"><span className="text-gray-500">I/O</span><div className="min-w-0 flex-1"><ThroughputBar read={drive.read_bytes_per_sec} write={drive.write_bytes_per_sec} /></div><span className="shrink-0 tabular-nums text-gray-400">{hasRate ? `R:${formatDriveRate(drive.read_bytes_per_sec)} · W:${formatDriveRate(drive.write_bytes_per_sec)} MB/s` : 'Unavailable'}</span></div></div>;
+            return <div key={`${drive.filesystem}-${drive.mount}-${index}`}><div className="flex items-start justify-between gap-3 text-xs"><div className="flex min-w-0 items-start gap-2 text-gray-300"><HardDrive className="mt-0.5 h-3.5 w-3.5 shrink-0 text-gray-500" /><div className="min-w-0"><div className="flex flex-wrap items-center gap-1.5"><span className="truncate font-semibold">{drive.mount || drive.filesystem || 'Drive'}</span>{reasons.map(reason => <span key={reason} className="rounded border border-white/[0.08] bg-white/[0.04] px-1.5 py-px text-[9px] text-gray-400">{reason}</span>)}</div><p className="mt-1 truncate text-[11px] text-gray-500">{[drive.filesystem, drive.type].filter(Boolean).join(' · ')}</p></div></div><div className="shrink-0 text-right tabular-nums"><p className="text-gray-300">{formatBytes(used)} / {formatBytes(size)}</p><p className="mt-1 text-[11px] text-gray-500">{formatBytes(available)} free</p></div></div><div className="mt-2"><UsageBar value={usage} color={usage >= 90 ? '#ef4444' : usage >= 75 ? '#f59e0b' : '#74c69d'} /></div><div className="mt-2 flex items-center gap-2 text-[10px]"><span className="text-gray-500">I/O</span><div className="min-w-0 flex-1"><ThroughputBar read={drive.read_bytes_per_sec} write={drive.write_bytes_per_sec} /></div><span className="shrink-0 tabular-nums text-gray-400">{hasRate ? `R: ${formatDriveRate(drive.read_bytes_per_sec)} · W: ${formatDriveRate(drive.write_bytes_per_sec)}` : 'Unavailable'}</span></div></div>;
           })}</div> : <div className="flex min-h-28 items-center gap-2 text-xs text-gray-500"><HardDrive className="h-3.5 w-3.5" />{reportedDrives.length === 0 ? 'Drive information unavailable until this node reconnects' : 'No reported drive matches this node’s mapped or working paths'}</div>}
         </section>
 

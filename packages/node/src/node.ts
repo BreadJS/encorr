@@ -88,6 +88,7 @@ export class EncorrNode {
   private driveMonitor: DriveMonitor;
   private activeJobs: Map<string, ActiveJob> = new Map();
   private cpuMeasureStart: { idle: number; total: number } | null = null;
+  private cpuCoreMeasureStart: Array<{ idle: number; total: number }> | null = null;
   private systemInfo!: SystemInfo; // Assigned in start()
   private driveInfoUpdatedAt = 0;
   private driveUsageWarningAt = 0;
@@ -863,6 +864,13 @@ export class EncorrNode {
       });
 
       const currentMeasure = { idle: totalIdle, total: totalTick };
+      const currentCoreMeasure = cpus.map(core => {
+        const times = core.times;
+        return {
+          idle: times.idle,
+          total: times.user + times.nice + times.sys + times.idle + times.irq,
+        };
+      });
 
       let cpuPercent = 0;
       if (this.cpuMeasureStart) {
@@ -876,6 +884,14 @@ export class EncorrNode {
       }
 
       this.cpuMeasureStart = currentMeasure; // Update for next iteration
+      const corePercent = currentCoreMeasure.map((core, index) => {
+        const previous = this.cpuCoreMeasureStart?.[index];
+        if (!previous) return 0;
+        const totalDiff = core.total - previous.total;
+        if (totalDiff <= 0) return 0;
+        return Math.max(0, Math.min(100, 100 - Math.round((100 * (core.idle - previous.idle)) / totalDiff)));
+      });
+      this.cpuCoreMeasureStart = currentCoreMeasure;
 
       // Get current memory usage (using systeminformation - reasonably fast)
       const mem = await si.mem();
@@ -953,6 +969,7 @@ export class EncorrNode {
         this.getActiveJobSnapshots(),
         cpuPercent,
         ramPercent,
+        corePercent,
         gpuData,
         driveData
       );

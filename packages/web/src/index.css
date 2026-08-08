@@ -26,6 +26,11 @@
   background: #302e31;
 }
 
+.nodes-page .node-core-tile {
+  background: #232225;
+  border: 1px solid #302e31;
+}
+
 .nodes-page .node-icon-tile {
   background: #282729;
   border-color: #39363a;

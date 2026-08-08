@@ -296,14 +296,12 @@ export function Files() {
         post_action: postAction,
       });
     },
-    onSuccess: (result) => {
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['files'] });
       queryClient.invalidateQueries({ queryKey: ['jobs'] });
       queryClient.invalidateQueries({ queryKey: ['libraries'] });
       setSelectedFiles(new Set());
       setShowSmartTranscodeDialog(false);
-      // Optionally show a success message with the summary
-      console.log('Smart transcode completed:', result.summary);
     },
   });
 
@@ -326,10 +324,6 @@ export function Files() {
       queryClient.invalidateQueries({ queryKey: ['libraries'] });
       queryClient.invalidateQueries({ queryKey: ['jobs'] });
     },
-    onError: (error: Error) => {
-      console.error('Failed to replace original file:', error);
-      // Could add a toast notification here
-    },
   });
 
   // Backup and replace mutation
@@ -351,9 +345,6 @@ export function Files() {
       queryClient.invalidateQueries({ queryKey: ['libraries'] });
       queryClient.invalidateQueries({ queryKey: ['jobs'] });
     },
-    onError: (error: Error) => {
-      console.error('Failed to backup and replace file:', error);
-    },
   });
 
   // Cleanup backup mutation
@@ -373,9 +364,6 @@ export function Files() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['files'] });
       queryClient.invalidateQueries({ queryKey: ['libraries'] });
-    },
-    onError: (error: Error) => {
-      console.error('Failed to cleanup backup file:', error);
     },
   });
 

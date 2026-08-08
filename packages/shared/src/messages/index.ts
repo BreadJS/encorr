@@ -162,6 +162,7 @@ export const HeartbeatPayloadSchema = z.object({
   })).default([]),
   system_load: z.object({
     cpu_percent: z.number().min(0).max(100),
+    core_percent: z.array(z.number().min(0).max(100)).optional(),
     memory_percent: z.number().min(0).max(100),
   }).optional(),
   gpus: z.array(z.object({

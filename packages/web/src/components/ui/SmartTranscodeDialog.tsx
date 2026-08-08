@@ -416,8 +416,7 @@ export function SmartTranscodeDialog({
         postAction,
       );
       onOpenChange(false);
-    } catch (error) {
-      console.error('Failed to start transcoding:', error);
+    } catch {
     } finally {
       setIsSubmitting(false);
     }

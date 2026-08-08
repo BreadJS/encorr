@@ -12,6 +12,7 @@ export interface Node {
   system_info: SystemInfo;
   capabilities?: NodeCapabilities;
   cpu_usage?: number;
+  cpu_core_usage?: number[];
   ram_usage?: number;
   gpu_usage?: number[];
   active_jobs?: ActiveJobInfo[];

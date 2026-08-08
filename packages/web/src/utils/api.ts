@@ -25,9 +25,8 @@ async function loadConfig(): Promise<void> {
         return;
       }
     }
-  } catch (error) {
+  } catch {
     // Fallback to defaults
-    console.warn('Failed to fetch config, using defaults');
   }
   // Fallback values
   BACKEND_URL = getBackendUrl();

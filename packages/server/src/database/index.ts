@@ -199,6 +199,12 @@ export class EncorrDatabase {
       this.db.exec('ALTER TABLE jobs ADD COLUMN allow_cpu BOOLEAN NOT NULL DEFAULT 1');
     }
 
+    const nodeColumns = this.db.pragma('table_info(nodes)') as { name: string }[];
+    if (!nodeColumns.some((col) => col.name === 'cpu_core_usage')) {
+      this.logger.info('[MIGRATION] Adding cpu_core_usage column to nodes table');
+      this.db.exec('ALTER TABLE nodes ADD COLUMN cpu_core_usage TEXT');
+    }
+
     // Create job_reports table if it doesn't exist
     const tables = this.db.pragma('table_info(job_reports)') as any[];
     if (tables.length === 0) {
@@ -632,6 +638,7 @@ export class EncorrDatabase {
 
   updateNodeUsage(id: string, usage: {
     cpu_usage?: number;
+    cpu_core_usage?: number[];
     ram_usage?: number;
     gpu_usage?: number[];
     active_jobs?: any[];
@@ -642,6 +649,10 @@ export class EncorrDatabase {
     if (usage.cpu_usage !== undefined) {
       updates.push('cpu_usage = ?');
       values.push(usage.cpu_usage);
+    }
+    if (usage.cpu_core_usage !== undefined) {
+      updates.push('cpu_core_usage = ?');
+      values.push(JSON.stringify(usage.cpu_core_usage));
     }
     if (usage.ram_usage !== undefined) {
       updates.push('ram_usage = ?');
@@ -703,6 +714,7 @@ export class EncorrDatabase {
       system_info: JSON.parse(row.system_info),
       capabilities: row.capabilities ? JSON.parse(row.capabilities) : undefined,
       cpu_usage: row.cpu_usage || 0,
+      cpu_core_usage: row.cpu_core_usage ? JSON.parse(row.cpu_core_usage) : undefined,
       ram_usage: row.ram_usage || 0,
       gpu_usage: row.gpu_usage ? JSON.parse(row.gpu_usage) : undefined,
       active_jobs: row.active_jobs ? JSON.parse(row.active_jobs) : undefined,
