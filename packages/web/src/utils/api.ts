@@ -164,6 +164,7 @@ export const api = {
         ready: number;
         processing: number;
         transcoded: number;
+        dismissed: number;
         completed: number;
         failed: number;
         cancelled: number;
@@ -404,6 +405,10 @@ export const api = {
     }),
   backupAndReplaceFile: (fileId: string) =>
     request<any>(`/library-files/${fileId}/backup-replace`, {
+      method: 'POST',
+    }),
+  dismissTranscodeOutput: (fileId: string) =>
+    request<any>(`/library-files/${fileId}/dismiss-transcode`, {
       method: 'POST',
     }),
   cleanupOriginalFile: (fileId: string) =>

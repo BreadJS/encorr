@@ -222,6 +222,7 @@ export class EncorrDatabase {
           output_size INTEGER,
           output_path TEXT,
           output_available BOOLEAN NOT NULL DEFAULT 1,
+          dismissed_at INTEGER,
           original_codec TEXT,
           output_codec TEXT,
           original_resolution TEXT,
@@ -269,6 +270,10 @@ export class EncorrDatabase {
             AND LOWER(COALESCE(error_message, '')) LIKE 'source file not found:%'
         )
       `);
+    }
+    if (!reportColumns.some(column => column.name === 'dismissed_at')) {
+      this.logger.info('[MIGRATION] Adding dismissed_at column to job_reports table');
+      this.db.exec('ALTER TABLE job_reports ADD COLUMN dismissed_at INTEGER');
     }
     // Legacy reports created before output_path was persisted cannot prove an
     // installable output exists. Guessed filenames caused ghost Transcoded
@@ -2556,6 +2561,25 @@ export class EncorrDatabase {
       )
       WHERE report_rank = 1
     `).all();
+  }
+
+  dismissLatestTranscodeOutput(libraryFileId: string): boolean {
+    const result = this.db.prepare(`
+      UPDATE job_reports
+      SET dismissed_at = ?
+      WHERE id = (
+        SELECT id FROM job_reports
+        WHERE (library_file_id = ? OR file_id = ?)
+          AND job_type = 'transcode'
+          AND status = 'completed'
+          AND output_available <> 0
+          AND output_path IS NOT NULL
+          AND TRIM(output_path) <> ''
+        ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC
+        LIMIT 1
+      )
+    `).run(Math.floor(Date.now() / 1000), libraryFileId, libraryFileId);
+    return result.changes > 0;
   }
 
   getTranscodeEstimateHistory(limit = 1000): Array<{

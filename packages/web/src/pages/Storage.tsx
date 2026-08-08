@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   Archive,
   ArrowDownRight,
+  Ban,
   CheckCircle2,
   Copy,
   Database,
@@ -224,6 +225,33 @@ export function Storage() {
       void queryClient.invalidateQueries({ queryKey: ['files'] });
     },
   });
+  const dismissOutputsMutation = useMutation({
+    mutationFn: async (items: typeof pendingOutputs) => {
+      const succeeded: string[] = [];
+      const failures: string[] = [];
+      for (const item of items) {
+        try {
+          await api.dismissTranscodeOutput(item.library_file_id);
+          succeeded.push(item.id);
+        } catch (error) {
+          failures.push(`${item.filename}: ${error instanceof Error ? error.message : 'Could not dismiss output'}`);
+        }
+      }
+      return { succeeded, failures };
+    },
+    onSuccess: ({ succeeded, failures }) => {
+      setSelectedOutputs(previous => {
+        const next = new Set(previous);
+        succeeded.forEach(id => next.delete(id));
+        return next;
+      });
+      setInstallNotice(failures.length > 0
+        ? { type: 'error', message: `${succeeded.length.toLocaleString()} dismissed, ${failures.length.toLocaleString()} failed. ${failures[0]}` }
+        : { type: 'success', message: `${succeeded.length.toLocaleString()} transcoded output${succeeded.length === 1 ? '' : 's'} dismissed and retained in Files.` });
+      void queryClient.invalidateQueries({ queryKey: ['storage-reclaims'] });
+      void queryClient.invalidateQueries({ queryKey: ['files'] });
+    },
+  });
   const originalSize = safeNumber(summary?.original_size);
   const replacementSize = safeNumber(summary?.replacement_size);
   const reclaimed = safeNumber(summary?.saved_space);
@@ -303,6 +331,13 @@ export function Storage() {
           {selectedOutputRecords.length > 0 && (
             <div className="flex flex-wrap gap-2">
               <Button
+                onClick={() => dismissOutputsMutation.mutate(selectedOutputRecords)}
+                disabled={dismissOutputsMutation.isPending}
+                className="border border-[#4a474c] bg-white/[0.03] text-gray-300 hover:bg-white/[0.07]"
+              >
+                <Ban className="mr-2 h-4 w-4" />{dismissOutputsMutation.isPending ? 'Dismissing…' : `Dismiss (${selectedOutputRecords.length.toLocaleString()})`}
+              </Button>
+              <Button
                 onClick={() => { setInstallConfirmed(false); setInstallAction('backup_replace'); }}
                 className="border border-amber-500/30 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20"
               >
@@ -353,7 +388,20 @@ export function Storage() {
               </thead>
               <tbody className="divide-y divide-[#39363a]/70">
                 {pendingOutputs.map(output => (
-                  <tr key={output.id}>
+                  <tr
+                    key={output.id}
+                    onClick={event => {
+                      const target = event.target as HTMLElement;
+                      if (target.closest('input, button, a')) return;
+                      setSelectedOutputs(previous => {
+                        const next = new Set(previous);
+                        if (next.has(output.id)) next.delete(output.id);
+                        else next.add(output.id);
+                        return next;
+                      });
+                    }}
+                    className={`cursor-pointer transition-colors ${selectedOutputs.has(output.id) ? 'bg-white/[0.05]' : 'hover:bg-white/[0.025]'}`}
+                  >
                     <td className="px-4 py-4 text-center">
                       <input
                         type="checkbox"
@@ -451,7 +499,21 @@ export function Storage() {
                   const retainedImpact = record.status === 'backup_retained' ? safeNumber(record.replacement_size) : 0;
                   const rowReduction = percentage(Math.max(0, difference), safeNumber(record.original_size));
                   return (
-                    <tr key={record.id}>
+                    <tr
+                      key={record.id}
+                      onClick={event => {
+                        if (record.status !== 'backup_retained' || cleanupActive) return;
+                        const target = event.target as HTMLElement;
+                        if (target.closest('input, button, a')) return;
+                        setSelectedBackups(previous => {
+                          const next = new Set(previous);
+                          if (next.has(record.id)) next.delete(record.id);
+                          else next.add(record.id);
+                          return next;
+                        });
+                      }}
+                      className={`${record.status === 'backup_retained' && !cleanupActive ? 'cursor-pointer' : ''} transition-colors ${selectedBackups.has(record.id) ? 'bg-white/[0.05]' : record.status === 'backup_retained' && !cleanupActive ? 'hover:bg-white/[0.025]' : ''}`}
+                    >
                       <td className="px-4 py-4 text-center">
                         {record.status === 'backup_retained' && !cleanupActive && (
                           <input

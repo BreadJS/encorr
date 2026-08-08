@@ -64,6 +64,20 @@ interface WebClientConnection {
   lastHeartbeat: number;
 }
 
+interface RejectedNodeRegistration {
+  id: string;
+  name: string;
+  status: 'error';
+  connected: false;
+  rejected: true;
+  rejection_reason: string;
+  rejected_at: number;
+  last_heartbeat: number;
+  system_info: RegisterPayload['system_info'];
+  active_jobs: [];
+  max_workers: { cpu: number; gpus: number[] };
+}
+
 // ============================================================================
 // WebSocket Server Options
 // ============================================================================
@@ -97,6 +111,7 @@ export class EncorrWebSocketServer {
   private connections: Map<WebSocket, NodeConnection> = new Map();
   private connectionsByNodeId: Map<string, NodeConnection> = new Map();
   private webClients: Map<WebSocket, WebClientConnection> = new Map();
+  private rejectedNodeRegistrations: Map<string, RejectedNodeRegistration> = new Map();
   private activeLibraryScans: Map<string, WebLibraryScanUpdatePayload> = new Map();
   private db: EncorrDatabase;
   private logger: Logger;
@@ -399,11 +414,47 @@ export class EncorrWebSocketServer {
     this.logger.info(`Node registration: ${payload.name}`);
 
     try {
-      // Normalize the GPUs accepted as encoding workers.
-      const filteredSystemInfo = this.filterIntegratedGPUs(payload.system_info);
+      const normalizedName = payload.name.trim().toLocaleLowerCase();
+      // Compare names case-insensitively: names are human labels, not IDs.
+      let node = this.db.getAllNodes().find(n => n.name.trim().toLocaleLowerCase() === normalizedName);
 
-      // Check if node already exists
-      let node = this.db.getAllNodes().find(n => n.name === payload.name);
+      // A name identifies one live worker. Re-registering the same database
+      // node after a reconnect is fine, but a second simultaneous socket must
+      // never replace the active socket or inherit its worker reservations.
+      const activeConnection = node ? this.connectionsByNodeId.get(node.id) : undefined;
+      if (activeConnection && activeConnection.ws !== ws && activeConnection.ws.readyState === WebSocket.OPEN) {
+        const reason = `Another connected node already uses the name "${payload.name}". Rename this node and reconnect.`;
+        const existingRejection = this.rejectedNodeRegistrations.get(normalizedName);
+        const rejectedAt = Math.floor(Date.now() / 1000);
+        this.rejectedNodeRegistrations.set(normalizedName, {
+          id: existingRejection?.id || `rejected:${uuidv4()}`,
+          name: payload.name,
+          status: 'error',
+          connected: false,
+          rejected: true,
+          rejection_reason: reason,
+          rejected_at: rejectedAt,
+          last_heartbeat: rejectedAt,
+          system_info: payload.system_info,
+          active_jobs: [],
+          max_workers: { cpu: 0, gpus: [] },
+        });
+
+        const connection = this.connections.get(ws);
+        if (connection) connection.nodeName = payload.name;
+        this.logger.warn(`[NODE_REJECTED] ${reason}`);
+        this.sendMessage(ws, createErrorMessage('DUPLICATE_NODE_NAME', reason, {
+          existing_node_id: node.id,
+          existing_node_name: node.name,
+        }));
+        this.broadcastNodesUpdate();
+        ws.close(1008, 'Duplicate node name');
+        return;
+      }
+
+      // Normalize the GPUs accepted as encoding workers only after the
+      // duplicate-name check has accepted this connection.
+      const filteredSystemInfo = this.filterIntegratedGPUs(payload.system_info);
 
       if (node) {
         // Update existing node
@@ -483,6 +534,7 @@ export class EncorrWebSocketServer {
 
       // Update mapping
       this.connectionsByNodeId.set(node.id, connection);
+      this.rejectedNodeRegistrations.delete(normalizedName);
 
       // Send ACK
       this.sendMessage(ws, createAckMessage(message.id!, true, node.id));
@@ -532,6 +584,11 @@ export class EncorrWebSocketServer {
     // Get current node info for static GPU info and to preserve existing active_jobs data
     const node = this.db.getAllNodes().find(n => n.id === connection.nodeId);
     const existingActiveJobs = node?.active_jobs || [];
+
+    if (node && payload.drives) {
+      node.system_info = { ...node.system_info, drives: payload.drives };
+      this.db.updateNodeSystemInfo(connection.nodeId, node.system_info);
+    }
 
     // Build active jobs info - preserve existing rich data (fps, eta, etc.) from DB
     const uniqueHeartbeatJobs = Array.from(new Map(
@@ -1238,7 +1295,7 @@ export class EncorrWebSocketServer {
   }
 
   private sendNodesUpdate(ws: WebSocket): void {
-    const nodes = this.db.getAllNodes();
+    const nodes = this.getNodesForClients();
     const message = createMessage(MessageType.WEB_NODES_UPDATE, { nodes });
     this.sendMessage(ws, message);
   }
@@ -1365,6 +1422,27 @@ export class EncorrWebSocketServer {
   }
 
   public broadcastNodesUpdate(): void {
+    const nodesWithStatus = this.getNodesForClients();
+
+    // Log what we're about to broadcast (first node with active jobs as sample)
+    const sampleNode = nodesWithStatus.find(n => n.active_jobs && n.active_jobs.length > 0);
+    if (sampleNode) {
+      this.logger.debug(`[WEB_NODES_UPDATE] Broadcasting node ${sampleNode.name} with ${sampleNode.active_jobs?.length} active jobs`);
+      sampleNode.active_jobs?.forEach(job => {
+        this.logger.debug(`[WEB_NODES_UPDATE]   job ${job.id}: progress=${job.progress}%, action=${job.current_action}, fps=${job.fps}, eta=${job.eta}, ratio=${job.ratio}, gpu=${job.gpu}`);
+      });
+    }
+
+    const message = createMessage(MessageType.WEB_NODES_UPDATE, { nodes: nodesWithStatus });
+
+    for (const [ws, client] of this.webClients) {
+      if (client.subscriptions.has('nodes') && ws.readyState === WebSocket.OPEN) {
+        this.sendMessage(ws, message);
+      }
+    }
+  }
+
+  public getNodesForClients(): any[] {
     const nodes = this.db.getAllNodes();
     const connectedNodeIds = this.getConnectedNodeIds();
 
@@ -1385,22 +1463,7 @@ export class EncorrWebSocketServer {
       };
     });
 
-    // Log what we're about to broadcast (first node with active jobs as sample)
-    const sampleNode = nodesWithStatus.find(n => n.active_jobs && n.active_jobs.length > 0);
-    if (sampleNode) {
-      this.logger.debug(`[WEB_NODES_UPDATE] Broadcasting node ${sampleNode.name} with ${sampleNode.active_jobs?.length} active jobs`);
-      sampleNode.active_jobs?.forEach(job => {
-        this.logger.debug(`[WEB_NODES_UPDATE]   job ${job.id}: progress=${job.progress}%, action=${job.current_action}, fps=${job.fps}, eta=${job.eta}, ratio=${job.ratio}, gpu=${job.gpu}`);
-      });
-    }
-
-    const message = createMessage(MessageType.WEB_NODES_UPDATE, { nodes: nodesWithStatus });
-
-    for (const [ws, client] of this.webClients) {
-      if (client.subscriptions.has('nodes') && ws.readyState === WebSocket.OPEN) {
-        this.sendMessage(ws, message);
-      }
-    }
+    return [...nodesWithStatus, ...this.rejectedNodeRegistrations.values()];
   }
 
   public broadcastJobsUpdate(): void {

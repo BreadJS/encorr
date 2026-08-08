@@ -204,7 +204,7 @@ export function Files() {
       else if (!file.display_status && latestReport) {
         const outputAvailable = file.transcode_output_available !== false && latestReport.output_available !== 0;
         displayStatus = latestReport.status === 'completed'
-          ? (outputAvailable ? 'transcoded' : 'failed')
+          ? (outputAvailable ? (latestReport.dismissed_at ? 'dismissed' : 'transcoded') : 'failed')
           : latestReport.status;
         displayProgress = latestReport.status === 'completed' && outputAvailable ? 100 : 0;
       }
@@ -241,6 +241,7 @@ export function Files() {
       ready: 0,
       processing: 0,
       transcoded: 0,
+      dismissed: 0,
       completed: 0,
       failed: 0,
       cancelled: 0,
@@ -250,6 +251,7 @@ export function Files() {
       else if (file.displayStatus === 'ready') counts.ready++;
       else if (file.displayStatus === 'processing') counts.processing++;
       else if (file.displayStatus === 'transcoded') counts.transcoded++;
+      else if (file.displayStatus === 'dismissed') counts.dismissed++;
       else if (file.displayStatus === 'completed') counts.completed++;
       else if (file.displayStatus === 'failed') counts.failed++;
       else if (file.displayStatus === 'cancelled') counts.cancelled++;
@@ -374,6 +376,34 @@ export function Files() {
     },
     onError: (error: Error) => {
       console.error('Failed to cleanup backup file:', error);
+    },
+  });
+
+  const dismissTranscodeMutation = useMutation({
+    mutationFn: async (fileIds: string[]) => {
+      const succeeded: string[] = [];
+      const failures: string[] = [];
+      for (const fileId of fileIds) {
+        try {
+          await api.dismissTranscodeOutput(fileId);
+          succeeded.push(fileId);
+        } catch (error) {
+          failures.push(error instanceof Error ? error.message : 'Could not dismiss transcoded output');
+        }
+      }
+      return { succeeded, failures };
+    },
+    onSuccess: ({ succeeded, failures }) => {
+      setSelectedFiles(previous => {
+        const next = new Set(previous);
+        succeeded.forEach(id => next.delete(id));
+        return next;
+      });
+      setReplacementNotice(failures.length > 0
+        ? { type: 'error', message: `${succeeded.length.toLocaleString()} dismissed, ${failures.length.toLocaleString()} failed. ${failures[0]}` }
+        : { type: 'success', message: `${succeeded.length.toLocaleString()} transcoded output${succeeded.length === 1 ? '' : 's'} dismissed.` });
+      void queryClient.invalidateQueries({ queryKey: ['files'] });
+      void queryClient.invalidateQueries({ queryKey: ['storage-reclaims'] });
     },
   });
 
@@ -581,6 +611,15 @@ export function Files() {
       );
     }
 
+    if (status === 'dismissed') {
+      return (
+        <div className="flex items-center gap-2" title="Transcoded output retained but dismissed from storage actions">
+          <Ban className="h-3.5 w-3.5 flex-shrink-0 text-gray-400" />
+          <span className="text-gray-400 text-xs">Dismissed</span>
+        </div>
+      );
+    }
+
     if (status === 'failed') {
       const completedOutputMissing = file.job?.status === 'completed'
         && file.transcode_output_available === false;
@@ -653,8 +692,9 @@ export function Files() {
             const transcodedSelectedCount = Array.from(selectedFiles).filter(id =>
               filesWithJobStatus.find((f: any) => f.id === id && f.displayStatus === 'transcoded')
             ).length;
+            const onlyTranscodedSelected = selectedFiles.size > 0 && transcodedSelectedCount === selectedFiles.size;
 
-            return transcodedSelectedCount > 0 ? (
+            return onlyTranscodedSelected ? (
               <>
                 <div className="h-6 w-px bg-gray-500 mx-2 hidden sm:block" />
                 <Button
@@ -692,6 +732,17 @@ export function Files() {
                     {replacementProgress ? ` (${replacementProgress.current}/${replacementProgress.total})` : 'Backup & Replace'}
                   </span>
                   <span className="sm:hidden">Backup</span> ({transcodedSelectedCount})
+                </Button>
+                <Button
+                  onClick={() => dismissTranscodeMutation.mutate(Array.from(selectedFiles))}
+                  disabled={dismissTranscodeMutation.isPending || pendingFileReplacements.size > 0}
+                  style={{ borderColor: '#39363a', color: '#d1d5db' }}
+                  className="border flex items-center gap-2 animate-in slide-in-from-left-2 fade-in duration-300 text-sm"
+                  title="Keep the output and its statistics, but dismiss it from actionable transcodes"
+                >
+                  <Ban className="h-4 w-4" />
+                  <span className="hidden sm:inline">{dismissTranscodeMutation.isPending ? 'Dismissing…' : 'Dismiss Transcode'}</span>
+                  <span className="sm:hidden">Dismiss</span> ({transcodedSelectedCount})
                 </Button>
                 <div className="h-6 w-px bg-gray-500 mx-2 hidden sm:block" />
               </>
@@ -842,6 +893,16 @@ export function Files() {
             Completed ({statusCounts.completed})
           </button>
           <button
+            onClick={() => { setSelectedStatus('dismissed'); setCurrentPage(1); }}
+            className={`px-3 sm:px-4 py-2 rounded-t-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
+              selectedStatus === 'dismissed'
+                ? 'bg-[#252326] text-white'
+                : 'text-gray-400 hover:text-white hover:bg-[#252326]/50'
+            }`}
+          >
+            Dismissed ({statusCounts.dismissed})
+          </button>
+          <button
             onClick={() => { setSelectedStatus('failed'); setCurrentPage(1); }}
             className={`px-3 sm:px-4 py-2 rounded-t-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
               selectedStatus === 'failed'
@@ -948,6 +1009,7 @@ export function Files() {
                     <option value="ready">Transcodeable</option>
                     <option value="processing">Processing</option>
                     <option value="transcoded">Transcoded</option>
+                    <option value="dismissed">Dismissed</option>
                     <option value="completed">Completed</option>
                     <option value="failed">Failed</option>
                     <option value="cancelled">Cancelled</option>
@@ -1100,7 +1162,7 @@ export function Files() {
                         {/* New Codec (from transcode report) */}
                         <div className="w-28 flex-shrink-0">
                           {(() => {
-                            if (file.displayStatus === 'transcoded' && file.job?.config) {
+                            if ((file.displayStatus === 'transcoded' || file.displayStatus === 'dismissed') && file.job?.config) {
                               let config: any = null;
                               try {
                                 config = typeof file.job.config === 'string' ? JSON.parse(file.job.config) : file.job.config;
@@ -1139,7 +1201,7 @@ export function Files() {
                             <div className="flex items-center justify-between gap-2 text-gray-500"><span>Original</span><span className="truncate text-gray-400">{formatBytes(file.oldSize)}</span></div>
                           )}
                           <div className="flex items-center justify-between gap-2 text-gray-500"><span>Current</span><span className="truncate text-gray-300">{formatBytes(file.filesize || file.file_size || file.size || 0)}</span></div>
-                          {(file.displayStatus === 'transcoded' && file.outputSize) && (
+                          {((file.displayStatus === 'transcoded' || file.displayStatus === 'dismissed') && file.outputSize) && (
                             <div className="flex items-center justify-between gap-2 text-gray-500">
                               <span>Output</span>
                               <span className={`truncate ${Number(file.outputSize) > Number(file.oldSize || file.filesize || file.file_size || file.size || 0) ? 'text-red-400' : 'text-green-400'}`}>
@@ -1223,6 +1285,20 @@ export function Files() {
                                       >
                                         <Copy className={`h-4 w-4 ${pendingFileReplacements.has(file.id) ? 'animate-spin' : ''}`} />
                                         {pendingFileReplacements.has(file.id) ? 'Backing up...' : 'Backup & Replace'}
+                                      </button>
+                                    )}
+                                    {file.displayStatus === 'transcoded' && (
+                                      <button
+                                        onClick={() => {
+                                          setOpenActionsFileId(null);
+                                          dismissTranscodeMutation.mutate([file.id]);
+                                        }}
+                                        disabled={dismissTranscodeMutation.isPending}
+                                        className="w-full text-left px-3 py-2 text-sm text-gray-400 hover:bg-white/5 rounded transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                                        title="Keep output sizes and statistics but dismiss this transcode"
+                                      >
+                                        <Ban className="h-4 w-4" />
+                                        {dismissTranscodeMutation.isPending ? 'Dismissing…' : 'Dismiss Transcode'}
                                       </button>
                                     )}
                                   </div>

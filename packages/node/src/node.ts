@@ -2,13 +2,14 @@ import { v4 as uuidv4 } from 'uuid';
 import * as os from 'os';
 import { existsSync, readdirSync, readFileSync } from 'fs';
 import { access } from 'fs/promises';
-import { join } from 'path';
-import type { NodeConfig, SystemInfo, GPUInfo } from '@encorr/shared';
+import { join, resolve } from 'path';
+import type { NodeConfig, SystemInfo, GPUInfo, DriveInfo } from '@encorr/shared';
 import { createMessage, MessageType } from '@encorr/shared';
 import { WebSocketClient } from './client/websocket';
 import { Transcoder } from './worker/transcoder';
 import { FileAnalyzer } from './worker/file-scanner';
 import { GPUMonitor } from './worker/gpu-monitor';
+import { DriveMonitor } from './worker/drive-monitor';
 import {
   getFFmpegVersion,
   getFFprobeVersion,
@@ -32,6 +33,20 @@ function formatDuration(seconds: number): string {
     return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   }
   return `${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+}
+
+function numberValue(value: unknown, fallback = 0): number {
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) ? numericValue : fallback;
+}
+
+function resolveConfiguredPath(value: string): string {
+  const expanded = value === '~'
+    ? os.homedir()
+    : /^~[\\/]/.test(value)
+      ? join(os.homedir(), value.slice(2))
+      : value;
+  return resolve(expanded);
 }
 
 // ============================================================================
@@ -70,9 +85,12 @@ export class EncorrNode {
   private transcoder: Transcoder;
   private fileAnalyzer: FileAnalyzer | null = null;
   private gpuMonitor: GPUMonitor;
+  private driveMonitor: DriveMonitor;
   private activeJobs: Map<string, ActiveJob> = new Map();
   private cpuMeasureStart: { idle: number; total: number } | null = null;
   private systemInfo!: SystemInfo; // Assigned in start()
+  private driveInfoUpdatedAt = 0;
+  private driveUsageWarningAt = 0;
   private nodeId?: string;
   private isRunning: boolean = false;
   private systemInfoUpdateInterval: NodeJS.Timeout | null = null;
@@ -94,6 +112,7 @@ export class EncorrNode {
 
     // Create GPU monitor
     this.gpuMonitor = new GPUMonitor();
+    this.driveMonitor = new DriveMonitor();
 
     // Set up event handlers
     this.setupEventHandlers();
@@ -761,10 +780,14 @@ export class EncorrNode {
     const si = require('systeminformation');
 
     // Get CPU, RAM, OS info
-    const [cpu, mem, osInfo] = await Promise.all([
+    const [cpu, mem, osInfo, filesystems] = await Promise.all([
       si.cpu(),
       si.mem(),
       si.osInfo(),
+      si.fsSize().catch((error: unknown) => {
+        this.logger.warn('[DRIVES] Initial drive discovery failed:', error);
+        return [];
+      }),
     ]);
 
     // Get GPUs
@@ -798,12 +821,17 @@ export class EncorrNode {
     this.logger.info(`[HW_DETECTION] Decoders: ${ffmpegDecoders.filter(d => d.type === 'gpu').map(d => `${d.decoder_name} (${d.gpu_type})`).join(', ') || 'none (CPU only)'}`);
     this.logger.info(`[HW_DETECTION] Hwaccels: ${ffmpegHwaccels.filter(h => h.available).map(h => h.name).join(', ') || 'none'}`);
 
+    this.driveInfoUpdatedAt = Date.now();
+
     return {
       os: osInfo.platform,
       os_version: osInfo.release,
       cpu: cpu.manufacturer + ' ' + cpu.brand || cpu.model || 'Unknown',
       cpu_cores: cpu.cores,
       ram_total: mem.total,
+      cache_path: resolveConfiguredPath(this.config.cache_dir),
+      temp_path: resolveConfiguredPath(this.config.temp_dir),
+      drives: this.normalizeDrives(filesystems),
       gpus: gpus.length > 0 ? gpus : undefined,
       ffmpeg_version: ffmpegVersion,
       ffmpeg_path: existsSync(ffmpegPath) ? ffmpegPath : '',
@@ -851,6 +879,33 @@ export class EncorrNode {
       // mem.available is the memory actually available for applications
       const actualUsed = mem.total - mem.available;
       const ramPercent = Math.round((actualUsed / mem.total) * 100);
+
+      // Drive capacity changes less frequently than CPU/RAM telemetry. Refresh
+      // it periodically so Nodes remains current without polling every second.
+      let driveData: DriveInfo[] | undefined;
+      if (Date.now() - this.driveInfoUpdatedAt >= 30_000) {
+        try {
+          driveData = this.normalizeDrives(await si.fsSize());
+          this.systemInfo.drives = driveData;
+          this.driveInfoUpdatedAt = Date.now();
+        } catch (error) {
+          this.logger.warn('[DRIVES] Failed to refresh drive usage:', error);
+        }
+      }
+
+      try {
+        const driveUsage = await this.driveMonitor.getDriveUsage(this.systemInfo.drives || []);
+        this.systemInfo.drives = (this.systemInfo.drives || []).map((drive, index) => {
+          const usage = driveUsage.get(index);
+          return usage ? { ...drive, ...usage } : drive;
+        });
+        driveData = this.systemInfo.drives;
+      } catch (error) {
+        if (Date.now() - this.driveUsageWarningAt >= 30_000) {
+          this.logger.warn('[DRIVES] Failed to read drive throughput:', error);
+          this.driveUsageWarningAt = Date.now();
+        }
+      }
 
       // Get GPU usage data using vendor-specific tools (nvidia-smi, AMD sysfs)
       // nvidia-smi is very fast (~50ms) so we call it every second, no caching needed
@@ -902,12 +957,46 @@ export class EncorrNode {
         })),
         cpuPercent,
         ramPercent,
-        gpuData
+        gpuData,
+        driveData
       );
     } catch (error: any) {
       this.logger.warn('Error in reportUsage:', error?.message || error?.toString());
       throw error;
     }
+  }
+
+  private normalizeDrives(filesystems: any[]): DriveInfo[] {
+    const virtualTypes = /^(?:tmpfs|devtmpfs|overlay|squashfs|proc|sysfs|cgroup2?|debugfs|tracefs|securityfs|pstore|efivarfs|configfs|fusectl|mqueue|hugetlbfs|ramfs|autofs|binfmt_misc)$/i;
+    const seen = new Set<string>();
+
+    return (filesystems || [])
+      .filter(filesystem => {
+        const mount = String(filesystem.mount || '').trim();
+        const device = String(filesystem.fs || '').trim();
+        const type = String(filesystem.type || '').trim();
+        if (!mount || numberValue(filesystem.size) <= 0 || virtualTypes.test(type)) return false;
+        if (/^\/dev\/loop\d+$/i.test(device)) return false;
+        const key = `${device.toLowerCase()}|${mount.toLowerCase()}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .map(filesystem => {
+        const size = Math.max(0, numberValue(filesystem.size));
+        const used = Math.max(0, numberValue(filesystem.used));
+        const available = Math.max(0, numberValue(filesystem.available, size - used));
+        return {
+          filesystem: String(filesystem.fs || filesystem.mount || 'Drive'),
+          mount: String(filesystem.mount),
+          type: filesystem.type ? String(filesystem.type) : undefined,
+          size,
+          used,
+          available,
+          use: size > 0 ? Math.max(0, Math.min(100, numberValue(filesystem.use, (used / size) * 100))) : 0,
+        };
+      })
+      .sort((left, right) => left.mount.localeCompare(right.mount));
   }
 
   private async detectGPUs(systemMemoryBytes = 0): Promise<GPUInfo[]> {

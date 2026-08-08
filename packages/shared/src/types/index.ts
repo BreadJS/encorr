@@ -46,6 +46,9 @@ export interface SystemInfo {
   cpu: string;
   cpu_cores: number;
   ram_total: number;
+  cache_path?: string;
+  temp_path?: string;
+  drives?: DriveInfo[];
   gpus?: GPUInfo[];
   ffmpeg_version?: string;
   ffmpeg_path?: string;
@@ -53,6 +56,20 @@ export interface SystemInfo {
   ffmpeg_encoders?: FFmpegEncoderInfo[];
   ffmpeg_decoders?: FFmpegDecoderInfo[];
   ffmpeg_hwaccels?: HwaccelInfo[];
+}
+
+export interface DriveInfo {
+  /** Device or volume name, for example /dev/nvme0n1p2 or C:. */
+  filesystem: string;
+  /** Mounted path, for example / or D:. */
+  mount: string;
+  type?: string;
+  size: number;
+  used: number;
+  available: number;
+  use: number;
+  read_bytes_per_sec?: number;
+  write_bytes_per_sec?: number;
 }
 
 // ============================================================================

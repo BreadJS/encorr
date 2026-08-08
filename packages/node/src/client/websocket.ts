@@ -328,6 +328,17 @@ export class WebSocketClient extends EventEmitter {
       powerLimit?: number;
       clockCore?: number;
       clockMemory?: number;
+    }>,
+    drives?: Array<{
+      filesystem: string;
+      mount: string;
+      type?: string;
+      size: number;
+      used: number;
+      available: number;
+      use: number;
+      read_bytes_per_sec?: number;
+      write_bytes_per_sec?: number;
     }>
   ): void {
     const payload: any = {
@@ -352,6 +363,10 @@ export class WebSocketClient extends EventEmitter {
     // Add GPU data if provided
     if (gpuData && gpuData.length > 0) {
       payload.gpus = gpuData;
+    }
+
+    if (drives) {
+      payload.drives = drives;
     }
 
     this.send(createMessage('HEARTBEAT', payload));

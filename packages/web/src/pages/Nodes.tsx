@@ -2,13 +2,13 @@ import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Activity,
+  CircleAlert,
   Clock3,
   Cpu,
   Database,
   Gauge,
-  Minus,
+  HardDrive,
   Monitor,
-  Plus,
   Search,
   Server,
   Thermometer,
@@ -39,6 +39,10 @@ function percent(value: unknown) {
   return Math.max(0, Math.min(100, numberValue(value)));
 }
 
+function formatDriveRate(value: unknown) {
+  return (numberValue(value) / 1024 / 1024).toFixed(1);
+}
+
 function cleanGpuName(name?: string) {
   if (!name) return 'Unknown GPU';
   const bracketMatch = name.match(/\[([^\]]+)\]/);
@@ -56,6 +60,30 @@ function gpuColor(vendor?: string, name?: string) {
   if (/\bamd\b|advanced micro devices|\bradeon\b|\bati\b/.test(normalized)) return '#ef4444';
   if (normalized.includes('apple')) return '#a8a8ad';
   return '#74c69d';
+}
+
+function normalizeNodePath(path: unknown) {
+  const normalized = String(path || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/\/{2,}/g, '/')
+    .toLowerCase();
+  return normalized.length > 1 ? normalized.replace(/\/$/, '') : normalized;
+}
+
+function driveForPath(drives: any[], nodePath: unknown) {
+  const mappedPath = normalizeNodePath(nodePath);
+  if (!mappedPath) return null;
+
+  return drives
+    .filter(drive => {
+      const mount = normalizeNodePath(drive.mount);
+      if (!mount) return false;
+      return mount === '/'
+        || mappedPath === mount
+        || mappedPath.startsWith(`${mount}/`);
+    })
+    .sort((left, right) => normalizeNodePath(right.mount).length - normalizeNodePath(left.mount).length)[0] || null;
 }
 
 function relativeTime(value?: string | number) {
@@ -107,6 +135,25 @@ function UsageBar({ value, color = '#74c69d' }: { value: unknown; color?: string
   );
 }
 
+function ThroughputBar({ read, write }: { read: unknown; write: unknown }) {
+  const readRate = Math.max(0, numberValue(read));
+  const writeRate = Math.max(0, numberValue(write));
+  const totalRate = readRate + writeRate;
+  const totalMegabytes = totalRate / 1024 / 1024;
+  const activity = totalMegabytes > 0
+    ? Math.min(100, Math.log10(totalMegabytes + 1) / Math.log10(1001) * 100)
+    : 0;
+  const readWidth = totalRate > 0 ? activity * readRate / totalRate : 0;
+  const writeWidth = totalRate > 0 ? activity * writeRate / totalRate : 0;
+
+  return (
+    <div className="node-track flex h-1 overflow-hidden rounded-full" aria-label="Drive I/O activity">
+      <div className="h-full bg-[#74c69d] transition-[width] duration-500" style={{ width: `${readWidth}%` }} />
+      <div className="h-full bg-[#6ca9e6] transition-[width] duration-500" style={{ width: `${writeWidth}%` }} />
+    </div>
+  );
+}
+
 function SummaryCard({
   icon: Icon,
   label,
@@ -136,60 +183,62 @@ function SummaryCard({
   );
 }
 
-function Stepper({
-  value,
-  onChange,
-  disabled,
-  label,
-}: {
-  value: number;
-  onChange: (next: number) => void;
-  disabled?: boolean;
-  label: string;
-}) {
-  return (
-    <div className="node-stepper flex items-center rounded-md border">
-      <button
-        type="button"
-        aria-label={`Decrease ${label} workers`}
-        className="grid h-8 w-8 place-items-center text-gray-400 transition-colors hover:text-white disabled:cursor-not-allowed disabled:opacity-35"
-        onClick={() => onChange(Math.max(0, value - 1))}
-        disabled={disabled || value === 0}
-      >
-        <Minus className="h-3.5 w-3.5" />
-      </button>
-      <span className="node-stepper-divider min-w-8 border-x text-center text-xs font-semibold tabular-nums text-white">
-        {value}
-      </span>
-      <button
-        type="button"
-        aria-label={`Increase ${label} workers`}
-        className="grid h-8 w-8 place-items-center text-gray-400 transition-colors hover:text-white disabled:cursor-not-allowed disabled:opacity-35"
-        onClick={() => onChange(value + 1)}
-        disabled={disabled}
-      >
-        <Plus className="h-3.5 w-3.5" />
-      </button>
-    </div>
-  );
-}
-
 function NodeCard({
   node,
-  onWorkerChange,
+  mappings,
   onDelete,
-  isUpdating,
   isDeleting,
 }: {
   node: any;
-  onWorkerChange: (node: any, limits: WorkerLimits) => void;
+  mappings: any[];
   onDelete: (node: any) => void;
-  isUpdating: boolean;
   isDeleting: boolean;
 }) {
+  if (node.rejected) {
+    return (
+      <article className="overflow-hidden rounded-xl border border-red-500/35 bg-red-500/[0.035]">
+        <header className="flex flex-col gap-3 border-b border-red-500/20 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="grid h-10 w-10 shrink-0 place-items-center rounded-lg border border-red-500/30 bg-red-500/10 text-red-300">
+              <CircleAlert className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <h2 className="truncate text-base font-semibold text-white">{node.name || 'Unnamed node'}</h2>
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-red-500/30 bg-red-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-red-300">
+                  Rejected
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-red-200/70">Connection was blocked to protect the active worker.</p>
+            </div>
+          </div>
+          <span className="text-xs text-red-200/60">Duplicate name</span>
+        </header>
+        <div className="px-5 py-4">
+          <p className="text-sm text-red-100">{node.rejection_reason || 'This node connection was rejected.'}</p>
+          <p className="mt-2 text-xs text-red-200/65">Update the node name in its configuration, then reconnect it.</p>
+        </div>
+      </article>
+    );
+  }
+
   const online = Boolean(node.connected);
-  const limits = workerLimits(node);
   const gpus = node.system_info?.gpus || [];
+  const reportedDrives = node.system_info?.drives || [];
+  const nodeMappings = mappings.filter(mapping => mapping.node_id === node.id && mapping.node_path);
+  const relevantDriveMap = new Map<string, { drive: any; reasons: string[] }>();
+  const includeDrive = (path: unknown, reason: string) => {
+    const drive = driveForPath(reportedDrives, path);
+    if (!drive) return;
+    const key = `${normalizeNodePath(drive.mount)}|${drive.filesystem || ''}`;
+    const entry = relevantDriveMap.get(key) || { drive, reasons: [] };
+    if (!entry.reasons.includes(reason)) entry.reasons.push(reason);
+    relevantDriveMap.set(key, entry);
+  };
+  nodeMappings.forEach(mapping => includeDrive(mapping.node_path, 'Mapped media'));
+  includeDrive(node.system_info?.cache_path, 'Encorr cache');
+  includeDrive(node.system_info?.temp_path, 'Encorr temp');
+  const driveEntries = Array.from(relevantDriveMap.values());
   const activeJobs = node.active_jobs || [];
   const os = [node.system_info?.os, node.system_info?.os_version].filter(Boolean).join(' ') || 'Unknown OS';
   const ramTotal = numberValue(node.system_info?.ram_total);
@@ -286,46 +335,79 @@ function NodeCard({
             </div>
           </section>
 
-          <section className={`${insetSurface} p-4`}>
+          <section className={`${insetSurface} p-3.5`}>
             <div className="flex items-center justify-between gap-3">
               <div>
-                <h3 className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-400">Worker capacity</h3>
-                <p className="mt-1 text-[11px] text-gray-600">Maximum concurrent jobs per device</p>
+                <h3 className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-400">Drive usage</h3>
+                <p className="mt-1 text-xs text-gray-500">Mapped media and Encorr working storage</p>
               </div>
-              {isUpdating && <span className="text-[11px] text-[#74c69d]">Saving…</span>}
+              <span className="text-xs text-gray-500">{driveEntries.length} detected</span>
             </div>
 
-            <div className="mt-4 space-y-2.5">
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2 text-xs text-gray-300">
-                  <Cpu className="h-3.5 w-3.5 text-gray-500" /> CPU workers
-                </div>
-                <Stepper
-                  value={limits.cpu}
-                  label="CPU"
-                  disabled={!online || isUpdating}
-                  onChange={(cpu) => onWorkerChange(node, { ...limits, cpu })}
-                />
+            {driveEntries.length > 0 ? (
+              <div className="mt-3 space-y-2">
+                {driveEntries.map(({ drive, reasons }, index: number) => {
+                  const size = numberValue(drive.size);
+                  const used = numberValue(drive.used);
+                  const available = numberValue(drive.available, Math.max(0, size - used));
+                  const usage = size > 0 ? (used / size) * 100 : numberValue(drive.use);
+                  return (
+                    <div key={`${drive.filesystem}-${drive.mount}-${index}`} className="rounded-md border border-white/[0.05] bg-black/10 px-2.5 py-2">
+                      <div className="flex items-start justify-between gap-3 text-xs">
+                        <div className="flex min-w-0 items-center gap-2 text-gray-300">
+                          <HardDrive className="h-3.5 w-3.5 shrink-0 text-gray-500" />
+                          <div className="min-w-0">
+                            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                              <span className="max-w-full truncate font-medium">{drive.mount || drive.filesystem || 'Drive'}</span>
+                              {reasons.map(reason => (
+                                <span key={reason} className="rounded border border-white/[0.08] bg-white/[0.04] px-1 py-px text-[9px] font-medium text-gray-400">
+                                  {reason}
+                                </span>
+                              ))}
+                            </div>
+                            <span className="mt-px block truncate text-[10px] text-gray-500">
+                              {[drive.filesystem, drive.type].filter(Boolean).join(' · ')}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="shrink-0 text-right tabular-nums text-gray-400">
+                          <span className="block text-[11px]">{formatBytes(used)} / {formatBytes(size)}</span>
+                          <span className="block text-[10px] text-gray-500">{formatBytes(available)} free</span>
+                          {drive.read_bytes_per_sec != null && drive.write_bytes_per_sec != null && (
+                            <span className="block text-[10px] text-gray-400">
+                              R {formatDriveRate(drive.read_bytes_per_sec)} · W {formatDriveRate(drive.write_bytes_per_sec)} MB/s
+                            </span>
+                          )}
+                          {(drive.read_bytes_per_sec == null || drive.write_bytes_per_sec == null) && (
+                            <span className="block text-[10px] text-gray-500">I/O rate unavailable</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="mt-1.5">
+                        <UsageBar value={usage} color={usage >= 90 ? '#ef4444' : usage >= 75 ? '#f59e0b' : '#74c69d'} />
+                      </div>
+                      {drive.read_bytes_per_sec != null && drive.write_bytes_per_sec != null && (
+                        <div className="mt-1 flex items-center gap-1.5">
+                          <span className="text-[8px] font-semibold uppercase tracking-wider text-gray-500">I/O</span>
+                          <div className="min-w-0 flex-1">
+                            <ThroughputBar read={drive.read_bytes_per_sec} write={drive.write_bytes_per_sec} />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
-              {gpus.map((gpu: any, index: number) => (
-                <div key={`${gpu.name}-${index}`} className="flex items-center justify-between gap-3">
-                  <div className="flex min-w-0 items-center gap-2 text-xs text-gray-300">
-                    <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: gpuColor(gpu.vendor) }} />
-                    <span className="truncate">GPU {index + 1} · {cleanGpuName(gpu.name)}</span>
-                  </div>
-                  <Stepper
-                    value={limits.gpus[index]}
-                    label={`GPU ${index + 1}`}
-                    disabled={!online || isUpdating}
-                    onChange={(value) => {
-                      const nextGpus = [...limits.gpus];
-                      nextGpus[index] = value;
-                      onWorkerChange(node, { ...limits, gpus: nextGpus });
-                    }}
-                  />
-                </div>
-              ))}
-            </div>
+            ) : (
+              <div className="mt-4 flex items-center gap-2 text-xs text-gray-500">
+                <HardDrive className="h-3.5 w-3.5" />
+                {reportedDrives.length === 0
+                  ? 'Drive information unavailable until this node reconnects'
+                  : !node.system_info?.cache_path && !node.system_info?.temp_path
+                    ? 'Reconnect this node to report its Encorr cache and temp drives'
+                    : 'No reported drive matches this node’s mapped or working paths'}
+              </div>
+            )}
           </section>
         </div>
 
@@ -333,7 +415,7 @@ function NodeCard({
           <section>
             <div className="mb-2.5 flex items-center justify-between">
               <h3 className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-400">GPU inventory</h3>
-              <span className="text-[11px] text-gray-600">{gpus.length} detected</span>
+              <span className="text-xs text-gray-500">{gpus.length} detected</span>
             </div>
             {gpus.length > 0 ? (
               <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))' }}>
@@ -353,7 +435,7 @@ function NodeCard({
                           </div>
                           <div className="min-w-0">
                             <p className="truncate text-xs font-semibold text-white">{cleanGpuName(gpu.name)}</p>
-                            <p className="mt-0.5 truncate text-[10px] uppercase tracking-wider text-gray-600">
+                            <p className="mt-0.5 truncate text-[11px] uppercase tracking-wider text-gray-500">
                               {gpu.vendor || 'Unknown vendor'}{gpu.driver_version ? ` · ${gpu.driver_version}` : ''}
                             </p>
                           </div>
@@ -405,7 +487,7 @@ function NodeCard({
                 <div>
                   <Monitor className="mx-auto h-5 w-5 text-gray-600" />
                   <p className="mt-2 text-xs text-gray-500">No GPUs detected on this node</p>
-                  <p className="mt-1 text-[11px] text-gray-700">CPU transcoding remains available</p>
+                  <p className="mt-1 text-xs text-gray-500">CPU transcoding remains available</p>
                 </div>
               </div>
             )}
@@ -422,7 +504,7 @@ function NodeCard({
                       <span className="shrink-0 tabular-nums text-gray-500">{Math.round(percent(job.progress))}%</span>
                     </div>
                     <UsageBar value={job.progress} />
-                    <div className="mt-1.5 flex items-center justify-between gap-3 text-[10px] text-gray-600">
+                    <div className="mt-1.5 flex items-center justify-between gap-3 text-[11px] text-gray-500">
                       <span className="truncate">{job.current_action || job.preset_name || 'Transcoding'}</span>
                       <span className="shrink-0">{job.fps ? `${Math.round(numberValue(job.fps))} fps` : job.gpu || 'CPU'}</span>
                     </div>
@@ -432,7 +514,7 @@ function NodeCard({
             </section>
           )}
 
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-1 text-[11px] text-gray-600">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-1 text-xs text-gray-500">
             <span>FFmpeg {node.system_info?.ffmpeg_version || 'version unavailable'}</span>
             <span>Node ID {String(node.id).slice(0, 8)}</span>
           </div>
@@ -454,40 +536,37 @@ export function Nodes() {
     staleTime: Infinity,
   });
 
+  const { data: mappings = [], isLoading: mappingsLoading } = useQuery({
+    queryKey: ['mappings'],
+    queryFn: () => api.getMappings(),
+  });
+
   const deleteMutation = useMutation({
     mutationFn: (id: string) => api.deleteNode(id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['nodes'] }),
   });
 
-  const updateNodeMutation = useMutation({
-    mutationFn: ({ nodeId, limits }: { nodeId: string; limits: WorkerLimits }) =>
-      api.updateNode(nodeId, { max_workers: limits }),
-    onMutate: async ({ nodeId, limits }) => {
-      await queryClient.cancelQueries({ queryKey: ['nodes'] });
-      const previous = queryClient.getQueryData<any[]>(['nodes']);
-      queryClient.setQueryData<any[]>(['nodes'], (current = []) =>
-        current.map((node) => (node.id === nodeId ? { ...node, max_workers: limits } : node)),
-      );
-      return { previous };
-    },
-    onError: (_error, _variables, context) => {
-      if (context?.previous) queryClient.setQueryData(['nodes'], context.previous);
-    },
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ['nodes'] }),
-  });
-
   const stats = useMemo(() => {
-    const online = nodes.filter((node: any) => node.connected);
-    const totalGpus = nodes.reduce((sum: number, node: any) => sum + (node.system_info?.gpus?.length || 0), 0);
-    const totalWorkers = nodes.reduce((sum: number, node: any) => {
+    const registeredNodes = nodes.filter((node: any) => !node.rejected);
+    const online = registeredNodes.filter((node: any) => node.connected);
+    const totalGpus = registeredNodes.reduce((sum: number, node: any) => sum + (node.system_info?.gpus?.length || 0), 0);
+    const totalWorkers = registeredNodes.reduce((sum: number, node: any) => {
       const limits = workerLimits(node);
       return sum + limits.cpu + limits.gpus.reduce((gpuSum, value) => gpuSum + value, 0);
     }, 0);
-    const activeJobs = nodes.reduce((sum: number, node: any) => sum + (node.active_jobs?.length || 0), 0);
+    const activeJobs = registeredNodes.reduce((sum: number, node: any) => sum + (node.active_jobs?.length || 0), 0);
     const averageCpu = online.length
       ? Math.round(online.reduce((sum: number, node: any) => sum + percent(node.cpu_usage), 0) / online.length)
       : 0;
-    return { online: online.length, totalGpus, totalWorkers, activeJobs, averageCpu };
+    return {
+      online: online.length,
+      total: registeredNodes.length,
+      rejected: nodes.length - registeredNodes.length,
+      totalGpus,
+      totalWorkers,
+      activeJobs,
+      averageCpu,
+    };
   }, [nodes]);
 
   const visibleNodes = useMemo(() => {
@@ -511,7 +590,7 @@ export function Nodes() {
       .sort((a: any, b: any) => Number(b.connected) - Number(a.connected) || String(a.name).localeCompare(String(b.name)));
   }, [filter, nodes, search]);
 
-  if (isLoading) {
+  if (isLoading || mappingsLoading) {
     return (
       <div className="grid h-64 place-items-center">
         <div className="text-center">
@@ -540,8 +619,10 @@ export function Nodes() {
         <SummaryCard
           icon={Server}
           label="Online nodes"
-          value={`${stats.online}/${nodes.length}`}
-          detail={nodes.length === stats.online ? 'Entire fleet available' : `${nodes.length - stats.online} unavailable`}
+          value={`${stats.online}/${stats.total}`}
+          detail={stats.rejected > 0
+            ? `${stats.rejected} rejected connection${stats.rejected === 1 ? '' : 's'}`
+            : stats.total === stats.online ? 'Entire fleet available' : `${stats.total - stats.online} unavailable`}
           color="#74c69d"
         />
         <SummaryCard
@@ -600,13 +681,12 @@ export function Nodes() {
           <NodeCard
             key={node.id}
             node={node}
-            onWorkerChange={(targetNode, limits) => updateNodeMutation.mutate({ nodeId: targetNode.id, limits })}
+            mappings={mappings}
             onDelete={(targetNode) => {
               if (window.confirm(`Remove node "${targetNode.name}"? This only unregisters it from Encorr.`)) {
                 deleteMutation.mutate(targetNode.id);
               }
             }}
-            isUpdating={updateNodeMutation.isPending && updateNodeMutation.variables?.nodeId === node.id}
             isDeleting={deleteMutation.isPending && deleteMutation.variables === node.id}
           />
         ))}

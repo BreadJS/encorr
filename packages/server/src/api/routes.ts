@@ -365,19 +365,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
   // ========================================================================
 
   fastify.get('/nodes', async (request, reply) => {
-    const nodes = db.getAllNodes();
-    const connectedNodes = wsServer.getConnectedNodeIds();
-
-    const nodesWithStatus = nodes.map(node => ({
-      ...node,
-      active_jobs: (node.active_jobs || []).filter(activeJob => {
-        const job = db.getJobById(activeJob.id);
-        return job?.status === 'assigned' || job?.status === 'processing';
-      }),
-      connected: connectedNodes.includes(node.id),
-    }));
-
-    return sendSuccess(nodesWithStatus);
+    return sendSuccess(wsServer.getNodesForClients());
   });
 
   fastify.get('/nodes/:id', async (request, reply) => {
@@ -1011,6 +999,24 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     }
   });
 
+  // Keep a completed transcode and all of its report data, but remove it from
+  // the actionable Transcoded and Storage queues until a newer transcode is
+  // produced for the same library file.
+  fastify.post('/library-files/:id/dismiss-transcode', async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const file = db.getLibraryFileById(id);
+    if (!file) {
+      reply.status(404);
+      return sendError('File not found');
+    }
+    if (!db.dismissLatestTranscodeOutput(id)) {
+      reply.status(400);
+      return sendError('No available completed transcode found for this file');
+    }
+    wsServer.scheduleWebUpdates();
+    return sendSuccess({ library_file_id: id }, 'Transcoded output dismissed');
+  });
+
   // Replace original file with transcoded version
   fastify.post('/library-files/:id/replace', async (request, reply) => {
     const { id } = request.params as { id: string };
@@ -1584,6 +1590,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       ready: 0,
       processing: 0,
       transcoded: 0,
+      dismissed: 0,
       completed: 0,
       failed: 0,
       cancelled: 0,
@@ -1608,7 +1615,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
             && typeof latestReport.output_path === 'string'
             && latestReport.output_path.trim().length > 0;
           displayStatus = latestReport.status === 'completed'
-            ? (outputIsAvailable ? 'transcoded' : 'failed')
+            ? (outputIsAvailable ? (latestReport.dismissed_at ? 'dismissed' : 'transcoded') : 'failed')
             : latestReport.status;
         } else if (file.status === 'analyzed' || file.status === 'imported') {
           displayStatus = 'ready';
@@ -1623,6 +1630,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
       else if (displayStatus === 'ready') statusCounts.ready++;
       else if (displayStatus === 'processing') statusCounts.processing++;
       else if (displayStatus === 'transcoded') statusCounts.transcoded++;
+      else if (displayStatus === 'dismissed') statusCounts.dismissed++;
       else if (displayStatus === 'completed') statusCounts.completed++;
       else if (displayStatus === 'failed') statusCounts.failed++;
       else if (displayStatus === 'cancelled') statusCounts.cancelled++;
@@ -2903,7 +2911,7 @@ export async function apiRoutes(fastify: FastifyInstance, options: RoutesOptions
     const pendingOutputs = db.getLatestTranscodeReports()
       .filter((report: any) => {
         const libraryFileId = report.library_file_id || report.file_id;
-        if (!libraryFileId || report.status !== 'completed' || report.output_available === 0 || !report.output_path) return false;
+        if (!libraryFileId || report.status !== 'completed' || report.dismissed_at || report.output_available === 0 || !report.output_path) return false;
         const reclaim = latestReclaims.get(libraryFileId);
         if (!reclaim || reclaim.status === 'failed') return true;
         const reportTime = Number(report.completed_at || report.created_at || 0);
