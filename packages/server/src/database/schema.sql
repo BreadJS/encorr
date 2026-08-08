@@ -14,6 +14,9 @@ CREATE TABLE IF NOT EXISTS nodes (
     capabilities TEXT, -- JSON: max_concurrent_jobs, supported formats
     cpu_usage INTEGER DEFAULT 0, -- CPU usage percentage (0-100)
     cpu_core_usage TEXT, -- JSON array of per-logical-core usage percentages
+    cpu_temperature REAL,
+    cpu_core_temperatures TEXT, -- JSON array of per-core temperatures when available
+    cpu_power_watts REAL,
     ram_usage INTEGER DEFAULT 0, -- RAM usage percentage (0-100)
     gpu_usage TEXT, -- JSON array of GPU usage percentages
     active_jobs TEXT, -- JSON array of active job info

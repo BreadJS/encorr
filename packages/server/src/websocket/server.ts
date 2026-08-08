@@ -620,6 +620,9 @@ export class EncorrWebSocketServer {
     // Update usage data
     const cpuUsage = payload.system_load?.cpu_percent;
     const cpuCoreUsage = payload.system_load?.core_percent;
+    const cpuTemperature = payload.system_load?.cpu_temperature;
+    const cpuCoreTemperatures = payload.system_load?.core_temperatures;
+    const cpuPowerWatts = payload.system_load?.cpu_power_watts;
     const ramUsage = payload.system_load?.memory_percent;
 
     // Get current node info for static GPU info and to preserve existing active_jobs data
@@ -717,6 +720,9 @@ export class EncorrWebSocketServer {
       // of flashing the dashboard to 0% between one-second samples.
       ...(cpuUsage !== undefined && { cpu_usage: cpuUsage }),
       ...(cpuCoreUsage !== undefined && { cpu_core_usage: cpuCoreUsage }),
+      ...(cpuTemperature !== undefined && { cpu_temperature: cpuTemperature }),
+      ...(cpuCoreTemperatures !== undefined && { cpu_core_temperatures: cpuCoreTemperatures }),
+      ...(cpuPowerWatts !== undefined && { cpu_power_watts: cpuPowerWatts }),
       ...(ramUsage !== undefined && { ram_usage: ramUsage }),
       gpu_usage: gpuUsage,
       active_jobs: activeJobsInfo,

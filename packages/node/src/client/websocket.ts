@@ -319,6 +319,9 @@ export class WebSocketClient extends EventEmitter {
     cpuPercent?: number,
     ramPercent?: number,
     corePercent?: number[],
+    cpuTemperature?: number,
+    coreTemperatures?: number[],
+    cpuPowerWatts?: number,
     gpuData?: Array<{
       utilizationGpu?: number;
       utilizationMemory?: number;
@@ -351,7 +354,14 @@ export class WebSocketClient extends EventEmitter {
     this.logger.debug(`[HEARTBEAT] Sending: status=${status}, active_jobs=${JSON.stringify(activeJobs)}, cpu=${cpuPercent}%, ram=${ramPercent}%`);
 
     // Add system_load if provided
-    if (cpuPercent !== undefined || ramPercent !== undefined || corePercent !== undefined) {
+    if (
+      cpuPercent !== undefined
+      || ramPercent !== undefined
+      || corePercent !== undefined
+      || cpuTemperature !== undefined
+      || coreTemperatures !== undefined
+      || cpuPowerWatts !== undefined
+    ) {
       payload.system_load = {};
       if (cpuPercent !== undefined) {
         payload.system_load.cpu_percent = cpuPercent;
@@ -361,6 +371,15 @@ export class WebSocketClient extends EventEmitter {
       }
       if (corePercent !== undefined) {
         payload.system_load.core_percent = corePercent;
+      }
+      if (cpuTemperature !== undefined) {
+        payload.system_load.cpu_temperature = cpuTemperature;
+      }
+      if (coreTemperatures !== undefined) {
+        payload.system_load.core_temperatures = coreTemperatures;
+      }
+      if (cpuPowerWatts !== undefined) {
+        payload.system_load.cpu_power_watts = cpuPowerWatts;
       }
     }
 

@@ -252,6 +252,16 @@ function NodeCard({
   const activeJobs = node.active_jobs || [];
   const os = [node.system_info?.os, node.system_info?.os_version].filter(Boolean).join(' ') || 'Unknown OS';
   const ramTotal = numberValue(node.system_info?.ram_total);
+  const ramUsed = ramTotal > 0 ? ramTotal * percent(node.ram_usage) / 100 : 0;
+  const cpuThreads = numberValue(node.system_info?.cpu_cores);
+  const cpuPhysicalCores = numberValue(node.system_info?.cpu_physical_cores);
+  const cpuTopology = cpuPhysicalCores > 0 && cpuThreads > 0
+    ? `${cpuPhysicalCores}C ${cpuThreads}T`
+    : cpuThreads > 0 ? `${cpuThreads}T` : 'CPU topology unavailable';
+  const hasCoreTemperatures = Array.isArray(node.cpu_core_temperatures)
+    && node.cpu_core_temperatures.length === node.cpu_core_usage?.length;
+  const hasReportedCoreTemperatures = Array.isArray(node.cpu_core_temperatures)
+    && node.cpu_core_temperatures.length > 0;
 
   return (
     <article className={`${surface} overflow-hidden ${online ? '' : 'opacity-70'}`}>
@@ -306,7 +316,11 @@ function NodeCard({
             <div>
               <div className="mb-2 flex items-center justify-between gap-4 text-xs"><span className="flex min-w-0 items-center gap-2 text-gray-300"><Cpu className="h-3.5 w-3.5 shrink-0 text-gray-500" /><span className="truncate">{node.system_info?.cpu || 'Unknown CPU'}</span></span><span className="shrink-0 font-semibold tabular-nums text-gray-200">{online ? `${Math.round(percent(node.cpu_usage))}%` : '—'}</span></div>
               <UsageBar value={online ? node.cpu_usage : 0} />
-              <p className="mt-2 text-xs text-gray-400">{node.system_info?.cpu_cores || '—'} logical cores</p>
+              <div className="mt-2 flex items-center justify-between gap-3 text-xs">
+                <span className="text-gray-400">{cpuTopology}</span>
+                <span className="flex shrink-0 items-center gap-3 text-gray-500">{node.cpu_temperature != null && <span className="flex items-center gap-1"><Thermometer className="h-3 w-3 text-[#f59e0b]" />{Math.round(numberValue(node.cpu_temperature))}°C</span>}<span className="flex items-center gap-1"><Zap className="h-3 w-3 text-[#f59e0b]" />{node.cpu_power_watts != null ? `${numberValue(node.cpu_power_watts).toFixed(0)} W` : 'Unavailable'}</span></span>
+              </div>
+              {hasReportedCoreTemperatures && !hasCoreTemperatures && <div className="mt-3 border-t border-white/[0.06] pt-3"><div className="mb-2 flex items-center justify-between text-[10px] uppercase tracking-[0.12em] text-gray-500"><span>Core temperatures</span><span>{node.cpu_core_temperatures.length} sensors</span></div><div className="grid grid-cols-4 gap-1.5 sm:grid-cols-6 xl:grid-cols-4 2xl:grid-cols-6">{node.cpu_core_temperatures.map((temperature: number, index: number) => { const value = numberValue(temperature); const color = value >= 90 ? '#ef4444' : value >= 75 ? '#f59e0b' : '#74c69d'; return <div key={index} className="node-core-tile flex items-center justify-between rounded-md px-1.5 py-1.5 text-[9px]"><span className="text-gray-500">P{index + 1}</span><span className="font-semibold tabular-nums" style={{ color }}>{Math.round(value)}°</span></div>; })}</div></div>}
               {Array.isArray(node.cpu_core_usage) && node.cpu_core_usage.length > 0 && (
                 <div className="mt-4 border-t border-white/[0.06] pt-3">
                   <div className="mb-2 flex items-center justify-between text-[10px] uppercase tracking-[0.12em] text-gray-500"><span>Per-core usage</span><span>{node.cpu_core_usage.length} logical cores</span></div>
@@ -316,7 +330,7 @@ function NodeCard({
                       const color = coreUsageColor(usage);
                       return (
                         <div key={index} className="node-core-tile rounded-md px-1.5 py-1.5" title={`Logical core ${index + 1}: ${Math.round(usage)}%`}>
-                          <div className="flex items-center justify-between gap-1 text-[9px] leading-none"><span className="text-gray-500">C{index + 1}</span><span className="font-semibold tabular-nums" style={{ color }}>{Math.round(usage)}%</span></div>
+                          <div className="flex items-center justify-between gap-1 text-[9px] leading-none"><span className="text-gray-500">C{index + 1}{hasCoreTemperatures ? ` · ${Math.round(numberValue(node.cpu_core_temperatures[index]))}°` : ''}</span><span className="font-semibold tabular-nums" style={{ color }}>{Math.round(usage)}%</span></div>
                           <div className="node-track mt-1.5 h-1 overflow-hidden rounded-full"><div className="h-full rounded-full transition-[width] duration-500" style={{ width: `${usage}%`, backgroundColor: color }} /></div>
                         </div>
                       );
@@ -328,7 +342,7 @@ function NodeCard({
             <div>
               <div className="mb-2 flex items-center justify-between text-xs"><span className="flex items-center gap-2 text-gray-300"><Database className="h-3.5 w-3.5 text-gray-500" /> Memory</span><span className="font-semibold tabular-nums text-gray-200">{online ? `${Math.round(percent(node.ram_usage))}%` : '—'}</span></div>
               <UsageBar value={online ? node.ram_usage : 0} color="#6ca9e6" />
-              <p className="mt-2 text-xs text-gray-400">{ramTotal > 0 ? `${formatBytes(ramTotal)} installed` : 'Capacity unavailable'}</p>
+              <div className="mt-2 flex justify-end text-xs text-gray-400"><span className="tabular-nums">{ramTotal > 0 ? `${formatBytes(ramUsed)} / ${formatBytes(ramTotal)}` : 'Capacity unavailable'}</span></div>
             </div>
           </div>
         </section>

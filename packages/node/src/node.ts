@@ -49,6 +49,69 @@ function resolveConfiguredPath(value: string): string {
   return resolve(expanded);
 }
 
+function readCpuPowerWatts(): number | undefined {
+  if (process.platform !== 'linux') return undefined;
+  try {
+    for (const entry of readdirSync('/sys/class/hwmon')) {
+      const basePath = join('/sys/class/hwmon', entry);
+      const namePath = join(basePath, 'name');
+      if (!existsSync(namePath)) continue;
+      const sensorName = readFileSync(namePath, 'utf8').trim().toLowerCase();
+      if (!/(?:zenpower|k10temp|coretemp|cpu)/.test(sensorName)) continue;
+      for (const filename of ['power1_average', 'power1_input']) {
+        const powerPath = join(basePath, filename);
+        if (!existsSync(powerPath)) continue;
+        const microwatts = Number(readFileSync(powerPath, 'utf8').trim());
+        if (Number.isFinite(microwatts) && microwatts > 0) return microwatts / 1_000_000;
+      }
+    }
+  } catch {
+    // CPU power sensors are optional and vary by kernel driver.
+  }
+  return undefined;
+}
+
+function readLinuxCpuTemperatures(): { main?: number; cores?: number[] } {
+  if (process.platform !== 'linux') return {};
+
+  try {
+    for (const entry of readdirSync('/sys/class/hwmon')) {
+      const basePath = join('/sys/class/hwmon', entry);
+      const namePath = join(basePath, 'name');
+      if (!existsSync(namePath)) continue;
+      const sensorName = readFileSync(namePath, 'utf8').trim().toLowerCase();
+      if (!/(?:zenpower|k10temp|coretemp|cpu_thermal|fam15h_power)/.test(sensorName)) continue;
+
+      const packageTemperatures: number[] = [];
+      const coreTemperatures: Array<{ index: number; temperature: number }> = [];
+      for (const filename of readdirSync(basePath)) {
+        const match = filename.match(/^temp(\d+)_input$/);
+        if (!match) continue;
+        const millidegrees = Number(readFileSync(join(basePath, filename), 'utf8').trim());
+        if (!Number.isFinite(millidegrees) || millidegrees <= 0) continue;
+        const temperature = millidegrees / 1000;
+        const labelPath = join(basePath, `temp${match[1]}_label`);
+        const label = existsSync(labelPath) ? readFileSync(labelPath, 'utf8').trim() : '';
+        const coreMatch = label.match(/^core\s*(\d+)/i);
+        if (coreMatch) {
+          coreTemperatures.push({ index: Number(coreMatch[1]), temperature });
+        } else {
+          packageTemperatures.push(temperature);
+        }
+      }
+
+      const cores = coreTemperatures
+        .sort((left, right) => left.index - right.index)
+        .map(core => core.temperature);
+      const main = packageTemperatures[0] ?? cores[0];
+      if (main !== undefined || cores.length > 0) return { main, cores: cores.length > 0 ? cores : undefined };
+    }
+  } catch {
+    // hwmon is optional and unavailable on some kernels and containers.
+  }
+  return {};
+}
+
 // ============================================================================
 // Node Options
 // ============================================================================
@@ -833,6 +896,7 @@ export class EncorrNode {
       os_version: osInfo.release,
       cpu: cpu.manufacturer + ' ' + cpu.brand || cpu.model || 'Unknown',
       cpu_cores: cpu.cores,
+      cpu_physical_cores: cpu.physicalCores || undefined,
       ram_total: mem.total,
       cache_path: resolveConfiguredPath(this.config.cache_dir),
       temp_path: resolveConfiguredPath(this.config.temp_dir),
@@ -899,6 +963,26 @@ export class EncorrNode {
       // mem.available is the memory actually available for applications
       const actualUsed = mem.total - mem.available;
       const ramPercent = Math.round((actualUsed / mem.total) * 100);
+
+      let cpuTemperature: number | undefined;
+      let coreTemperatures: number[] | undefined;
+      try {
+        const temperatures = await si.cpuTemperature();
+        const mainTemperature = Number(temperatures.main);
+        if (Number.isFinite(mainTemperature) && mainTemperature > 0) cpuTemperature = mainTemperature;
+        const reportedCoreTemperatures = (temperatures.cores || [])
+          .filter((temperature: unknown) => Number.isFinite(Number(temperature)) && Number(temperature) > 0)
+          .map(Number);
+        if (reportedCoreTemperatures.length > 0) coreTemperatures = reportedCoreTemperatures;
+      } catch {
+        // Temperature sensors are optional on Windows, Linux, and macOS.
+      }
+      if (cpuTemperature === undefined || !coreTemperatures?.length) {
+        const hwmonTemperatures = readLinuxCpuTemperatures();
+        cpuTemperature ??= hwmonTemperatures.main;
+        if (!coreTemperatures?.length) coreTemperatures = hwmonTemperatures.cores;
+      }
+      const cpuPowerWatts = readCpuPowerWatts();
 
       // Drive capacity changes less frequently than CPU/RAM telemetry. Refresh
       // it periodically so Nodes remains current without polling every second.
@@ -970,6 +1054,9 @@ export class EncorrNode {
         cpuPercent,
         ramPercent,
         corePercent,
+        cpuTemperature,
+        coreTemperatures,
+        cpuPowerWatts,
         gpuData,
         driveData
       );

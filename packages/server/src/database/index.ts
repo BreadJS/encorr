@@ -204,6 +204,17 @@ export class EncorrDatabase {
       this.logger.info('[MIGRATION] Adding cpu_core_usage column to nodes table');
       this.db.exec('ALTER TABLE nodes ADD COLUMN cpu_core_usage TEXT');
     }
+    const nodeTelemetryColumns: Array<[string, string]> = [
+      ['cpu_temperature', 'REAL'],
+      ['cpu_core_temperatures', 'TEXT'],
+      ['cpu_power_watts', 'REAL'],
+    ];
+    for (const [name, definition] of nodeTelemetryColumns) {
+      if (!nodeColumns.some((col) => col.name === name)) {
+        this.logger.info(`[MIGRATION] Adding ${name} column to nodes table`);
+        this.db.exec(`ALTER TABLE nodes ADD COLUMN ${name} ${definition}`);
+      }
+    }
 
     // Create job_reports table if it doesn't exist
     const tables = this.db.pragma('table_info(job_reports)') as any[];
@@ -639,6 +650,9 @@ export class EncorrDatabase {
   updateNodeUsage(id: string, usage: {
     cpu_usage?: number;
     cpu_core_usage?: number[];
+    cpu_temperature?: number;
+    cpu_core_temperatures?: number[];
+    cpu_power_watts?: number;
     ram_usage?: number;
     gpu_usage?: number[];
     active_jobs?: any[];
@@ -653,6 +667,18 @@ export class EncorrDatabase {
     if (usage.cpu_core_usage !== undefined) {
       updates.push('cpu_core_usage = ?');
       values.push(JSON.stringify(usage.cpu_core_usage));
+    }
+    if (usage.cpu_temperature !== undefined) {
+      updates.push('cpu_temperature = ?');
+      values.push(usage.cpu_temperature);
+    }
+    if (usage.cpu_core_temperatures !== undefined) {
+      updates.push('cpu_core_temperatures = ?');
+      values.push(JSON.stringify(usage.cpu_core_temperatures));
+    }
+    if (usage.cpu_power_watts !== undefined) {
+      updates.push('cpu_power_watts = ?');
+      values.push(usage.cpu_power_watts);
     }
     if (usage.ram_usage !== undefined) {
       updates.push('ram_usage = ?');
@@ -715,6 +741,9 @@ export class EncorrDatabase {
       capabilities: row.capabilities ? JSON.parse(row.capabilities) : undefined,
       cpu_usage: row.cpu_usage || 0,
       cpu_core_usage: row.cpu_core_usage ? JSON.parse(row.cpu_core_usage) : undefined,
+      cpu_temperature: row.cpu_temperature ?? undefined,
+      cpu_core_temperatures: row.cpu_core_temperatures ? JSON.parse(row.cpu_core_temperatures) : undefined,
+      cpu_power_watts: row.cpu_power_watts ?? undefined,
       ram_usage: row.ram_usage || 0,
       gpu_usage: row.gpu_usage ? JSON.parse(row.gpu_usage) : undefined,
       active_jobs: row.active_jobs ? JSON.parse(row.active_jobs) : undefined,

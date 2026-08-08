@@ -76,6 +76,7 @@ export const RegisterPayloadSchema = z.object({
     os_version: z.string(),
     cpu: z.string(),
     cpu_cores: z.number().int().positive(),
+    cpu_physical_cores: z.number().int().positive().optional(),
     ram_total: z.number().int().positive(),
     cache_path: z.string().optional(),
     temp_path: z.string().optional(),
@@ -163,6 +164,9 @@ export const HeartbeatPayloadSchema = z.object({
   system_load: z.object({
     cpu_percent: z.number().min(0).max(100),
     core_percent: z.array(z.number().min(0).max(100)).optional(),
+    cpu_temperature: z.number().optional(),
+    core_temperatures: z.array(z.number()).optional(),
+    cpu_power_watts: z.number().nonnegative().optional(),
     memory_percent: z.number().min(0).max(100),
   }).optional(),
   gpus: z.array(z.object({

@@ -13,6 +13,9 @@ export interface Node {
   capabilities?: NodeCapabilities;
   cpu_usage?: number;
   cpu_core_usage?: number[];
+  cpu_temperature?: number;
+  cpu_core_temperatures?: number[];
+  cpu_power_watts?: number;
   ram_usage?: number;
   gpu_usage?: number[];
   active_jobs?: ActiveJobInfo[];
@@ -46,6 +49,7 @@ export interface SystemInfo {
   os_version: string;
   cpu: string;
   cpu_cores: number;
+  cpu_physical_cores?: number;
   ram_total: number;
   cache_path?: string;
   temp_path?: string;
