@@ -536,6 +536,8 @@ export class EncorrWebSocketServer {
       this.connectionsByNodeId.set(node.id, connection);
       this.rejectedNodeRegistrations.delete(normalizedName);
 
+      this.restoreJobsAfterReconnect(node, payload.active_jobs);
+
       // Send ACK
       this.sendMessage(ws, createAckMessage(message.id!, true, node.id));
 
@@ -544,6 +546,7 @@ export class EncorrWebSocketServer {
 
       // Broadcast update to web clients
       this.broadcastNodesUpdate();
+      this.broadcastJobsUpdate();
 
       // A server restart or temporary disconnect may leave valid jobs queued.
       // Resume dispatch as soon as a worker has registered again.
@@ -560,6 +563,43 @@ export class EncorrWebSocketServer {
       this.logger.error('Error handling node registration:', error);
       this.sendMessage(ws, createAckMessage(message.id!, false, 'Registration failed'));
     }
+  }
+
+  private restoreJobsAfterReconnect(node: any, activeJobs?: RegisterPayload['active_jobs']): void {
+    // Older node builds do not send a snapshot. Preserve their existing
+    // server-side state until the first heartbeat arrives instead of clearing
+    // active work on a mixed-version fleet.
+    if (!activeJobs) return;
+
+    const restoredJobs: any[] = [];
+    for (const snapshot of activeJobs) {
+      const job = this.db.getJobById(snapshot.job_id);
+      if (!job || job.node_id !== node.id || (job.status !== 'assigned' && job.status !== 'processing')) {
+        this.logger.warn(`[RECONNECT] Ignoring job ${snapshot.job_id} reported by ${node.name}; it is not an active job assigned to this node`);
+        continue;
+      }
+
+      this.db.setJobProcessing(job.id);
+      this.db.updateJobProgress(job.id, snapshot.progress, snapshot.current_action || 'Restored after reconnect');
+
+      const file = this.db.getFileById(job.file_id);
+      const preset = this.db.getPresetById(job.preset_id);
+      restoredJobs.push({
+        id: job.id,
+        file_name: file?.relative_path || job.file_id,
+        preset_name: preset?.name || 'Unknown preset',
+        status: 'processing',
+        progress: snapshot.progress,
+        current_action: snapshot.current_action || 'Restored after reconnect',
+        fps: snapshot.fps,
+        eta: snapshot.eta !== undefined ? this.formatDuration(snapshot.eta) : undefined,
+        ratio: snapshot.ratio,
+        gpu: snapshot.gpu ?? null,
+      });
+    }
+
+    this.db.updateNodeUsage(node.id, { active_jobs: restoredJobs });
+    this.logger.info(`[RECONNECT] Node ${node.name} restored ${restoredJobs.length}/${activeJobs.length} active job${activeJobs.length === 1 ? '' : 's'}`);
   }
 
   private handleHeartbeat(ws: WebSocket, message: NodeToServerMessage): void {

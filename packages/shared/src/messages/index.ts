@@ -128,6 +128,17 @@ export const RegisterPayloadSchema = z.object({
       clockMemory: z.number().optional(),
     })).optional(),
   }),
+  // Sent on every registration, including reconnects, so the server can
+  // immediately restore work that continued while the socket was unavailable.
+  active_jobs: z.array(z.object({
+    job_id: z.string(),
+    progress: z.number().min(0).max(100),
+    fps: z.number().optional(),
+    eta: z.number().optional(),
+    ratio: z.string().optional(),
+    current_action: z.string().optional(),
+    gpu: z.number().optional(),
+  })).optional(),
   capabilities: z.object({
     max_concurrent_jobs: z.number().int().min(1).default(1),
     supported_containers: z.array(z.string()).default(['mp4', 'mkv']),

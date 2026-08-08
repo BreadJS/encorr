@@ -189,6 +189,7 @@ export class EncorrNode {
     const payload = {
       name: this.config.name,
       system_info: this.systemInfo,
+      active_jobs: this.getActiveJobSnapshots(),
       capabilities: {
         max_concurrent_jobs: 1, // Server will control actual concurrency
         supported_containers: ['mp4', 'mkv', 'avi'],
@@ -715,16 +716,7 @@ export class EncorrNode {
   // ========================================================================
 
   private sendHeartbeat(): void {
-    const activeJobsArray = Array.from(this.activeJobs.values()).map(job => ({
-      job_id: job.id,
-      file_name: job.sourcePath ? job.sourcePath.split(/[/\\]/).pop() || 'Unknown' : 'Unknown',
-      progress: job.progress,
-      current_action: job.currentAction,
-      fps: job.fps,
-      ratio: job.ratio,
-      eta: job.eta,
-      gpu: job.gpu,
-    }));
+    const activeJobsArray = this.getActiveJobSnapshots();
 
     const status = this.activeJobs.size > 0 ? 'busy' : 'idle';
 
@@ -737,6 +729,18 @@ export class EncorrNode {
     }
 
     this.wsClient.sendHeartbeat(status, activeJobsArray);
+  }
+
+  private getActiveJobSnapshots() {
+    return Array.from(this.activeJobs.values()).map(job => ({
+      job_id: job.id,
+      progress: job.progress,
+      current_action: job.currentAction,
+      fps: job.fps,
+      ratio: job.ratio,
+      eta: job.eta,
+      gpu: job.gpu,
+    }));
   }
 
   private startPeriodicUpdates(): void {
@@ -946,15 +950,7 @@ export class EncorrNode {
       // Include ALL job data (fps, eta, etc.) to preserve rich progress information
       this.wsClient.sendHeartbeat(
         this.activeJobs.size > 0 ? 'busy' : 'idle',
-        Array.from(this.activeJobs.values()).map(job => ({
-          job_id: job.id,
-          progress: job.progress,
-          current_action: job.currentAction,
-          fps: job.fps,
-          eta: job.eta,
-          ratio: job.ratio,
-          gpu: job.gpu,
-        })),
+        this.getActiveJobSnapshots(),
         cpuPercent,
         ramPercent,
         gpuData,

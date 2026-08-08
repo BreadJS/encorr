@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  AlertCircle,
   Activity,
-  CircleAlert,
   Clock3,
   Cpu,
   Database,
@@ -200,7 +200,7 @@ function NodeCard({
         <header className="flex flex-col gap-3 border-b border-red-500/20 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex min-w-0 items-center gap-3">
             <div className="grid h-10 w-10 shrink-0 place-items-center rounded-lg border border-red-500/30 bg-red-500/10 text-red-300">
-              <CircleAlert className="h-5 w-5" />
+              <AlertCircle className="h-5 w-5" />
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-2">
@@ -290,236 +290,41 @@ function NodeCard({
         </button>
       </header>
 
-      <div className="grid gap-4 p-5 xl:grid-cols-2">
-        <div className="space-y-4">
-          <section className={`${insetSurface} p-4`}>
-            <div className="mb-4 flex items-center justify-between">
-              <h3 className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-400">System load</h3>
-              {activeJobs.length > 0 && (
-                <span className="inline-flex items-center gap-1.5 text-xs font-medium text-[#8bd5ad]">
-                  <Activity className="h-3.5 w-3.5" />
-                  {activeJobs.length} active {activeJobs.length === 1 ? 'job' : 'jobs'}
-                </span>
-              )}
+      <div className="grid lg:grid-cols-[minmax(0,0.95fr)_minmax(0,1.3fr)_minmax(320px,1.05fr)]">
+        <section className="min-w-0 p-5 lg:border-r node-divider">
+          <div className="space-y-7">
+            <div>
+              <div className="mb-2 flex items-center justify-between gap-4 text-xs"><span className="flex min-w-0 items-center gap-2 text-gray-300"><Cpu className="h-3.5 w-3.5 shrink-0 text-gray-500" /><span className="truncate">{node.system_info?.cpu || 'Unknown CPU'}</span></span><span className="shrink-0 font-semibold tabular-nums text-gray-200">{online ? `${Math.round(percent(node.cpu_usage))}%` : '—'}</span></div>
+              <UsageBar value={online ? node.cpu_usage : 0} />
+              <p className="mt-2 text-xs text-gray-400">{node.system_info?.cpu_cores || '—'} logical cores</p>
             </div>
-
-            <div className="space-y-4">
-              <div>
-                <div className="mb-2 flex items-center justify-between gap-4 text-xs">
-                  <span className="flex min-w-0 items-center gap-2 text-gray-400">
-                    <Cpu className="h-3.5 w-3.5 shrink-0" />
-                    <span className="truncate">{node.system_info?.cpu || 'Unknown CPU'}</span>
-                  </span>
-                  <span className="shrink-0 font-medium tabular-nums text-gray-300">
-                    {online ? `${Math.round(percent(node.cpu_usage))}%` : '—'}
-                  </span>
-                </div>
-                <UsageBar value={online ? node.cpu_usage : 0} />
-                <p className="mt-1.5 text-[11px] text-gray-400">{node.system_info?.cpu_cores || '—'} logical cores</p>
-              </div>
-
-              <div>
-                <div className="mb-2 flex items-center justify-between text-xs">
-                  <span className="flex items-center gap-2 text-gray-400">
-                    <Database className="h-3.5 w-3.5" /> Memory
-                  </span>
-                  <span className="font-medium tabular-nums text-gray-300">
-                    {online ? `${Math.round(percent(node.ram_usage))}%` : '—'}
-                  </span>
-                </div>
-                <UsageBar value={online ? node.ram_usage : 0} color="#6ca9e6" />
-                <p className="mt-1.5 text-[11px] text-gray-400">
-                  {ramTotal > 0 ? `${formatBytes(ramTotal)} installed` : 'Capacity unavailable'}
-                </p>
-              </div>
+            <div>
+              <div className="mb-2 flex items-center justify-between text-xs"><span className="flex items-center gap-2 text-gray-300"><Database className="h-3.5 w-3.5 text-gray-500" /> Memory</span><span className="font-semibold tabular-nums text-gray-200">{online ? `${Math.round(percent(node.ram_usage))}%` : '—'}</span></div>
+              <UsageBar value={online ? node.ram_usage : 0} color="#6ca9e6" />
+              <p className="mt-2 text-xs text-gray-400">{ramTotal > 0 ? `${formatBytes(ramTotal)} installed` : 'Capacity unavailable'}</p>
             </div>
-          </section>
-
-          <section className={`${insetSurface} p-3.5`}>
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <h3 className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-400">Drive usage</h3>
-                <p className="mt-1 text-xs text-gray-500">Mapped media and Encorr working storage</p>
-              </div>
-              <span className="text-xs text-gray-500">{driveEntries.length} detected</span>
-            </div>
-
-            {driveEntries.length > 0 ? (
-              <div className="mt-3 space-y-2">
-                {driveEntries.map(({ drive, reasons }, index: number) => {
-                  const size = numberValue(drive.size);
-                  const used = numberValue(drive.used);
-                  const available = numberValue(drive.available, Math.max(0, size - used));
-                  const usage = size > 0 ? (used / size) * 100 : numberValue(drive.use);
-                  return (
-                    <div key={`${drive.filesystem}-${drive.mount}-${index}`} className="rounded-md border border-white/[0.05] bg-black/10 px-2.5 py-2">
-                      <div className="flex items-start justify-between gap-3 text-xs">
-                        <div className="flex min-w-0 items-center gap-2 text-gray-300">
-                          <HardDrive className="h-3.5 w-3.5 shrink-0 text-gray-500" />
-                          <div className="min-w-0">
-                            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-                              <span className="max-w-full truncate font-medium">{drive.mount || drive.filesystem || 'Drive'}</span>
-                              {reasons.map(reason => (
-                                <span key={reason} className="rounded border border-white/[0.08] bg-white/[0.04] px-1 py-px text-[9px] font-medium text-gray-400">
-                                  {reason}
-                                </span>
-                              ))}
-                            </div>
-                            <span className="mt-px block truncate text-[10px] text-gray-500">
-                              {[drive.filesystem, drive.type].filter(Boolean).join(' · ')}
-                            </span>
-                          </div>
-                        </div>
-                        <div className="shrink-0 text-right tabular-nums text-gray-400">
-                          <span className="block text-[11px]">{formatBytes(used)} / {formatBytes(size)}</span>
-                          <span className="block text-[10px] text-gray-500">{formatBytes(available)} free</span>
-                          {drive.read_bytes_per_sec != null && drive.write_bytes_per_sec != null && (
-                            <span className="block text-[10px] text-gray-400">
-                              R {formatDriveRate(drive.read_bytes_per_sec)} · W {formatDriveRate(drive.write_bytes_per_sec)} MB/s
-                            </span>
-                          )}
-                          {(drive.read_bytes_per_sec == null || drive.write_bytes_per_sec == null) && (
-                            <span className="block text-[10px] text-gray-500">I/O rate unavailable</span>
-                          )}
-                        </div>
-                      </div>
-                      <div className="mt-1.5">
-                        <UsageBar value={usage} color={usage >= 90 ? '#ef4444' : usage >= 75 ? '#f59e0b' : '#74c69d'} />
-                      </div>
-                      {drive.read_bytes_per_sec != null && drive.write_bytes_per_sec != null && (
-                        <div className="mt-1 flex items-center gap-1.5">
-                          <span className="text-[8px] font-semibold uppercase tracking-wider text-gray-500">I/O</span>
-                          <div className="min-w-0 flex-1">
-                            <ThroughputBar read={drive.read_bytes_per_sec} write={drive.write_bytes_per_sec} />
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="mt-4 flex items-center gap-2 text-xs text-gray-500">
-                <HardDrive className="h-3.5 w-3.5" />
-                {reportedDrives.length === 0
-                  ? 'Drive information unavailable until this node reconnects'
-                  : !node.system_info?.cache_path && !node.system_info?.temp_path
-                    ? 'Reconnect this node to report its Encorr cache and temp drives'
-                    : 'No reported drive matches this node’s mapped or working paths'}
-              </div>
-            )}
-          </section>
-        </div>
-
-        <div className="space-y-4">
-          <section>
-            <div className="mb-2.5 flex items-center justify-between">
-              <h3 className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-400">GPU inventory</h3>
-              <span className="text-xs text-gray-500">{gpus.length} detected</span>
-            </div>
-            {gpus.length > 0 ? (
-              <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))' }}>
-                {gpus.map((gpu: any, index: number) => {
-                    const color = gpuColor(gpu.vendor, gpu.name);
-                  const memoryTotal = numberValue(gpu.memory);
-                  const memoryUsed = numberValue(gpu.memoryUsed);
-                  const memoryUsage = memoryTotal > 0
-                    ? (memoryUsed / memoryTotal) * 100
-                    : percent(gpu.utilizationMemory);
-                  return (
-                    <div key={`${gpu.name}-${index}`} className={`${insetSurface} p-4`}>
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="flex min-w-0 items-center gap-2.5">
-                          <div className="node-icon-tile grid h-8 w-8 shrink-0 place-items-center rounded-md" style={{ color }}>
-                            <Monitor className="h-4 w-4" />
-                          </div>
-                          <div className="min-w-0">
-                            <p className="truncate text-xs font-semibold text-white">{cleanGpuName(gpu.name)}</p>
-                            <p className="mt-0.5 truncate text-[11px] uppercase tracking-wider text-gray-500">
-                              {gpu.vendor || 'Unknown vendor'}{gpu.driver_version ? ` · ${gpu.driver_version}` : ''}
-                            </p>
-                          </div>
-                        </div>
-                        <span className="text-xs font-semibold tabular-nums" style={{ color }}>
-                          {online ? `${Math.round(percent(gpu.utilizationGpu))}%` : '—'}
-                        </span>
-                      </div>
-
-                      <div className="mt-4 space-y-3">
-                        <div>
-                          <div className="mb-1.5 flex justify-between text-[11px]">
-                            <span className="text-gray-500">GPU utilization</span>
-                            <span className="tabular-nums text-gray-400">{Math.round(percent(gpu.utilizationGpu))}%</span>
-                          </div>
-                          <UsageBar value={gpu.utilizationGpu} color={color} />
-                        </div>
-                        <div>
-                          <div className="mb-1.5 flex justify-between gap-2 text-[11px]">
-                            <span className="text-gray-500">{gpu.memory_type === 'shared' ? 'Shared GPU memory' : 'VRAM'}</span>
-                            <span className="truncate tabular-nums text-gray-400">
-                              {gpu.memory_type === 'shared' && memoryUsed <= 0 && memoryTotal > 0
-                                ? `${formatBytes(memoryTotal)} available`
-                                : memoryTotal > 0
-                                ? `${formatBytes(memoryUsed)} / ${formatBytes(memoryTotal)}`
-                                : 'Unavailable'}
-                            </span>
-                          </div>
-                          <UsageBar value={memoryUsage} color={gpu.memory_type === 'shared' ? color : '#8e7cc3'} />
-                        </div>
-                      </div>
-
-                      <div className="node-divider mt-4 grid grid-cols-2 gap-2 border-t pt-3 text-[11px]">
-                        <span className="flex items-center gap-1.5 text-gray-500">
-                          <Thermometer className="h-3 w-3" />
-                          {gpu.temperatureGpu != null ? `${Math.round(numberValue(gpu.temperatureGpu))}°C` : 'No temp'}
-                        </span>
-                        <span className="flex items-center justify-end gap-1.5 text-gray-500">
-                          <Zap className="h-3 w-3" />
-                          {gpu.powerDraw != null ? `${numberValue(gpu.powerDraw).toFixed(0)} W` : 'No power data'}
-                        </span>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className={`${insetSurface} grid min-h-32 place-items-center px-4 text-center`}>
-                <div>
-                  <Monitor className="mx-auto h-5 w-5 text-gray-600" />
-                  <p className="mt-2 text-xs text-gray-500">No GPUs detected on this node</p>
-                  <p className="mt-1 text-xs text-gray-500">CPU transcoding remains available</p>
-                </div>
-              </div>
-            )}
-          </section>
-
-          {activeJobs.length > 0 && (
-            <section className={`${insetSurface} p-4`}>
-              <h3 className="mb-3 text-xs font-semibold uppercase tracking-[0.14em] text-gray-400">Active work</h3>
-              <div className="space-y-3">
-                {activeJobs.slice(0, 3).map((job: any) => (
-                  <div key={job.id}>
-                    <div className="mb-1.5 flex items-center justify-between gap-3 text-xs">
-                      <span className="truncate font-medium text-gray-300">{job.file_name || job.name || job.id}</span>
-                      <span className="shrink-0 tabular-nums text-gray-500">{Math.round(percent(job.progress))}%</span>
-                    </div>
-                    <UsageBar value={job.progress} />
-                    <div className="mt-1.5 flex items-center justify-between gap-3 text-[11px] text-gray-500">
-                      <span className="truncate">{job.current_action || job.preset_name || 'Transcoding'}</span>
-                      <span className="shrink-0">{job.fps ? `${Math.round(numberValue(job.fps))} fps` : job.gpu || 'CPU'}</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </section>
-          )}
-
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-1 text-xs text-gray-500">
-            <span>FFmpeg {node.system_info?.ffmpeg_version || 'version unavailable'}</span>
-            <span>Node ID {String(node.id).slice(0, 8)}</span>
           </div>
-        </div>
+        </section>
+
+        <section className="min-w-0 border-t p-5 lg:border-t-0 lg:border-r node-divider">
+          <div className="mb-4 flex items-center justify-between gap-3"><h3 className="text-xs font-semibold uppercase tracking-[0.14em] text-gray-400">Drive usage</h3><span className="text-xs text-gray-500">{driveEntries.length} detected</span></div>
+          {driveEntries.length > 0 ? <div className="space-y-4">{driveEntries.map(({ drive, reasons }, index: number) => {
+            const size = numberValue(drive.size); const used = numberValue(drive.used); const available = numberValue(drive.available, Math.max(0, size - used)); const usage = size > 0 ? (used / size) * 100 : numberValue(drive.use); const hasRate = drive.read_bytes_per_sec != null && drive.write_bytes_per_sec != null;
+            return <div key={`${drive.filesystem}-${drive.mount}-${index}`}><div className="flex items-start justify-between gap-3 text-xs"><div className="flex min-w-0 items-start gap-2 text-gray-300"><HardDrive className="mt-0.5 h-3.5 w-3.5 shrink-0 text-gray-500" /><div className="min-w-0"><div className="flex flex-wrap items-center gap-1.5"><span className="truncate font-semibold">{drive.mount || drive.filesystem || 'Drive'}</span>{reasons.map(reason => <span key={reason} className="rounded border border-white/[0.08] bg-white/[0.04] px-1.5 py-px text-[9px] text-gray-400">{reason}</span>)}</div><p className="mt-1 truncate text-[11px] text-gray-500">{[drive.filesystem, drive.type].filter(Boolean).join(' · ')}</p></div></div><div className="shrink-0 text-right tabular-nums"><p className="text-gray-300">{formatBytes(used)} / {formatBytes(size)}</p><p className="mt-1 text-[11px] text-gray-500">{formatBytes(available)} free</p></div></div><div className="mt-2"><UsageBar value={usage} color={usage >= 90 ? '#ef4444' : usage >= 75 ? '#f59e0b' : '#74c69d'} /></div><div className="mt-2 flex items-center gap-2 text-[10px]"><span className="text-gray-500">I/O</span><div className="min-w-0 flex-1"><ThroughputBar read={drive.read_bytes_per_sec} write={drive.write_bytes_per_sec} /></div><span className="shrink-0 tabular-nums text-gray-400">{hasRate ? `R:${formatDriveRate(drive.read_bytes_per_sec)} · W:${formatDriveRate(drive.write_bytes_per_sec)} MB/s` : 'Unavailable'}</span></div></div>;
+          })}</div> : <div className="flex min-h-28 items-center gap-2 text-xs text-gray-500"><HardDrive className="h-3.5 w-3.5" />{reportedDrives.length === 0 ? 'Drive information unavailable until this node reconnects' : 'No reported drive matches this node’s mapped or working paths'}</div>}
+        </section>
+
+        <section className="min-w-0 border-t p-4 lg:border-t-0 node-divider">
+          {gpus.length > 0 ? <div className="space-y-2.5">{gpus.map((gpu: any, index: number) => {
+            const color = gpuColor(gpu.vendor, gpu.name); const memoryTotal = numberValue(gpu.memory); const memoryUsed = numberValue(gpu.memoryUsed); const memoryUsage = memoryTotal > 0 ? (memoryUsed / memoryTotal) * 100 : percent(gpu.utilizationMemory);
+            return <div key={`${gpu.name}-${index}`} className={`${insetSurface} p-3.5`}><div className="flex items-start justify-between gap-3"><div className="flex min-w-0 items-center gap-2.5"><div className="node-icon-tile grid h-8 w-8 shrink-0 place-items-center rounded-md" style={{ color }}><Monitor className="h-4 w-4" /></div><div className="min-w-0"><p className="truncate text-xs font-semibold text-white">{cleanGpuName(gpu.name)}</p><p className="mt-0.5 truncate text-[10px] uppercase tracking-wider text-gray-500">{gpu.vendor || 'Unknown vendor'}{gpu.driver_version ? ` · ${gpu.driver_version}` : ''}</p></div></div><span className="text-xs font-semibold tabular-nums" style={{ color }}>{online ? `${Math.round(percent(gpu.utilizationGpu))}%` : '—'}</span></div><div className="mt-3 space-y-2.5"><div><div className="mb-1 flex justify-between text-[10px]"><span className="text-gray-500">GPU utilization</span><span className="text-gray-400">{Math.round(percent(gpu.utilizationGpu))}%</span></div><UsageBar value={gpu.utilizationGpu} color={color} /></div><div><div className="mb-1 flex justify-between gap-2 text-[10px]"><span className="text-gray-500">{gpu.memory_type === 'shared' ? 'Shared GPU memory' : 'VRAM'}</span><span className="truncate tabular-nums text-gray-400">{gpu.memory_type === 'shared' && memoryUsed <= 0 && memoryTotal > 0 ? `${formatBytes(memoryTotal)} available` : memoryTotal > 0 ? `${formatBytes(memoryUsed)} / ${formatBytes(memoryTotal)}` : 'Unavailable'}</span></div><UsageBar value={memoryUsage} color={gpu.memory_type === 'shared' ? color : '#8e7cc3'} /></div></div><div className="node-divider mt-3 flex items-center justify-between border-t pt-2.5 text-[11px] text-gray-400"><span className="flex items-center gap-1.5"><Thermometer className="h-3 w-3" />{gpu.temperatureGpu != null ? `${Math.round(numberValue(gpu.temperatureGpu))}°C` : 'No temp'}</span><span className="flex items-center gap-1.5"><Zap className="h-3 w-3" />{gpu.powerDraw != null ? `${numberValue(gpu.powerDraw).toFixed(0)} W` : 'No power data'}</span></div></div>;
+          })}</div> : <div className="grid min-h-32 place-items-center text-center"><div><Monitor className="mx-auto h-5 w-5 text-gray-600" /><p className="mt-2 text-xs text-gray-500">No GPUs detected on this node</p></div></div>}
+        </section>
       </div>
+
+      {activeJobs.length > 0 && <section className="node-divider border-t px-5 py-3.5"><div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.14em] text-gray-400"><Activity className="h-3.5 w-3.5 text-[#74c69d]" /> Active work · {activeJobs.length}</div><div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{activeJobs.slice(0, 3).map((job: any) => <div key={job.id} className="min-w-0"><div className="mb-1 flex items-center justify-between gap-3 text-xs"><span className="truncate text-gray-300">{job.file_name || job.name || job.id}</span><span className="shrink-0 tabular-nums text-gray-400">{Math.round(percent(job.progress))}%</span></div><UsageBar value={job.progress} /></div>)}</div></section>}
+
+      <footer className="node-divider flex flex-wrap items-center gap-x-5 gap-y-1 border-t px-5 py-3 text-xs text-gray-500"><span>FFmpeg {node.system_info?.ffmpeg_version || 'version unavailable'}</span><span>Node ID {String(node.id).slice(0, 8)}</span></footer>
     </article>
   );
 }
